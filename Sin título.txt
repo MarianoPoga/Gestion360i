@@ -1,0 +1,3523 @@
+Codigo.gs
+
+const ssDataID = "189s9jT0n4grMcY4_7ih6O4lRFW3iG9AR2S6qfmuVD5I";
+const ssData = SpreadsheetApp.openById(ssDataID);
+const ss = SpreadsheetApp.getActiveSpreadsheet(); //Movimientos
+
+function CrearMenu(){
+  // Generar el Menu en la hoja  
+  SpreadsheetApp.getUi()
+      .createMenu('FUNCIONES')
+      .addSubMenu(SpreadsheetApp.getUi().createMenu('CARGAR')
+          .addItem('Venta Mañana', 'cVentaM')
+          .addItem('Venta Tarde', 'cVentaT')
+          //.addItem('Venta Noche', 'cVentaN')
+          .addItem('Venta Delivery', 'cVentaD')
+          .addItem('CERRAR COMPRAS', 'cCompra'))
+      .addSeparator()
+      .addSubMenu(SpreadsheetApp.getUi().createMenu('BORRAR')
+          .addItem('Compra', 'bCompra'))
+      .addSeparator()
+      .addSubMenu(SpreadsheetApp.getUi().createMenu('ADELANTOS')
+          .addItem('Cargar Adelantos', 'rAdelantos'))
+    
+      .addToUi();
+}
+// -----------CARGAR--------------------------
+function cVentaM(){
+  cargarVenta("Mañana");
+}
+function cVentaT(){
+  cargarVenta("Tarde");
+}
+function cVentaN(){
+  cargarVenta("Noche");
+}
+function cVentaD(){
+  cargarVenta("Delivery");
+}
+function cEgresos(){
+  cargarEgresos();
+}
+function cCompra(){
+  cargarCompra();
+}
+function cGasto(){
+ cargarGasto();
+}
+function cCtaCte(){
+  agregarLineaDelivery();
+}
+function cServicioImpuesto(){
+  cargarSeI();
+}
+function cInversMantenim(){
+  cargarIyM();
+}
+// -----------BORRAR--------------------------
+
+function bCompra(){
+  borrarCompra();
+}
+// -----------ADELANTOS-----------------------
+
+function rAdelantos(){
+  cargarAdelanto();
+}
+
+//-------------------------------------------
+
+
+
+
+
+function onEditCompras(e) {
+  // 1. Obtener la hoja y el rango que se acaba de editar
+  var hojaActual = e.source.getActiveSheet();
+  var rango = e.range;
+  var fila = rango.getRow();
+  var columna = rango.getColumn();
+
+  // 2. VERIFICACIONES
+  if (hojaActual.getName() !== "Compras" || columna !== 1 || fila < 9 || fila > 25) {
+    return; 
+  }
+
+  // 3. Obtener el valor ingresado en A
+  var valorBuscado = rango.getValue();
+
+  // Si se borró el valor, limpiamos columnas B, D y F
+  if (valorBuscado === "") {
+    hojaActual.getRange(fila, 2).clearContent(); // Borra B
+    hojaActual.getRange(fila, 4).clearContent(); // Borra D
+    hojaActual.getRange(fila, 6).clearContent(); // Borra F
+    return;
+  }
+
+  // 4. Buscar en la hoja "Proveedores"
+  // (Le cambié el nombre a la variable para no confundirnos)
+  var hojaProveedores = e.source.getSheetByName("Proveedores");
+  if (!hojaProveedores) return; 
+
+  var dataProv = hojaProveedores.getDataRange().getValues();
+  var encontrado = false;
+
+  // 5. Bucle Principal (Busca en Proveedores)
+  for (var i = 0; i < dataProv.length; i++) {
+    // dataProv[i][0] es Columna A de Proveedores
+    if (dataProv[i][0] == valorBuscado) {
+      
+      var valorParaB = dataProv[i][1]; // Columna B (Nombre Proveedor)
+      var valorParaC = dataProv[i][2]; // Columna C (Para inicial)
+      var valorCrudoD = dataProv[i][3]; // Columna D (El dato intermedio para buscar diminutivo)
+      
+      // --- Lógica Inicial Mayúscula (Col F) ---
+      var inicialC = "";
+      if (valorParaC) {
+        inicialC = valorParaC.toString().substring(0, 1).toUpperCase();
+      }
+
+      // --- Lógica Diminutivo (Col D) - SEGUNDA BÚSQUEDA ---
+      var valorFinalD = ""; // Empezamos vacío
+      
+      if (valorCrudoD) {
+        var hojaDatosRef = e.source.getSheetByName("Datos"); // Hoja donde están los diminutivos
+        if (hojaDatosRef) {
+          var dataRef = hojaDatosRef.getDataRange().getValues();
+          
+          // Bucle Secundario: Busca valorCrudoD en Col A de "Datos"
+          for (var j = 0; j < dataRef.length; j++) {
+            if (dataRef[j][0] == valorCrudoD) {
+              valorFinalD = dataRef[j][1]; // Toma el valor de Col B (Diminutivo)
+              break; // Ya lo encontramos, salimos del bucle pequeño
+            }
+          }
+        }
+      }
+      // Si no encontró nada en "Datos", valorFinalD seguirá vacío o podés hacer que sea igual a valorCrudoD
+      // if (valorFinalD === "") valorFinalD = valorCrudoD; // Descomenta esta linea si quieres que ponga el original si no encuentra diminutivo
+
+      // 6. Escribir los resultados en "Compras"
+      hojaActual.getRange(fila, 2).setValue(valorParaB);   // Columna B
+      hojaActual.getRange(fila, 4).setValue(valorFinalD);  // Columna D (El diminutivo)
+      hojaActual.getRange(fila, 6).setValue(inicialC);     // Columna F
+      
+      encontrado = true;
+      break; 
+    }
+  }
+}
+
+
+Funciones.gs
+function formatearStringComoDinero(valorString) {
+  // 1. Intenta convertir la cadena a un número.
+  var valorNumerico = parseFloat(valorString);
+
+  // 2. Verifica si la conversión fue exitosa.
+  if (isNaN(valorNumerico)) {
+    return "Valor inválido"; // O manejar el error como prefieras.
+  }
+
+  // 3. Define el símbolo de moneda y el separador de miles.
+  var simboloMoneda = ""; // Puedes cambiarlo a tu moneda local.
+  var separadorMiles = ".";   // Común en Argentina. Usa "," si prefieres.
+  var separadorDecimal = ","; // Común en Argentina. Usa "." si prefieres.
+  var decimales = 2;         // Número de decimales.
+
+  // 4. Formatea el número.
+  var numeroFormateado = valorNumerico.toFixed(decimales).replace(/\d(?=(\d{3})+\D)/g, '$&' + separadorMiles).replace(".", separadorDecimal);
+
+  // 5. Agrega el símbolo de moneda.
+  return simboloMoneda + " " + numeroFormateado;
+}
+
+Code.gs
+// --- CONFIGURACIÓN DE CONEXIONES ---
+// 1. BASE DE DATOS (Donde se guarda la plata)
+var ID_MOVIMIENTOS = '1GZJuM5mosSkuHtQoWFKQjsJIVNHL6fgkdeG8rvBSPdY'; 
+
+// 2. RRHH (Donde se guardan los adelantos)
+var ID_RRHH = '1htFuZiIV5JpZ2ExNRtTEl5GYruPR4CUZDQdFzhMq54A';
+
+// 3. CONFIGURACIÓN (Este mismo archivo "Administración")
+// Usamos el ID del archivo actual para leer la hoja ItemVentas
+var ID_CONFIG = SpreadsheetApp.getActiveSpreadsheet().getId(); 
+
+function doGet(e) {
+  var pagina = e.parameter.page;
+  
+  if (!pagina) {
+    // Si no hay parámetro, vamos al MENÚ PRINCIPAL
+    return HtmlService.createTemplateFromFile('Index')
+        .evaluate()
+        .setTitle('Terminal Empleados')
+        .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0')
+        .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+  } else {
+    // Navegación (Cierre, Gastos, Adelantos)
+    return HtmlService.createTemplateFromFile(pagina)
+        .evaluate()
+        .setTitle('Carga - ' + pagina)
+        .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0')
+        .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+  }
+}
+
+function getAppUrl() {
+  return ScriptApp.getService().getUrl();
+}
+
+
+
+
+index.html
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+    
+    <style>
+      body { background-color: #f4f6f9; font-family: 'Segoe UI', sans-serif; padding: 20px; }
+      .header-title { color: #2c3e50; font-weight: 800; letter-spacing: -1px; margin-bottom: 30px; }
+
+      .app-card {
+        border: none; border-radius: 20px; transition: all 0.3s ease; text-decoration: none;
+        height: 100%; overflow: hidden; position: relative;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.08); display: block; padding: 25px 15px; text-align: center;
+      }
+      .app-card:hover { transform: translateY(-5px); box-shadow: 0 15px 30px rgba(0,0,0,0.15); }
+      .icon-box { font-size: 3rem; margin-bottom: 0.5rem; opacity: 0.95; }
+      .card-title { font-weight: 700; font-size: 1.2rem; margin-bottom: 0.2rem; }
+      .watermark { position: absolute; bottom: -15px; right: -15px; font-size: 6rem; opacity: 0.1; transform: rotate(-15deg); z-index: 1; color: white; }
+      .card-body-content { position: relative; z-index: 2; }
+
+      .bg-ventas { background: linear-gradient(135deg, #0d6efd 0%, #0043a8 100%); color: white !important; } 
+      .bg-compras { background: linear-gradient(135deg, #dc3545 0%, #b02a37 100%); color: white !important; } 
+      .bg-rrhh { background: linear-gradient(135deg, #fd7e14 0%, #d65b00 100%); color: white !important; } 
+      .bg-rendiciones { background: linear-gradient(135deg, #198754 0%, #146c43 100%); color: white !important; } /* VERDE */
+
+      /* TAREAS */
+      .task-item { background: white; border-left: 4px solid #dee2e6; margin-bottom: 8px; border-radius: 8px; padding: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); transition: all 0.2s; }
+      .task-item.done { opacity: 0.6; text-decoration: line-through; border-left-color: #198754; }
+      .task-item.urgent { border-left-color: #dc3545; }
+      .task-check { transform: scale(1.3); cursor: pointer; }
+    </style>
+  </head>
+  <body>
+
+    <div class="container" style="max-width: 600px;">
+      
+      <div class="text-center">
+        <h2 class="header-title">TERMINAL <span class="fw-light text-secondary">| Empleados</span></h2>
+      </div>
+
+      <div class="row g-3 mb-5">
+        <? var url = getAppUrl(); ?>
+        
+        <div class="col-6">
+          <a href="<?= url ?>?page=Cierre" class="app-card bg-ventas">
+            <i class="bi bi-shop watermark"></i>
+            <div class="card-body-content">
+              <div class="icon-box"><i class="bi bi-currency-dollar"></i></div>
+              <h3 class="card-title">Cerrar Caja</h3>
+            </div>
+          </a>
+        </div>
+
+        <div class="col-6">
+          <a href="<?= url ?>?page=Compras" class="app-card bg-compras">
+            <i class="bi bi-cart-x watermark"></i>
+            <div class="card-body-content">
+              <div class="icon-box"><i class="bi bi-cart-fill"></i></div>
+              <h4 class="card-title">Gastos</h4>
+            </div>
+          </a>
+        </div>
+
+        <div class="col-6">
+          <a href="<?= url ?>?page=Adelantos" class="app-card bg-rrhh">
+            <i class="bi bi-cash watermark"></i>
+            <div class="card-body-content">
+              <div class="icon-box"><i class="bi bi-cash-stack"></i></div>
+              <h4 class="card-title">Adelantos</h4>
+            </div>
+          </a>
+        </div>
+
+        <div class="col-6">
+          <a href="<?= url ?>?page=Rendiciones" class="app-card bg-rendiciones">
+            <i class="bi bi-safe watermark"></i>
+            <div class="card-body-content">
+              <div class="icon-box"><i class="bi bi-clipboard-data"></i></div>
+              <h4 class="card-title">Rendiciones</h4>
+            </div>
+          </a>
+        </div>
+      </div>
+
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="fw-bold text-secondary mb-0"><i class="bi bi-list-check me-2"></i> Tareas Pendientes</h5>
+        <button class="btn btn-sm btn-dark rounded-pill px-3" onclick="modalTarea.show()">+ Nueva</button>
+      </div>
+
+      <div id="listaTareas">
+        <div class="text-center py-3"><div class="spinner-border text-secondary"></div></div>
+      </div>
+      
+      <div class="text-center mt-5 text-muted small"><p>© Rincón Natural</p></div>
+    </div>
+
+    <div class="modal fade" id="modalTarea" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header bg-dark text-white">
+            <h5 class="modal-title">Nueva Tarea</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <form id="formTarea" onsubmit="guardarTarea(event)">
+              <div class="mb-3">
+                <label class="small fw-bold">Carácter</label>
+                <select name="caracterTarea" class="form-select">
+                  <option value="Normal">Normal</option>
+                  <option value="Urgente">Urgente 🔴</option>
+                  <option value="Para hoy">Mantenimiento 🛠️</option>
+                  <option value="Sin apuro">Limpieza 🧹</option>
+                </select>
+              </div>
+              <div class="mb-3">
+                <label class="small fw-bold">Descripción</label>
+                <textarea name="textoTarea" class="form-control" rows="3" required placeholder="Ej: Limpiar freezer, Reponer stock..."></textarea>
+              </div>
+              <button type="submit" class="btn btn-dark w-100">AGREGAR</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      var modalTarea;
+
+      window.onload = function() {
+        modalTarea = new bootstrap.Modal(document.getElementById('modalTarea'));
+        cargarTareas();
+      };
+
+      function cargarTareas() {
+        google.script.run.withSuccessHandler(renderTareas).obtenerTareas();
+      }
+
+      function renderTareas(lista) {
+        var div = document.getElementById("listaTareas");
+        div.innerHTML = "";
+        
+        if (lista.length === 0) {
+          div.innerHTML = '<div class="text-center text-muted py-3 small">No hay tareas pendientes.</div>';
+          return;
+        }
+
+        lista.forEach(t => {
+          var isDone = t.estado === "Realizada";
+          var isUrgent = t.caracter === "Urgente";
+          var checkAttr = isDone ? "checked" : "";
+          var classDone = isDone ? "done" : "";
+          var classUrg = (isUrgent && !isDone) ? "urgent" : "";
+          
+          div.innerHTML += `
+            <div class="task-item d-flex align-items-center ${classDone} ${classUrg}">
+              <div class="me-3">
+                <input type="checkbox" class="form-check-input task-check" ${checkAttr} onchange="toggleEstado(${t.id})">
+              </div>
+              <div class="flex-grow-1">
+                <div class="fw-bold text-dark" style="font-size:0.95rem;">${t.tarea}</div>
+                <div class="small text-muted">
+                  <span class="badge bg-light text-secondary border me-1">${t.caracter}</span>
+                  ${t.fecha}
+                </div>
+              </div>
+            </div>
+          `;
+        });
+      }
+
+      function guardarTarea(e) {
+        e.preventDefault();
+        var form = document.getElementById("formTarea");
+        // Deshabilitar btn...
+        google.script.run.withSuccessHandler(() => {
+           form.reset();
+           modalTarea.hide();
+           cargarTareas();
+        }).guardarNuevaTarea(form);
+      }
+
+      function toggleEstado(id) {
+        // Optimista: No esperamos al server para updatear UI
+        google.script.run.withSuccessHandler(cargarTareas).cambiarEstadoTarea(id);
+      }
+    </script>
+  </body>
+</html>
+
+Funciones_Cierre.gs
+// ==========================================
+// === CONSTANTES Y UTILIDADES GLOBALES ===
+// ==========================================
+
+// Asegúrate de que ID_MOVIMIENTOS e ID_RRHH están definidos globalmente.
+// const ID_MOVIMIENTOS = '...';
+// const ID_RRHH = '...'; 
+
+/**
+ * Obtiene la zona horaria del Spreadsheet activo.
+ * @returns {string} La zona horaria del Spreadsheet.
+ */
+function getZone() {
+  return SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+}
+
+/**
+ * Función auxiliar para formatear montos a moneda local (sin $ para Pushover).
+ * @param {number} amount
+ * @returns {string} Monto formateado (ej: 1.234,56).
+ */
+function formatCurrencyForPushover(amount) {
+  var value = parseFloat(amount || 0);
+  if (isNaN(value)) value = 0;
+  return value.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+}
+
+
+// ==========================================
+// === FUNCIONES DE CONFIGURACIÓN Y LECTURA (BACKEND) ===
+// ==========================================
+
+// --- Lógica de Items de Venta (Mantenida, pero integrada en la función principal) ---
+
+/**
+ * Búsqueda de gastos en la hoja 'Compras' que deben ser imputados al cierre.
+ */
+function buscarGastosCompras(hojaCompras, etiquetaExacta, fechaFiltroISO, zona, startRow) {
+  var listaGastos = [];
+  var totalSalidas = 0;
+  
+  if (!hojaCompras) return { lista: listaGastos, total: totalSalidas };
+
+  var lastRow = hojaCompras.getLastRow();
+  var numRows = lastRow - startRow + 1;
+  
+  if (numRows <= 0) return { lista: listaGastos, total: totalSalidas };
+
+  // Leemos columnas: A(0) Fecha, B(1) Prov, D(3) Detalle, E(4) Monto, F(5) Pago
+  var datosC = hojaCompras.getRange(startRow, 1, numRows, 6).getValues(); 
+
+  for (var i = 0; i < datosC.length; i++) {
+    var pagoRaw = String(datosC[i][5]).trim();
+    var pagoLimpio = pagoRaw.toLowerCase();
+    var etiquetaLimpia = etiquetaExacta.toLowerCase();
+    
+    var esPendiente = (pagoLimpio === "caja" || pagoLimpio === "efectivo");
+    var esAsignado = (pagoLimpio === etiquetaLimpia); // Comparación de la etiqueta limpia
+
+    if (esPendiente || esAsignado) {
+       var fRow = datosC[i][0];
+       var monto = Number(datosC[i][4]) || 0;
+       
+       // Si es asignado O (es pendiente Y es de hoy)
+       if (esAsignado) {
+         totalSalidas += monto;
+       } else if (esPendiente && fRow instanceof Date) {
+         var fRowISO = Utilities.formatDate(fRow, zona, "yyyyMMdd");
+         if (fRowISO === fechaFiltroISO) totalSalidas += monto;
+       }
+       
+       // CORRECCIÓN VISUALIZACIÓN: Fecha completa dd/MM/yyyy
+       var fechaItem = (fRow instanceof Date) ? Utilities.formatDate(fRow, zona, "dd/MM/yyyy") : "";
+         
+       listaGastos.push({
+         id: startRow + i, // ID = Número de fila real en la hoja
+         desc: String(datosC[i][1]) + " (" + String(datosC[i][3]) + ")", // Proveedor (Detalle)
+         monto: monto,
+         fecha: fechaItem,
+         obligatorio: esAsignado
+       });
+    }
+  }
+
+  return { lista: listaGastos, total: totalSalidas };
+}
+
+/**
+ * Búsqueda de adelantos en la hoja 'CtaCte Empleados' asignados al cierre.
+ */
+function buscarAdelantos(hojaCtaCte, etiquetaExacta, zona, startRow) {
+  var listaAdelantosEfectivo = [];
+  var listaAdelantosMerc = [];
+  var totalAdelantosEfectivo = 0;
+
+  if (!hojaCtaCte) return { listaEfectivo: listaAdelantosEfectivo, listaMerc: listaAdelantosMerc, total: totalAdelantosEfectivo };
+
+  var lastRow = hojaCtaCte.getLastRow();
+  var numRows = lastRow - startRow + 1;
+  
+  if (numRows <= 0) return { listaEfectivo: listaAdelantosEfectivo, listaMerc: listaAdelantosMerc, total: totalAdelantosEfectivo };
+
+  // Leemos: A(0) Fecha, B(1) Empleado, C(2) Concepto, D(3) Debe (Monto), F(5) Medio (Etiqueta)
+  var datosA = hojaCtaCte.getRange(startRow, 1, numRows, 6).getValues(); 
+  var etiquetaLimpia = etiquetaExacta.toLowerCase();
+
+  for (var j = 0; j < datosA.length; j++) {
+    var medioRaw = String(datosA[j][5]).trim().toLowerCase();
+    
+    if (medioRaw === etiquetaLimpia) {
+       var fRow = datosA[j][0];
+       var concepto = String(datosA[j][2]);
+       var debe = Number(datosA[j][3]) || 0; 
+       
+       // CORRECCIÓN VISUALIZACIÓN: Fecha completa dd/MM/yyyy
+       var fechaItem = (fRow instanceof Date) ? Utilities.formatDate(fRow, zona, "dd/MM/yyyy") : "";
+       
+       var itemAdelanto = {
+         id: startRow + j,
+         desc: String(datosA[j][1]) + " (" + concepto + ")", // Empleado (Concepto)
+         monto: debe,
+         fecha: fechaItem,
+         obligatorio: true
+       };
+
+       if (concepto.toLowerCase().includes("mercader")) {
+         listaAdelantosMerc.push(itemAdelanto);
+       } else {
+         listaAdelantosEfectivo.push(itemAdelanto);
+         totalAdelantosEfectivo += debe;
+       }
+    }
+  }
+
+  return { listaEfectivo: listaAdelantosEfectivo, listaMerc: listaAdelantosMerc, total: totalAdelantosEfectivo };
+}
+
+
+/**
+ * Función principal para preparar la UI de cierre de caja.
+ */
+function obtenerItemsPorTurno(turnoSeleccionado, fechaCierreStr) {
+  var resultado = { 
+    items: [], prefill: {}, totalSalidasCaja: 0, 
+    listaGastosCaja: [], listaAdelantosEfectivo: [], listaAdelantosMerc: [], error: null
+  }; 
+
+  try {
+    var ssMov = SpreadsheetApp.openById(ID_MOVIMIENTOS); 
+    var ssRRHH = SpreadsheetApp.openById(ID_RRHH);       
+    var zona = ssMov.getSpreadsheetTimeZone(); // ¡Uso consistente de la zona!
+
+    // --- 1. LEER CONFIG (Items de Venta) ---
+    var hojaItems = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("ItemVentas");
+    if (!hojaItems) throw new Error("Falta hoja ItemVentas");
+    var datosItems = hojaItems.getDataRange().getValues();
+    var encabezados = datosItems[0]; 
+    var turnoBuscado = String(turnoSeleccionado).toLowerCase().trim();
+    var colIndex = encabezados.map(function(t) { return String(t).toLowerCase().trim(); }).indexOf(turnoBuscado);
+    
+    if (colIndex === -1) throw new Error("Turno no encontrado en ItemVentas.");
+    for (var r = 1; r < datosItems.length; r++) {
+      var concepto = datosItems[r][0]; var activado = datosItems[r][colIndex];
+      var esVerdadero = (activado === true || String(activado).toUpperCase() === "TRUE" || String(activado).toUpperCase() === "VERDADERO");
+      if (concepto && esVerdadero) resultado.items.push(concepto);
+    }
+
+    // --- 2. PREPARAR FECHAS Y ETIQUETAS ---
+    var fechaObj;
+    if (fechaCierreStr) { 
+      var p = fechaCierreStr.split("-"); 
+      // Creamos la fecha en la zona horaria del script, luego la forzamos a ser medianoche local
+      fechaObj = new Date(p[0], p[1]-1, p[2]); 
+    } else { 
+      fechaObj = new Date(); 
+    }
+    
+    var fechaFiltroISO = Utilities.formatDate(fechaObj, zona, "yyyyMMdd");
+    var fechaVisual = Utilities.formatDate(fechaObj, zona, "dd/MM/yyyy");
+    
+    // Etiqueta exacta: "caja dd/mm/aaaa turno"
+    var etiquetaExacta = "caja " + fechaVisual + " " + turnoBuscado;
+    
+    // Rango de búsqueda optimizado
+    var startRow = 2; // Asumimos que leemos los últimos 300 movimientos
+    
+    // --- 3. BUSCAR GASTOS (Compras) ---
+    var hojaCompras = ssMov.getSheetByName("Compras");
+    if (hojaCompras && hojaCompras.getLastRow() >= startRow) {
+        var startRowCompras = Math.max(startRow, hojaCompras.getLastRow() - 300 + 1);
+        var resGastos = buscarGastosCompras(hojaCompras, etiquetaExacta, fechaFiltroISO, zona, startRowCompras);
+        resultado.listaGastosCaja = resGastos.lista;
+        resultado.totalSalidasCaja += resGastos.total;
+    }
+
+    // --- 4. BUSCAR ADELANTOS (RRHH) ---
+    var hojaCtaCte = ssRRHH.getSheetByName("CtaCte Empleados");
+    if (hojaCtaCte && hojaCtaCte.getLastRow() >= startRow) {
+        var startRowAdelantos = Math.max(startRow, hojaCtaCte.getLastRow() - 300 + 1);
+        var resAdelantos = buscarAdelantos(hojaCtaCte, etiquetaExacta, zona, startRowAdelantos);
+        resultado.listaAdelantosEfectivo = resAdelantos.listaEfectivo;
+        resultado.listaAdelantosMerc = resAdelantos.listaMerc;
+        resultado.totalSalidasCaja += resAdelantos.total; // Sumar solo adelantos en EFECTIVO
+    }
+
+
+  } catch (e) { 
+    resultado.error = "Error al buscar movimientos: " + e.message;
+    console.error(resultado.error);
+  }
+
+  return resultado;
+}
+
+
+// ==========================================
+// === FUNCIONES DE NOTIFICACIÓN Y GUARDADO ===
+// ==========================================
+
+function enviarNotificacionPushover(titulo, mensaje) {
+  var pushoverApiToken = "am3487111v62qg7fzfy4sstof88iud"; 
+  var pusoverUserKey = "uw4mn8r356h94rsgzw5gmffppnwn9j"; 
+
+  var payload = {
+    "token": pushoverApiToken,
+    "user": pusoverUserKey,
+    "title": titulo,
+    "message": mensaje
+  };
+
+  var options = {
+    "method": "post",
+    "contentType": "application/json",
+    "payload": JSON.stringify(payload)
+  };
+
+  try {
+     UrlFetchApp.fetch("https://api.pushover.net/1/messages.json", options);
+     Logger.log("Notificación Pushover enviada: " + titulo);
+  } catch(e) {
+     Logger.log("Error al enviar Pushover: " + e.message);
+  }
+}
+
+// --- GUARDAR CIERRE (CORREGIDA LA LECTURA DE VALORES DEL FORMULARIO) ---
+function guardarCierre(formObject) {
+  var zona = getZone(); // ¡Uso consistente de la zona!
+  try {
+    var ss = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hoja = ss.getSheetByName("Ventas");
+    if (!hoja) throw new Error("Error: Hoja Ventas no encontrada.");
+    
+    var ultimaColumna = hoja.getLastColumn();
+    if (ultimaColumna < 1) return "Error: Hoja Ventas sin encabezados.";
+
+    var encabezadosRaw = hoja.getRange(1, 1, 1, ultimaColumna).getValues()[0];
+    var encabezadosLimpios = encabezadosRaw.map(function(t) { return String(t).toLowerCase().trim(); });
+    
+    var nuevaFila = new Array(ultimaColumna).fill(null); 
+    var idxFecha = encabezadosLimpios.indexOf("fecha");
+    var idxTurno = encabezadosLimpios.indexOf("turno");
+    var idxTotal = encabezadosLimpios.indexOf("total");
+    
+    // Preparar Fecha
+    var fechaGuardar = new Date(); 
+    if (formObject.fechaCierre) {
+      var partes = formObject.fechaCierre.split("-");
+      var ahora = new Date(); // Obtenemos la hora actual
+      
+      // Creamos la fecha usando el día seleccionado PERO inyectamos la hora actual
+      // partes[1] - 1 porque los meses en JS van de 0 a 11
+      fechaGuardar = new Date(partes[0], partes[1] - 1, partes[2], ahora.getHours(), ahora.getMinutes(), ahora.getSeconds());
+    }
+
+    if (idxFecha > -1) nuevaFila[idxFecha] = fechaGuardar;
+    if (idxTurno > -1) nuevaFila[idxTurno] = formObject.turnoHidden;
+    
+    var montoEfectivoCierre = 0;
+    var desgloseItems = []; 
+    var sumaTotal = 0;
+
+    // A. Mapear valores del formulario a la nueva fila (ITERAMOS SOBRE LOS ENCABEZADOS DE LA HOJA)
+    for (var i = 0; i < encabezadosRaw.length; i++) {
+        var keyHoja = encabezadosRaw[i]; // Nombre original del encabezado (Ej: "Efectivo")
+        var keyLimpia = encabezadosLimpios[i]; // Nombre limpio de la hoja (Ej: "efectivo")
+        
+        // Excluir claves de control o no relevantes para la suma/registro directo
+        if (keyLimpia === "fecha" || keyLimpia === "turno" || keyLimpia === "total") {
+            continue; 
+        }
+        
+        // Intentamos encontrar la clave en el formObject. Los nombres de campo del formulario 
+        // DEBEN COINCIDIR con los encabezados de la hoja.
+        var val = parseFloat(formObject[keyHoja] || formObject[keyLimpia]); // Intentamos con nombre original y limpio
+        
+        if (!isNaN(val)) {
+            nuevaFila[i] = val;
+            
+            if (keyLimpia.includes("efectivo")) montoEfectivoCierre = val;
+            
+            // Desglose y suma
+            if (val !== 0) {
+                desgloseItems.push({ item: keyHoja, monto: val });
+            }
+            sumaTotal += val;
+        } else {
+             // Si no es un número válido, lo dejamos como null (o 0 si prefieres que aparezca)
+             nuevaFila[i] = 0; 
+        }
+    }
+    
+    // B. Asignar Total Calculado
+    if (idxTotal > -1) {
+      nuevaFila[idxTotal] = sumaTotal;
+    } 
+    
+    // --- 1. GUARDAR EN HOJA VENTAS ---
+    hoja.appendRow(nuevaFila);
+    var lastRow = hoja.getLastRow();
+    
+
+    // --- 2. GUARDAR EN RENDICIONES (CÓDIGO RESTAURADO) ---------------------
+    var hojaRendiciones = ss.getSheetByName("Rendiciones");
+    var montoEfectivo = parseFloat(formObject.Efectivo) || 0;
+    if (sumaTotal > 0) {
+        var desc = "Cierre " + formObject.turnoHidden;
+        
+        // Asiento de DÉBITO (Entrada de dinero / Caja)
+        var filaDebe = [
+            fechaGuardar, 
+            desc, 
+            montoEfectivo, // DEBE
+            "",        // HABER
+            "Ventas"     // Categoría
+        ];
+        hojaRendiciones.appendRow(filaDebe);
+        
+
+        // --- Aplicar formatos de moneda y fecha a las filas recién insertadas en Rendiciones
+        var lastRowRendiciones = hojaRendiciones.getLastRow();
+        var rangeRendiciones = hojaRendiciones.getRange(lastRowRendiciones - 1, 1, 2, 4);
+        
+        // Columna 1 (Fecha): CORRECCIÓN AQUÍ PARA GUARDAR FECHA Y HORA
+        // Usamos formato completo para que se vea también la hora si existe en el objeto Date
+        rangeRendiciones.offset(0, 0, 2, 1).setNumberFormat("dd/mm/yyyy hh:mm");
+        
+        // Columnas 3 y 4 (Debe y Haber)
+        rangeRendiciones.offset(0, 2, 2, 2).setNumberFormat("$ #,##0.00");
+    }
+    // ---
+
+
+
+    // --- 3. IMPUTACIÓN DE COMPRAS (Gastos) ---
+    if (formObject.gastosIds) {
+      var ids = formObject.gastosIds.split(",");
+      var hojaCompras = ss.getSheetByName("Compras");
+      
+      var turnoNombre = String(formObject.turnoHidden).toLowerCase();
+      var letraTurno = turnoNombre.includes("tarde") ? "T" : (turnoNombre.includes("delivery") ? "D" : (turnoNombre.includes("noche") ? "N" : "M"));
+      
+      var fechaStr = Utilities.formatDate(fechaGuardar, zona, "dd/MM/yyyy");
+      var nuevoEstado = "Caja " + fechaStr + " " + letraTurno;
+
+      ids.forEach(function(fila) {
+        var filaNum = parseInt(fila);
+        if (!isNaN(filaNum) && filaNum > 1 && hojaCompras) {
+          hojaCompras.getRange(filaNum, 6).setValue(nuevoEstado); 
+        }
+      });
+    }
+
+    // --- 4. NOTIFICACIÓN PUSHOVER ---
+    var totalFormato = formatCurrencyForPushover(sumaTotal);
+    var title =  "$" + totalFormato + " - " + Utilities.formatDate(fechaGuardar, zona, "dd/MM/yyyy") + " - " + formObject.turnoHidden;
+    
+    var body = "CIERRE REGISTRADO:\n";
+    desgloseItems.forEach(function(item) {
+        body += item.item + ": $" + formatCurrencyForPushover(item.monto) + "\n";
+    });
+    body += "\nTOTAL FINAL: $" + totalFormato;
+
+    enviarNotificacionPushover(title, body);
+    
+    // [Se mantienen los formatos]
+    // CORRECCIÓN AQUÍ TAMBIÉN: Formato en hoja Ventas con hora
+    if (idxFecha > -1) hoja.getRange(lastRow, idxFecha + 1).setNumberFormat("dd/mm/yyyy hh:mm");
+    if (ultimaColumna > 2) hoja.getRange(lastRow, 3, 1, ultimaColumna - 2).setNumberFormat("$ #,##0.00");
+
+    return "✅ Cierre guardado. Total: $" + sumaTotal.toLocaleString('es-AR', { minimumFractionDigits: 2 });
+
+  } catch (e) { 
+    console.error("Error en guardarCierre: " + e.message);
+    return "❌ Error al guardar cierre: " + e.message; 
+  }
+}
+
+// ==========================================
+// === FUNCIONES DE LECTURA DE CIERRES ===
+// ==========================================
+
+function obtenerUltimosCierres() {
+  try {
+    var ss = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hoja = ss.getSheetByName("Ventas");
+    var zona = ss.getSpreadsheetTimeZone(); // ¡Uso consistente de la zona!
+    
+    var lastRow = hoja.getLastRow();
+    if (lastRow < 2) return []; 
+    
+    var filasALeer = 30; 
+    var inicio = Math.max(2, lastRow - filasALeer + 1);
+    var datos = hoja.getRange(inicio, 1, lastRow - inicio + 1, hoja.getLastColumn()).getValues();
+    var encabezados = hoja.getRange(1, 1, 1, hoja.getLastColumn()).getValues()[0];
+    var encabezadosLimp = encabezados.map(function(t) { return String(t).toLowerCase().trim(); });
+
+    var idxFecha = encabezadosLimp.indexOf("fecha");
+    var idxTurno = encabezadosLimp.indexOf("turno");
+    
+    if (idxFecha === -1 || idxTurno === -1) return [];
+
+    var lista = [];
+    
+    for (var i = datos.length - 1; i >= 0; i--) {
+      var fechaRaw = datos[i][idxFecha];
+      var turno = datos[i][idxTurno];
+      var fechaFmt = "";
+      var fechaISO = ""; 
+
+      if (fechaRaw instanceof Date) {
+        // CORRECCIÓN VISUALIZACIÓN: Usar dd/MM/yyyy en lugar de día de semana
+        fechaFmt = Utilities.formatDate(fechaRaw, zona, "dd/MM/yyyy");
+        fechaISO = Utilities.formatDate(fechaRaw, zona, "yyyy-MM-dd");
+      } else {
+        fechaFmt = String(fechaRaw);
+      }
+      
+      if (fechaFmt && turno) {
+        lista.push({ fecha: fechaFmt, fechaISO: fechaISO, turno: turno });
+      }
+    }
+    return lista;
+  } catch (e) { return [{ fecha: "Error", turno: e.message }]; }
+}
+
+/**
+ * Función auxiliar para verificar si la caja está cerrada.
+ */
+function esTurnoCerrado(fechaStr, turno) { // Recibe fechaStr (ISO: YYYY-MM-DD)
+  try {
+    var ss = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hoja = ss.getSheetByName("Ventas");
+    if (!hoja || hoja.getLastRow() < 2) return false;
+
+    var zona = ss.getSpreadsheetTimeZone();
+    
+    var partes = fechaStr.split("-");
+    var fechaObj = new Date(partes[0], partes[1] - 1, partes[2]);
+    
+    var fechaStrCheck = Utilities.formatDate(fechaObj, zona, "yyyyMMdd");
+    var turnoCheck = String(turno).toLowerCase().trim();
+
+    // Leemos las últimas 50 filas
+    var lastRow = hoja.getLastRow();
+    var startRow = Math.max(2, lastRow - 50);
+    var datos = hoja.getRange(startRow, 1, lastRow - startRow + 1, 2).getValues(); 
+    var encabezados = hoja.getRange(1, 1, 1, 2).getValues()[0].map(function(t) { return String(t).toLowerCase().trim(); });
+    var idxFecha = encabezados.indexOf("fecha");
+    var idxTurno = encabezados.indexOf("turno");
+
+    if (idxFecha === -1 || idxTurno === -1) return false;
+
+    for (var i = 0; i < datos.length; i++) {
+      var fRow = datos[i][idxFecha];
+      var tRow = String(datos[i][idxTurno]).toLowerCase().trim();
+      
+      if (fRow instanceof Date) {
+         var fRowStr = Utilities.formatDate(fRow, zona, "yyyyMMdd");
+         // Si coincide fecha y turno, es que YA se cerró
+         if (fRowStr === fechaStrCheck && tRow === turnoCheck) {
+           return true; 
+         }
+      }
+    }
+    return false;
+  } catch (e) { 
+    console.error("Error en esTurnoCerrado: " + e.message);
+    return false; 
+  }
+}
+
+
+Cierre.html
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+    <style>
+      body { background-color: #f0f2f5; padding: 20px; font-family: 'Segoe UI', sans-serif; }
+      
+      .card-form { 
+        max-width: 500px; margin: 0 auto; background: white; padding: 25px; 
+        border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); 
+      }
+      
+      .btn-lg { height: 55px; font-weight: 700; font-size: 1.1rem; }
+      .input-monto { 
+        text-align: right; font-size: 1.2rem; font-weight: 600; color: #212529; 
+        /* Ocultar flechas de incremento/decremento */
+        -moz-appearance: textfield; /* Firefox */
+      }
+      .input-monto::-webkit-inner-spin-button, 
+      .input-monto::-webkit-outer-spin-button {
+          -webkit-appearance: none; /* Chrome, Safari, Edge */
+          margin: 0;
+      }
+      
+      .icon-box { width: 50px; display: flex; align-items: center; justify-content: center; font-size: 1.3rem; border: none; }
+      .bg-azul-unificado { background-color: #0d6efd !important; color: white !important; }
+
+      .gasto-check-item {
+        background-color: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 8px 12px; margin-bottom: 5px; 
+        display: flex; align-items: center; transition: background-color 0.2s; cursor: pointer;
+      }
+      .gasto-check-item:hover { background-color: #f8f9fa; }
+      .form-check-input { width: 1.3em; height: 1.3em; margin-right: 10px; cursor: pointer; }
+      .gasto-desc { flex-grow: 1; font-size: 0.85rem; line-height: 1.2; color: #495057; }
+      .gasto-monto { font-weight: bold; font-size: 0.9rem; color: #dc3545; }
+
+      /* Historial */
+      .historial-item { padding: 10px 10px; font-size: 0.9rem; border-bottom: 1px solid #f0f0f0; display: flex; justify-content: space-between; align-items: center; }
+      .historial-item:last-child { border-bottom: none; }
+      
+      .empty-msg { font-style: italic; color: #adb5bd; font-size: 0.85rem; margin-left: 5px; }
+      
+      /* Estilos para el nuevo Modal Contador de Billetes */
+      .billete-row { display: flex; align-items: center; margin-bottom: 10px; }
+      .billete-denominacion { font-size: 1.2rem; font-weight: bold; width: 100px; text-align: left; }
+      .billete-cantidad { 
+        width: 150px; /* ANCHURA AUMENTADA */
+        text-align: center; 
+        /* Ocultar flechas de incremento/decremento */
+        -moz-appearance: textfield; /* Firefox */
+      }
+      .billete-cantidad::-webkit-inner-spin-button, 
+      .billete-cantidad::-webkit-outer-spin-button {
+          -webkit-appearance: none; /* Chrome, Safari, Edge */
+          margin: 0;
+      }
+      .billete-total { font-size: 1.1rem; font-weight: 700; color: #198754; width: 120px; text-align: right; }
+      .billete-input { text-align: center; font-weight: 700; }
+    </style>
+  </head>
+  <body>
+    
+    <div class="mb-4 text-center">
+      <? var url = getAppUrl(); ?>
+      <a href="<?= url ?>?app=empleados" class="text-decoration-none text-secondary fw-bold small">
+        <i class="bi bi-chevron-left"></i> VOLVER AL MENÚ
+      </a>
+    </div>
+
+    <div class="card-form">
+      <h4 class="text-center text-dark fw-bold mb-4">Cierre de Turno</h4>
+
+      <form id="formCierre" onsubmit="enviar(event)">
+        <button type="submit" disabled style="display:none;" aria-hidden="true"></button>
+        
+        <input type="hidden" name="turnoHidden" id="turnoHidden">
+        <input type="hidden" name="gastosIds" id="gastosIds">
+        <input type="hidden" name="adelantosIds" id="adelantosIds">
+
+        <div class="row mb-4">
+          <div class="col-6">
+            <label class="fw-bold small text-muted text-uppercase">Fecha</label>
+            <input type="date" name="fechaCierre" id="inputFecha" class="form-control form-control-lg fw-bold text-center border-secondary" style="font-size:1rem;" onchange="validarCierreExistente()">
+          </div>
+          <div class="col-6">
+            <label class="fw-bold small text-muted text-uppercase">Turno</label>
+            <select id="selectTurno" class="form-select form-select-lg border-secondary" style="font-size:1rem;" onchange="validarCierreExistente()">
+              <option value="" selected disabled>Elegir...</option>
+              <option value="Mañana">Mañana</option>
+              <option value="Tarde">Tarde</option>
+              <option value="Delivery">Delivery</option>
+              <option value="Noche">Noche</option>
+            </select>
+          </div>
+        </div>
+        
+        <div id="alertaExiste" class="alert alert-danger mt-2 py-2 small fw-bold text-center shadow-sm" style="display:none;">
+          <i class="bi bi-lock-fill me-1"></i> Turno cerrado.
+        </div>
+
+        <div id="loading" class="text-center my-5" style="display:none;">
+          <div class="spinner-border text-primary" role="status"></div>
+        </div>
+
+        <div id="contenedorInputs" style="display:none;"></div>
+
+        <div id="botonera" style="display:none;" class="mt-4">
+          <button type="submit" class="btn btn-dark w-100 btn-lg shadow" id="btnGuardar">
+            CONFIRMAR CIERRE
+          </button>
+        </div>
+      </form>
+
+      <div class="mt-5 pt-3 border-top">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <span class="text-muted fw-bold small text-uppercase">Últimos Cierres</span>
+          <span id="loadingHistorial" class="spinner-border spinner-border-sm text-muted"></span>
+        </div>
+        <div class="card border-0 bg-light" style="max-height: 200px; overflow-y: auto;">
+          <div id="listaHistorial"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="modalDetalle" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header bg-warning text-dark">
+            <h5 class="modal-title fw-bold" id="modalTitulo">...</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <div class="mb-3">
+              <label class="small fw-bold">Empleado</label>
+              <select id="selectEmpModal" class="form-select form-select-lg"><option value="" selected disabled>Elegir...</option></select>
+            </div>
+            <div class="mb-3">
+              <label class="small fw-bold">Monto de Lista</label>
+              <div class="input-group input-group-lg">
+                <span class="input-group-text">$</span>
+                <input type="number" id="inputMontoModal" class="form-control fw-bold text-end" placeholder="0" onkeyup="calcularDescuento()" onchange="calcularDescuento()">
+              </div>
+            </div>
+            <div class="alert alert-success d-flex justify-content-between align-items-center mb-4 shadow-sm">
+               <span class="small fw-bold text-uppercase">Neto a Cargar (-20%):</span>
+               <span class="fs-4 fw-bold" id="txtNetoModal">$ 0.00</span>
+            </div>
+            <button class="btn btn-dark w-100 fw-bold mb-3" onclick="guardarDetalle()" id="btnGuardarModal">IMPUTAR A CUENTA CORRIENTE</button>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary w-100" data-bs-dismiss="modal">Cancelar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="modalContadorBilletes" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header bg-success text-white">
+            <h5 class="modal-title fw-bold"><i class="bi bi-calculator me-2"></i> Contador de Efectivo</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <div class="d-flex justify-content-between small text-muted mb-2 ps-1">
+              <span class="fw-bold">BILLETE</span>
+              <span class="fw-bold">CANTIDAD</span>
+              <span class="fw-bold text-end" style="width: 120px;">SUBTOTAL</span>
+            </div>
+            
+            <div id="billetesContainer">
+              </div>
+
+            <div class="alert alert-primary d-flex justify-content-between align-items-center mt-4 mb-0 shadow-sm">
+               <span class="small fw-bold text-uppercase">TOTAL FINAL:</span>
+               <span class="fs-3 fw-bold" id="txtTotalContador">$ 0.00</span>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-success w-100 btn-lg fw-bold" onclick="transferirTotal()">CONFIRMAR MONTO</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal fade" id="modalCalculadora" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-sm">
+    <div class="modal-content">
+      <div class="modal-header bg-primary text-white">
+        <h5 class="modal-title fw-bold"><i class="bi bi-plus-slash-minus me-2"></i>Sumar</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body bg-light">
+        <div class="input-group mb-3">
+            <input type="number" id="calcInputMonto" class="form-control fw-bold" placeholder="Monto" onkeydown="if(event.key==='Enter') agregarACalculadora()">
+            <button class="btn btn-primary" type="button" onclick="agregarACalculadora()"><i class="bi bi-plus-lg"></i></button>
+        </div>
+
+        <div class="card mb-3">
+            <div class="card-body p-0" style="max-height: 150px; overflow-y: auto;">
+                <ul class="list-group list-group-flush small" id="calcListaItems">
+                    </ul>
+            </div>
+            <div class="card-footer bg-white text-end border-top-0 pt-0" id="calcFooterMsg" style="display:none">
+                <small class="text-muted fst-italic">Items agregados</small>
+            </div>
+        </div>
+
+        <div class="alert alert-primary d-flex justify-content-between align-items-center mb-0 p-2 shadow-sm">
+           <span class="small fw-bold text-uppercase">TOTAL:</span>
+           <span class="fs-4 fw-bold" id="calcTxtTotal">$ 0.00</span>
+        </div>
+      </div>
+      <div class="modal-footer p-2">
+        <button type="button" class="btn btn-secondary btn-sm" onclick="limpiarCalculadora()">Limpiar</button>
+        <button type="button" class="btn btn-primary w-50 fw-bold" onclick="confirmarCalculo()">ACEPTAR</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+      var historialGlobal = [];
+      var listaGastosGlobal = []; 
+      var listaAdelantosEfvoGlobal = []; 
+      var listaAdelantosMercGlobal = [];
+      var modalMercaderia;
+      var modalContador;
+      var modalCalculadora;
+      
+      const DENOMINACIONES = [20000, 10000, 2000, 1000, 500, 200, 100];
+      // AGREGAR ESTAS NUEVAS VARIABLES:
+  var modalCalculadora; 
+  var inputDestinoId = ""; // Para saber a qué input volver
+  var totalCalculadora = 0;
+
+      
+      window.onload = function() {
+        var hoy = new Date();
+        var dia = ("0" + hoy.getDate()).slice(-2);
+        var mes = ("0" + (hoy.getMonth() + 1)).slice(-2);
+        document.getElementById("inputFecha").value = hoy.getFullYear() + "-" + mes + "-" + dia;
+        modalMercaderia = new bootstrap.Modal(document.getElementById('modalDetalle'));
+        modalContador = new bootstrap.Modal(document.getElementById('modalContadorBilletes'));
+        modalCalculadora = new bootstrap.Modal(document.getElementById('modalCalculadora'));
+
+        // Inicializar el contador de billetes
+        generarFilasContador(); 
+
+        // Carga inicial
+        actualizarHistorial();
+        google.script.run.withSuccessHandler(llenarSelectEmp).obtenerEmpleadosParaSelector();
+      };
+
+      // --- Contador de Billetes Lógica ---
+      function generarFilasContador() {
+        var container = document.getElementById("billetesContainer");
+        container.innerHTML = "";
+        
+        DENOMINACIONES.forEach(den => {
+          var row = document.createElement("div"); row.className = "billete-row";
+          row.innerHTML = `
+            <div class="billete-denominacion">$ ${new Intl.NumberFormat('es-AR').format(den)}</div>
+            <input type="number" min="0" value="0" class="form-control billete-input billete-cantidad me-3" 
+                   id="count_${den}" oninput="calcularTotalContador()" data-denominacion="${den}">
+            <div class="billete-total" id="subtotal_${den}">$ 0</div>
+          `;
+          container.appendChild(row);
+        });
+        
+        calcularTotalContador(); 
+      }
+      
+      function calcularTotalContador() {
+        var total = 0;
+        DENOMINACIONES.forEach(den => {
+          var count = parseInt(document.getElementById(`count_${den}`).value) || 0;
+          var subtotal = count * den;
+          total += subtotal;
+          document.getElementById(`subtotal_${den}`).innerText = "$ " + new Intl.NumberFormat('es-AR').format(subtotal);
+        });
+        document.getElementById("txtTotalContador").innerText = "$ " + new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(total);
+        return total;
+      }
+      
+      function abrirModalContador() {
+        // Al abrir, si el input de efectivo tiene un valor, se podría intentar pre-cargar el conteo.
+        // Aquí solo se resetea por simplicidad:
+        document.getElementById("billetesContainer").querySelectorAll('input').forEach(input => input.value = 0);
+        calcularTotalContador(); 
+        
+        modalContador.show();
+      }
+      
+      function transferirTotal() {
+        var total = calcularTotalContador();
+        var inputEfectivo = document.getElementById("inputEfectivo");
+        if (inputEfectivo) inputEfectivo.value = total > 0 ? total.toFixed(2) : ""; // Aseguramos 2 decimales
+        modalContador.hide();
+      }
+      // --- Fin Contador de Billetes Lógica ---
+
+      // --- Funciones existentes de la UI ---
+      
+      function llenarSelectEmp(lista) {
+        var sel = document.getElementById("selectEmpModal");
+        if(lista && lista.length && !lista[0].startsWith("Error")) {
+           lista.forEach(n => { var op = document.createElement("option"); op.text=n; op.value=n; sel.add(op); });
+        }
+      }
+
+      function actualizarHistorial() {
+        document.getElementById("loadingHistorial").style.display = "inline-block"; 
+        
+        google.script.run.withSuccessHandler(function(lista) {
+          historialGlobal = lista || []; 
+          
+          document.getElementById("loadingHistorial").style.display = "none";
+          var divLista = document.getElementById("listaHistorial");
+          divLista.innerHTML = "";
+          
+          if (!lista || lista.length === 0) {
+            divLista.innerHTML = '<div class="text-center text-muted p-2 small">No hay datos recientes.</div>';
+            return;
+          }
+
+          lista.slice(0, 10).forEach(function(item) {
+            var turnoLower = String(item.turno || "").toLowerCase();
+            var color = "secondary";
+            
+            if (turnoLower.includes("mañana")) color = "success";
+            else if (turnoLower.includes("tarde")) color = "danger";
+            else if (turnoLower.includes("delivery")) color = "warning text-dark";
+            else if (turnoLower.includes("noche")) color = "primary";
+
+            divLista.innerHTML += `
+              <div class="historial-item d-flex justify-content-between align-items-center">
+                <span class="fw-bold text-dark">${item.fecha}</span>
+                <span class="badge bg-${color} rounded-pill shadow-sm" style="width:80px">${item.turno}</span>
+              </div>
+            `;
+          });
+          
+          validarCierreExistente();
+          
+        }).obtenerUltimosCierres();
+      }
+
+      function validarCierreExistente() {
+        var fecha = document.getElementById("inputFecha").value;
+        var turno = document.getElementById("selectTurno").value;
+        var alerta = document.getElementById("alertaExiste");
+        var cont = document.getElementById("contenedorInputs");
+        var btnDiv = document.getElementById("botonera");
+        
+        alerta.style.display = "none";
+        
+        if (!turno || !fecha) return;
+
+        var existe = historialGlobal.some(item => item.fechaISO === fecha && item.turno === turno);
+
+        if (existe) {
+          alerta.style.display = "block";
+          cont.style.display = "none";
+          btnDiv.style.display = "none";
+        } else {
+          cargarForm();
+        }
+      }
+
+      function cargarForm() {
+        var turno = document.getElementById("selectTurno").value;
+        var fecha = document.getElementById("inputFecha").value;
+        
+        if(document.getElementById("alertaExiste").style.display === "block") return;
+
+        document.getElementById("loading").style.display = "block";
+        document.getElementById("contenedorInputs").innerHTML = "";
+        document.getElementById("botonera").style.display = "none";
+        
+        google.script.run.withSuccessHandler(pintarInputs).obtenerItemsPorTurno(turno, fecha);
+      }
+
+      function pintarInputs(data) {
+        document.getElementById("loading").style.display = "none";
+        if (data.error) { alert(data.error); return; }
+
+        var items = data.items || [];
+        listaGastosGlobal = data.listaGastosCaja || [];
+        listaAdelantosEfvoGlobal = data.listaAdelantosEfectivo || [];
+        listaAdelantosMercGlobal = data.listaAdelantosMerc || [];
+
+        if (!items.length) { alert("Sin ítems configurados."); return; }
+
+        document.getElementById("turnoHidden").value = document.getElementById("selectTurno").value;
+        var cont = document.getElementById("contenedorInputs");
+        cont.innerHTML = "";
+
+        // Agregamos 'index' aquí para generar IDs únicos
+        items.forEach((item, index) => {
+          var nombreLower = item.toLowerCase();
+          var icono = obtenerIcono(nombreLower);
+          var div = document.createElement("div"); div.className = "mb-3";
+          var label = document.createElement("label"); label.className = "form-label fw-bold small text-dark"; label.innerText = item;
+          var grp = document.createElement("div"); grp.className = "input-group input-group-lg shadow-sm";
+          var span = document.createElement("span"); span.className = `input-group-text icon-box bg-azul-unificado`; span.innerHTML = `<i class="bi ${icono}"></i>`;
+
+          var input = document.createElement("input"); input.type = "number"; input.step = "0.01";
+          input.className = "form-control input-monto border-secondary"; input.placeholder = "0"; input.name = item;
+
+          // --- NUEVO: Generar ID único por defecto para cada input ---
+          // Esto permite que el modal sepa dónde devolver el valor, incluso si no es Efectivo.
+          input.id = "input_item_" + index; 
+
+          // Detectar tipos de campo
+          var esMercaderia = nombreLower.includes("adelantos merc");
+          var esAdelantoCaja = nombreLower.includes("adelantos $");
+          var esCompras = (nombreLower.includes("compras") || nombreLower.includes("pagos") || nombreLower.includes("gastos"));
+          var esEfectivo = nombreLower.includes("efectivo");
+          
+          // --- NUEVO: Detectar campos digitales para ponerles calculadora ---
+          var esDigital = (nombreLower.includes("mp") || nombreLower.includes("qr") || nombreLower.includes("transferencia") || nombreLower.includes("banco") || nombreLower.includes("tarjeta"));
+
+          // Sobreescribir IDs si son campos especiales
+          if (esEfectivo) { input.required = true; input.id = "inputEfectivo"; }
+
+          if (esMercaderia || esAdelantoCaja || esCompras) {
+            input.readOnly = true; input.placeholder = "0"; input.style.backgroundColor = "#fff3cd";
+            if (esMercaderia) input.id = "inputAdelantosMerc";
+            if (esAdelantoCaja) input.id = "inputAdelantosCaja";
+            if (esCompras) input.id = "inputComprasTotal";
+          }
+
+          grp.appendChild(span); grp.appendChild(input);
+
+          // BOTÓN 1: Contador de Billetes (Solo Efectivo) - Verde
+          if (esEfectivo) {
+            var btnContador = document.createElement("button"); btnContador.type = "button";
+            btnContador.className = "btn btn-success border-secondary"; btnContador.innerHTML = `<i class="bi bi-currency-dollar"></i>`;
+            btnContador.onclick = function() { abrirModalContador(); };
+            grp.appendChild(btnContador);
+          }
+
+          // --- NUEVO BOTÓN 2: Calculadora Sumadora (MP, QR, Transf) - Azul ---
+          if (esDigital && !esCompras) {
+            var btnCalc = document.createElement("button"); btnCalc.type = "button";
+            btnCalc.className = "btn btn-primary border-secondary"; // Color primario (Azul)
+            btnCalc.innerHTML = `<i class="bi bi-calculator"></i>`; // Icono de calculadora
+            // Le pasamos el ID del input actual para que sepa dónde escribir
+            btnCalc.onclick = function() { abrirModalCalculadora(input.id); }; 
+            grp.appendChild(btnCalc);
+          }
+
+          // BOTÓN 3: Agregar Mercadería - Amarillo
+          if (esMercaderia) {
+            var btnAdd = document.createElement("button"); btnAdd.type = "button";
+            btnAdd.className = "btn btn-warning text-dark border-secondary"; btnAdd.innerHTML = `<i class="bi bi-plus-lg"></i>`;
+            btnAdd.onclick = function() { abrirModal(); };
+            grp.appendChild(btnAdd);
+          }
+
+          div.appendChild(label); div.appendChild(grp);
+
+          // LISTAS DE GASTOS / ADELANTOS
+          var listaAUsar = []; var funcRecalculo = ""; var tipoCheck = ""; var containerId = "";
+          if (esCompras) { listaAUsar = listaGastosGlobal; funcRecalculo = "recalcularCompras"; tipoCheck = "gasto"; containerId = "listaContainer_COMPRAS"; }
+          else if (esAdelantoCaja) { listaAUsar = listaAdelantosEfvoGlobal; funcRecalculo = "recalcularAdelantos"; tipoCheck = "adelanto"; containerId = "listaContainer_CAJA"; }
+          else if (esMercaderia) { listaAUsar = listaAdelantosMercGlobal; funcRecalculo = "recalcularAdelantos"; tipoCheck = "adelantoMerc"; containerId = "listaContainer_MERC"; }
+
+          if (esCompras || esAdelantoCaja || esMercaderia) {
+            var divLista = document.createElement("div"); divLista.className = "mt-2 ps-1"; divLista.id = containerId;
+            if (listaAUsar.length > 0) {
+              listaAUsar.forEach(obj => { divLista.appendChild(crearElementoLista(obj, funcRecalculo, tipoCheck)); });
+            } else {
+              divLista.innerHTML = `<div class="small text-muted fst-italic ms-1 empty-msg">No hay movimientos pendientes.</div>`;
+            }
+            div.appendChild(divLista);
+            if (listaAUsar.length > 0) {
+              setTimeout(function() { if (esCompras) recalcularCompras(); else recalcularAdelantos(); }, 200);
+            }
+          }
+          cont.appendChild(div);
+        });
+        cont.style.display = "block"; document.getElementById("botonera").style.display = "block";
+      }
+
+      function crearElementoLista(obj, funcName, tipo) {
+         var row = document.createElement("div"); row.className = "gasto-check-item";
+         var deleteAction = (tipo === "gasto") ? `borrarCompra(${obj.id})` : `borrarItemAdelanto(${obj.id})`;
+         var btnDelete = '';
+         
+         if (tipo === "adelantoMerc") {
+            btnDelete = `<button type="button" class="btn btn-sm btn-outline-danger border-0 ms-2" onclick="${deleteAction}" title="Eliminar"><i class="bi bi-trash"></i></button>`;
+         }
+
+         if (obj.obligatorio) {
+             row.style.backgroundColor = "#f8f9fa"; row.style.cursor = "default";
+             row.innerHTML = `
+               <input class="form-check-input" type="checkbox" value="${obj.monto}" checked disabled style="opacity:0.6">
+               <div class="gasto-desc text-start ms-2">
+                  ${obj.fecha ? `<span class="badge bg-light text-secondary border me-1" style="font-size: 0.75em;">${obj.fecha}</span>` : ''}
+                  ${obj.desc}
+               </div>
+               <div class="gasto-monto text-end ms-2 me-3 text-nowrap">$ ${new Intl.NumberFormat('es-AR').format(obj.monto)}</div>
+               ${btnDelete}
+             `;
+         } else {
+             row.className += " clickable";
+             row.onclick = function(e) { if (e.target.type !== 'checkbox') { var chk = this.querySelector('input[type="checkbox"]'); chk.checked = !chk.checked; chk.dispatchEvent(new Event('change')); }};
+             var dataAttr = (tipo === "gasto") ? `data-gasto-id="${obj.id}"` : `data-adelanto-id="${obj.id}"`;
+             
+             row.innerHTML = `
+               <input class="form-check-input ${tipo === 'gasto' ? 'gasto-check' : 'adelanto-check'}" type="checkbox" value="${obj.monto}" ${dataAttr} onchange="${funcName}()" checked>
+               <div class="gasto-desc text-start ms-2">
+                  ${obj.fecha ? `<span class="badge bg-light text-secondary border me-1" style="font-size: 0.75em;">${obj.fecha}</span>` : ''}
+                  ${obj.desc}
+               </div>
+               <div class="gasto-monto text-end ms-2 text-nowrap">$ ${new Intl.NumberFormat('es-AR').format(obj.monto)}</div>
+             `;
+         }
+         return row;
+      }
+
+      function recalcularCompras() {
+        var container = document.getElementById('listaContainer_COMPRAS');
+        if(!container) return;
+        var checks = container.querySelectorAll('input[type="checkbox"]'); 
+        var total = 0; var ids = [];
+        checks.forEach(chk => { 
+           if (chk.checked) {
+              total += parseFloat(chk.value || 0); 
+              if(!chk.disabled) ids.push(chk.getAttribute("data-gasto-id"));
+           }
+        });
+        var inp = document.getElementById("inputComprasTotal");
+        if (inp) inp.value = total > 0 ? total.toFixed(2) : "";
+        document.getElementById("gastosIds").value = ids.join(",");
+      }
+
+      function recalcularAdelantos() {
+        var contCaja = document.getElementById('listaContainer_CAJA');
+        if(contCaja) {
+           var totalCaja = 0;
+           contCaja.querySelectorAll('input[type="checkbox"]').forEach(chk => { if(chk.checked) totalCaja += parseFloat(chk.value || 0); });
+           var inpCaja = document.getElementById("inputAdelantosCaja");
+           if(inpCaja) inpCaja.value = totalCaja > 0 ? totalCaja.toFixed(2) : "";
+        }
+        var contMerc = document.getElementById('listaContainer_MERC');
+        if(contMerc) {
+           var totalMerc = 0;
+           contMerc.querySelectorAll('input[type="checkbox"]').forEach(chk => { if(chk.checked) totalMerc += parseFloat(chk.value || 0); });
+           var inpMerc = document.getElementById("inputAdelantosMerc");
+           if(inpMerc) inpMerc.value = totalMerc > 0 ? totalMerc.toFixed(2) : "";
+        }
+      }
+
+      function borrarItemAdelanto(id) { if(!confirm("¿Borrar este adelanto de Mercadería?")) return; document.getElementById("loading").style.display = "block"; google.script.run.withSuccessHandler(function(res){ if(res !== "OK") alert(res); cargarForm(); }).eliminarMovimientoRRHH(id); }
+      function borrarCompra(id) { if(!confirm("¿Borrar este gasto?")) return; document.getElementById("loading").style.display = "block"; google.script.run.withSuccessHandler(function(res){ if(res !== "OK") alert(res); cargarForm(); }).eliminarCompra(id); }
+
+      function abrirModal() {
+        document.getElementById("inputMontoModal").value = "";
+        document.getElementById("selectEmpModal").value = "";
+        document.getElementById("txtNetoModal").innerText = "$ 0.00";
+        document.getElementById("modalTitulo").innerHTML = '<i class="bi bi-basket2-fill me-2"></i>Retiro Mercadería';
+        modalMercaderia.show();
+      }
+
+      function calcularDescuento() {
+        var bruto = parseFloat(document.getElementById("inputMontoModal").value);
+        if (isNaN(bruto)) bruto = 0;
+        var neto = bruto * 0.8; 
+        document.getElementById("txtNetoModal").innerText = "$ " + new Intl.NumberFormat('es-AR').format(neto);
+      }
+
+      function guardarDetalle() {
+        var emp = document.getElementById("selectEmpModal").value; var bruto = document.getElementById("inputMontoModal").value;
+        if(!emp || !bruto || bruto <= 0) { alert("Completa los datos"); return; }
+        
+        var neto = parseFloat(bruto) * 0.8; 
+        var btn = document.getElementById("btnGuardarModal"); btn.disabled = true; btn.innerText = "Guardando...";
+        var funcionBackend = "registrarRetiroMercaderia";
+        var turno = document.getElementById("selectTurno").value;
+        
+        google.script.run.withSuccessHandler(function(res){
+           btn.disabled = false; btn.innerText = "IMPUTAR A CUENTA CORRIENTE";
+           if(res !== "OK") { alert(res); return; }
+           
+           var container = document.getElementById("listaContainer_MERC");
+           var emptyMsg = container.querySelector(".empty-msg"); if(emptyMsg) emptyMsg.remove();
+
+           var nuevoItem = { id: "NEW_" + Date.now(), desc: emp + " (Nuevo)", monto: neto, fecha: "Ahora", obligatorio: true };
+           
+           var el = crearElementoLista(nuevoItem, "recalcularAdelantos", "adelantoMerc");
+           el.querySelector("input").checked = true;
+           container.appendChild(el);
+           
+           recalcularAdelantos();
+           modalMercaderia.hide(); 
+        })[funcionBackend](emp, neto, turno); 
+      }
+
+      // --- LÓGICA DEL MODAL SUMADOR (CALCULADORA) ---
+  function abrirModalCalculadora(idInputDestino) {
+    inputDestinoId = idInputDestino;
+    limpiarCalculadora();
+    
+   // --- NUEVO: Traer valor actual del input ---
+    var input = document.getElementById(inputDestinoId);
+    if (input && input.value) {
+        var valorActual = parseFloat(input.value);
+        // Si hay un numero valido y mayor a 0, lo agregamos de una vez
+        if (!isNaN(valorActual) && valorActual > 0) {
+            agregarItemVisual(valorActual);
+        }
+    }
+    modalCalculadora.show();
+    // Ponemos foco en el input del modal para escribir rápido
+    setTimeout(() => document.getElementById("calcInputMonto").focus(), 500);
+  }
+
+  function agregarACalculadora() {
+    var input = document.getElementById("calcInputMonto");
+    var valor = parseFloat(input.value);
+    
+    if (isNaN(valor) || valor <= 0) return;
+
+    agregarItemVisual(valor);
+    
+    input.value = "";
+    input.focus();
+  }
+
+  function agregarItemVisual(monto) {
+    totalCalculadora += monto;
+    actualizarTotalVisual();
+
+    var ul = document.getElementById("calcListaItems");
+    var li = document.createElement("li");
+    li.className = "list-group-item d-flex justify-content-between align-items-center py-1 px-3";
+    li.innerHTML = `
+        <span class="text-dark fw-bold">+ $ ${new Intl.NumberFormat('es-AR').format(monto)}</span>
+        <button class="btn btn-link text-danger p-0 text-decoration-none" onclick="borrarItemCalculadora(this, ${monto})"><i class="bi bi-x-lg"></i></button>
+    `;
+    ul.prepend(li); // Agregar al principio de la lista
+  }
+
+  function borrarItemCalculadora(btn, monto) {
+    totalCalculadora -= monto;
+    if(totalCalculadora < 0) totalCalculadora = 0;
+    actualizarTotalVisual();
+    btn.closest("li").remove();
+  }
+
+  function actualizarTotalVisual() {
+    document.getElementById("calcTxtTotal").innerText = "$ " + new Intl.NumberFormat('es-AR', {minimumFractionDigits: 2}).format(totalCalculadora);
+  }
+
+  function limpiarCalculadora() {
+    totalCalculadora = 0;
+    document.getElementById("calcListaItems").innerHTML = "";
+    document.getElementById("calcInputMonto").value = "";
+    document.getElementById("calcFooterMsg").style.display = "none";
+    actualizarTotalVisual();
+  }
+
+  function confirmarCalculo() {
+    if (inputDestinoId) {
+        var inputDestino = document.getElementById(inputDestinoId);
+        if (inputDestino) {
+            // Asigna el total acumulado al input original
+            inputDestino.value = totalCalculadora > 0 ? totalCalculadora.toFixed(2) : "";
+        }
+    }
+    modalCalculadora.hide();
+  }
+
+
+      function obtenerIcono(nombre) { if (nombre.includes("efectivo")) return "bi-cash-coin"; if (nombre.includes("tarjeta")) return "bi-credit-card-2-front-fill"; if (nombre.includes("gasto") || nombre.includes("compra") || nombre.includes("pago")) return "bi-cart-fill"; if (nombre.includes("mp") || nombre.includes("qr")) return "bi-qr-code"; if (nombre.includes("transferencia") || nombre.includes("banco")) return "bi-bank2"; if (nombre.includes("adelanto")) return "bi-person-down"; if (nombre.includes("cta") || nombre.includes("cobro")) return "bi-journal-text"; return "bi-tag-fill"; }
+      function enviar(e) { e.preventDefault(); var btn = document.getElementById("btnGuardar"); btn.disabled = true; btn.innerText = "Guardando..."; google.script.run.withSuccessHandler(res => { alert(res); document.getElementById("formCierre").reset(); var hoy = new Date(); var dia = ("0" + hoy.getDate()).slice(-2); var mes = ("0" + (hoy.getMonth() + 1)).slice(-2); document.getElementById("inputFecha").value = hoy.getFullYear() + "-" + mes + "-" + dia; document.getElementById("contenedorInputs").style.display = "none"; document.getElementById("botonera").style.display = "none"; document.getElementById("selectTurno").value = ""; btn.disabled = false; btn.innerText = "CONFIRMAR CIERRE"; actualizarHistorial(); }).guardarCierre(document.getElementById("formCierre")); }
+    </script>
+  </body>
+</html>
+
+
+
+Funciones_Adelantos.gs
+// ==========================================
+// === LÓGICA DE ADELANTOS (TERMINAL) ===
+// ==========================================
+
+// ==========================================
+// === FUNCIÓN UNIFICADA: GUARDADO DE ADELANTO (DEBE) Y SUELDO (HABER) ===
+// ==========================================
+
+/**
+ * Registra el Adelanto (DEBE) en la CtaCte del Empleado y, opcionalmente, el Ingreso (HABER)
+ * si el usuario marcó la opción "Registrar Ingreso".
+ */
+function guardarAdelantoDoble(formObject) {
+  var ssRRHH = SpreadsheetApp.openById(ID_RRHH); 
+  var ssMov = SpreadsheetApp.openById(ID_MOVIMIENTOS); 
+  var zona = ssRRHH.getSpreadsheetTimeZone(); 
+
+  try {
+    // 1. Obtener y validar datos
+    var fecha = new Date(); // Captura Fecha Y HORA actual
+    var empleado = String(formObject.empleadoFinal).trim();
+    var monto = parseFloat(formObject.monto) || 0;
+    var detalleUsuario = String(formObject.detalle).trim();
+    var origen = formObject.origen; 
+    var registrarIngreso = formObject.registrarIngreso; 
+
+    if (!empleado) return "Error: Falta seleccionar empleado.";
+    if (monto <= 0) return "Error: El monto debe ser mayor a cero.";
+
+    // 2. Preparar hojas
+    var hojaCtaCte = ssRRHH.getSheetByName("CtaCte Empleados"); 
+    if (!hojaCtaCte) {
+      hojaCtaCte = ssRRHH.insertSheet("CtaCte Empleados");
+      hojaCtaCte.appendRow(["Fecha", "Empleado", "Concepto", "Debe (Adelantos)", "Haber (Sueldos)", "Medio/Origen"]);
+    }
+    
+    // 3. Construir Medio de Pago y Validar Cierre (Si origen es Caja)
+    var medioPago = origen; 
+    var turnoAsignado = formObject.turnoAsignado;
+
+    if (origen === "Caja") {
+       if (!turnoAsignado) return "Error: Si el origen es Caja, debes elegir un turno.";
+       
+       // Validación de cierre
+       var fechaStrISO = Utilities.formatDate(fecha, zona, "yyyy-MM-dd"); 
+       if (typeof esTurnoCerrado === 'function' && esTurnoCerrado(fechaStrISO, turnoAsignado)) {
+         return "Error: La Caja del turno '" + turnoAsignado + "' ya fue cerrada. No puedes agregar movimientos.";
+       }
+
+       var fechaStr = Utilities.formatDate(fecha, zona, "dd/MM/yyyy");
+       medioPago = "Caja " + fechaStr + " " + turnoAsignado;
+    }
+
+    // --- REGISTRO PRINCIPAL ---
+    
+    // A. REGISTRO DEL ADELANTO (DEBE)
+    var conceptoAdelanto = "Adelanto - " + detalleUsuario;
+    hojaCtaCte.appendRow([fecha, empleado, conceptoAdelanto, monto, 0, medioPago]);
+
+    // B. REGISTRO DEL INGRESO (HABER)
+    if (registrarIngreso) {
+      var conceptoIngreso = "Sueldo " + detalleUsuario;
+      hojaCtaCte.appendRow([fecha, empleado, conceptoIngreso, 0, monto, "-"]);
+    }
+    
+    // Aplicar formatos a las filas añadidas (FECHA Y HORA)
+    var filasAgregadas = registrarIngreso ? 2 : 1;
+    var lr = hojaCtaCte.getLastRow();
+    // CAMBIO: Formato con hora "dd/mm/yyyy hh:mm"
+    hojaCtaCte.getRange(lr - filasAgregadas + 1, 1, filasAgregadas, 1).setNumberFormat("dd/mm/yyyy hh:mm");
+    hojaCtaCte.getRange(lr - filasAgregadas + 1, 4, filasAgregadas, 2).setNumberFormat("$ #,##0.00");
+
+
+    // 4. IMPACTO EN MOVIMIENTOS (Solo si es Rendición)
+    if (origen === "Rendición") {
+      var hojaRend = ssMov.getSheetByName("Rendiciones");
+      if (!hojaRend) hojaRend = ssMov.insertSheet("Rendiciones");
+      
+      var detalleCaja = "Adelanto: " + empleado + " (" + detalleUsuario + ")";
+      // Escribe en HABER (Egreso/Salida)
+      hojaRend.appendRow([fecha, detalleCaja, 0, monto, "RRHH"]);
+      
+      // CAMBIO: Formato en Rendiciones también
+      var lrRend = hojaRend.getLastRow();
+      hojaRend.getRange(lrRend, 1).setNumberFormat("dd/mm/yyyy hh:mm");
+      hojaRend.getRange(lrRend, 3, 1, 2).setNumberFormat("$ #,##0.00");
+      
+      var msg = `✅ Adelanto registrado (Descontado de Rendiciones).`;
+      if (registrarIngreso) msg += ` Se registró el ingreso de Sueldo/Bono.`;
+      return msg;
+      
+    } else {
+      var msg = `✅ Adelanto registrado (Se descontará al cerrar la caja ${turnoAsignado}).`;
+      if (registrarIngreso) msg += ` Se registró el ingreso de Sueldo/Bono.`;
+      return msg;
+    }
+
+  } catch (e) { 
+    Logger.log("Error en guardarAdelantoDoble: " + e.message);
+    return "Error al registrar: " + e.message; 
+  }
+}
+
+
+function guardarAdelanto(form) {
+  try {
+    var fecha = new Date(); // Captura Fecha Y HORA
+    var empleado = form.empleadoFinal;
+    var monto = parseFloat(form.monto);
+    var detalleUsuario = form.detalle;
+    var origen = form.origen; 
+
+    if (!empleado || empleado.trim() === "") return "Error: Falta seleccionar empleado.";
+
+    // 1. GUARDAR EN CTA CTE (RRHH)
+    var ssRRHH = SpreadsheetApp.openById(ID_RRHH);
+    var hojaRRHH = ssRRHH.getSheetByName("CtaCte Empleados"); 
+    
+    if (!hojaRRHH) {
+      hojaRRHH = ssRRHH.insertSheet("CtaCte Empleados");
+      hojaRRHH.appendRow(["Fecha", "Empleado", "Concepto", "Debe (Pagos)", "Haber (Sueldos)", "Medio Pago"]);
+    }
+    
+    var concepto = "Adelanto - " + detalleUsuario;
+    var medioPago = origen; 
+    var zona = ssRRHH.getSpreadsheetTimeZone();
+
+    if (origen === "Caja") {
+       var turnoAsignado = form.turnoAsignado; 
+       if (!turnoAsignado) return "Error: Si el origen es Caja, debes elegir un turno.";
+       
+       // Validación de cierre
+       var fechaStrISO = Utilities.formatDate(fecha, zona, "yyyy-MM-dd");
+       if (typeof esTurnoCerrado === 'function' && esTurnoCerrado(fechaStrISO, turnoAsignado)) {
+         return "Error: La Caja del turno '" + turnoAsignado + "' ya fue cerrada. No puedes agregar movimientos.";
+       }
+
+       var fechaStr = Utilities.formatDate(fecha, zona, "dd/MM/yyyy");
+       medioPago = "Caja " + fechaStr + " " + turnoAsignado;
+    }
+
+    // Escribe en DEBE (Deuda del empleado)
+    hojaRRHH.appendRow([fecha, empleado, concepto, monto, 0, medioPago]);
+    
+    // Formatos RRHH (CAMBIO: Agregada hora)
+    var lr = hojaRRHH.getLastRow();
+    hojaRRHH.getRange(lr, 1).setNumberFormat("dd/mm/yyyy hh:mm");
+    hojaRRHH.getRange(lr, 4).setNumberFormat("$ #,##0.00");
+
+    // 2. IMPACTO EN MOVIMIENTOS (Solo si es Rendición)
+    if (origen === "Rendición") {
+      var ssMov = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+      var hojaRend = ssMov.getSheetByName("Rendiciones");
+      if (!hojaRend) hojaRend = ssMov.insertSheet("Rendiciones");
+      
+      var detalleCaja = "Adelanto: " + empleado + " (" + detalleUsuario + ")";
+      // Escribe en HABER (Salida)
+      hojaRend.appendRow([fecha, detalleCaja, 0, monto, "RRHH"]);
+
+      // CAMBIO: Formato en Rendiciones también
+      var lrRend = hojaRend.getLastRow();
+      hojaRend.getRange(lrRend, 1).setNumberFormat("dd/mm/yyyy hh:mm");
+      hojaRend.getRange(lrRend, 3, 1, 2).setNumberFormat("$ #,##0.00");
+      
+      return "✅ Adelanto registrado (Descontado de Rendiciones).";
+    } else {
+      return "✅ Adelanto registrado (Se descontará al cerrar la caja " + form.turnoAsignado + ").";
+    }
+
+  } catch (e) { return "Error: " + e.message; }
+}
+
+function obtenerEmpleadosParaSelector() {
+  try {
+    var ss = SpreadsheetApp.openById(ID_RRHH);
+    var hoja = ss.getSheetByName("Personal");
+    if (!hoja) return ["Error: No existe hoja 'Personal' en archivo Sueldos"];
+    
+    var lastRow = hoja.getLastRow();
+    if (lastRow < 2) return []; 
+    
+    var datos = hoja.getRange(2, 1, lastRow - 1, 6).getValues();
+    var lista = [];
+    
+    for (var i = 0; i < datos.length; i++) {
+      if (datos[i][0] && datos[i][5] === true) {
+        lista.push(datos[i][0]);
+      }
+    }
+    return lista.sort();
+  } catch (e) { return ["Error: " + e.message]; }
+}
+
+
+
+
+Adelantos.html
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+    <style>
+      body { background-color: #f0f2f5; padding: 20px; font-family: 'Segoe UI', sans-serif; }
+      .card-form { max-width: 500px; margin: 0 auto; background: white; padding: 25px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+      .btn-lg { height: 55px; font-weight: 700; font-size: 1.1rem; }
+      
+      /* TEMA NARANJA */
+      .text-orange { color: #fd7e14 !important; }
+      .bg-orange { background-color: #fd7e14 !important; color: white !important; border-color: #fd7e14 !important; }
+      .border-orange { border-color: #fd7e14 !important; }
+      .btn-orange { background-color: #fd7e14; border-color: #fd7e14; color: white; font-weight: bold; }
+      .btn-orange:hover { background-color: #e36a0d; color: white; }
+      .spinner-orange { color: #fd7e14; }
+    </style>
+  </head>
+  <body>
+    
+    <div class="mb-4 text-center">
+      <? var url = getAppUrl(); ?>
+      <a href="<?= url ?>?app=empleados" class="text-decoration-none text-secondary fw-bold small">
+        <i class="bi bi-chevron-left"></i> VOLVER AL MENÚ
+      </a>
+    </div>
+
+    <div class="card-form">
+      <h4 class="text-center text-orange fw-bold mb-4">Adelanto</h4>
+
+      <div id="loading" class="text-center my-4">
+        <div class="spinner-border spinner-orange"></div>
+        <div class="small mt-2 text-muted">Cargando personal...</div>
+      </div>
+
+      <form id="formAdelanto" onsubmit="enviar(event)" style="display:none;">
+        
+        <input type="hidden" name="empleadoFinal" id="empleadoFinal">
+
+        <div class="mb-4 p-3 bg-light rounded border-0">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <label class="form-label fw-bold text-muted small mb-0">PERSONA</label>
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="switchManual" onchange="toggleModoManual()">
+              <label class="form-check-label small text-muted" for="switchManual">Fijo / Eventual</label>
+            </div>
+          </div>
+          <div id="divSelector">
+            <select id="selectEmpleado" class="form-select form-select-lg border-secondary">
+              <option value="" selected disabled>Buscar empleado...</option>
+            </select>
+          </div>
+          <div id="divManual" style="display:none;">
+            <input type="text" id="inputNombreManual" class="form-control form-control-lg border-secondary" placeholder="Escriba el nombre...">
+            <div class="form-text small">Para personal eventual.</div>
+          </div>
+        </div>
+
+        <div class="mb-4">
+          <label class="fw-bold small text-muted">ORIGEN DEL DINERO</label>
+          <select name="origen" id="selectOrigen" class="form-select form-select-lg border-secondary" required onchange="toggleTurno()">
+            <option value="Caja" selected>Caja</option>
+            <option value="Rendición">Rendiciones</option>
+          </select>
+        </div>
+
+        <div class="mb-4" id="divTurnoAsignar">
+          <label class="fw-bold small text-orange">ASIGNAR A CAJA DE:</label>
+          <select name="turnoAsignado" id="selectTurnoAsignado" class="form-select form-select-lg border-orange fw-bold">
+            <option value="" selected disabled>Elegir turno...</option>
+            <option value="Mañana">Mañana</option>
+            <option value="Tarde">Tarde</option>
+            <option value="Delivery">Delivery</option>
+          </select>
+          <div class="form-text small">Este adelanto aparecerá en el cierre del turno elegido.</div>
+        </div>
+
+        <div class="mb-4">
+          <label class="fw-bold small text-muted">MONTO A RETIRAR</label>
+          <div class="input-group input-group-lg">
+            <span class="input-group-text bg-orange">$</span>
+            <input type="number" name="monto" id="inputMonto" class="form-control fw-bold border-orange text-end" step="0.01" required placeholder="0">
+          </div>
+        </div>
+
+        <div class="mb-4">
+          <label class="fw-bold small text-muted">DETALLE</label>
+          <input type="text" name="detalle" id="inputDetalle" class="form-control form-control-lg border-secondary" placeholder="Ej: Compras, Vale..." required>
+        </div>
+        
+        <div class="form-check form-check-inline mb-4">
+          <input class="form-check-input" type="checkbox" name="registrarIngreso" id="checkIngreso">
+          <label class="form-check-label fw-bold text-muted" for="checkIngreso">
+            <i class="bi bi-person-fill-up me-1 text-success"></i> Registrar Ingreso (Sueldo/Bono)
+          </label>
+          <div class="form-text small mt-0">Si tildas, se registra el adelanto y su contrapartida como ingreso al empleado.</div>
+        </div>
+
+        <button type="submit" class="btn btn-orange w-100 btn-lg shadow-sm" id="btnGuardar">
+          REGISTRAR RETIRO
+        </button>
+      </form>
+
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+      window.onload = function() {
+        google.script.run.withSuccessHandler(llenarSelect).obtenerEmpleadosParaSelector();
+        toggleTurno();
+      };
+
+      function llenarSelect(lista) {
+        document.getElementById("loading").style.display = "none";
+        document.getElementById("formAdelanto").style.display = "block";
+        var sel = document.getElementById("selectEmpleado");
+        
+        if (lista[0] && lista[0].startsWith("Error")) {
+          alert("Atención: " + lista[0]);
+          return;
+        }
+        
+        if (lista.length === 0) {
+           var op = document.createElement("option");
+           op.text = "(Sin empleados activos)";
+           sel.add(op);
+        } else {
+           lista.forEach(nom => {
+             var op = document.createElement("option");
+             op.text = nom;
+             op.value = nom;
+             sel.add(op);
+           });
+        }
+      }
+
+      function toggleModoManual() {
+        var isManual = document.getElementById("switchManual").checked;
+        if(isManual) {
+          document.getElementById("divSelector").style.display = "none";
+          document.getElementById("divManual").style.display = "block";
+          document.getElementById("selectEmpleado").value = ""; 
+        } else {
+          document.getElementById("divSelector").style.display = "block";
+          document.getElementById("divManual").style.display = "none";
+          document.getElementById("inputNombreManual").value = ""; 
+        }
+      }
+
+      function toggleTurno() {
+        var origen = document.getElementById("selectOrigen").value;
+        var divTurno = document.getElementById("divTurnoAsignar");
+        var selectTurno = document.getElementById("selectTurnoAsignado");
+        
+        if (origen === "Caja") {
+          divTurno.style.display = "block";
+          selectTurno.required = true;
+        } else {
+          divTurno.style.display = "none";
+          selectTurno.required = false;
+          selectTurno.value = "";
+        }
+      }
+
+      function enviar(e) {
+        e.preventDefault();
+        
+        var isManual = document.getElementById("switchManual").checked;
+        var nombreFinal = isManual ? document.getElementById("inputNombreManual").value.trim() : document.getElementById("selectEmpleado").value;
+
+        if (!nombreFinal || nombreFinal === "") {
+          alert("Por favor selecciona o escribe un nombre.");
+          return;
+        }
+
+        document.getElementById("empleadoFinal").value = nombreFinal;
+        
+        // 1. Obtener los datos del formulario
+        var form = document.getElementById("formAdelanto");
+        var formData = {};
+        for (var i = 0; i < form.elements.length; i++) {
+            var element = form.elements[i];
+            if (element.name) {
+                if (element.type === 'checkbox') {
+                    formData[element.name] = element.checked;
+                } else {
+                    formData[element.name] = element.value;
+                }
+            }
+        }
+        
+        var btn = document.getElementById("btnGuardar");
+        btn.disabled = true; btn.innerText = "Guardando...";
+        
+        // 2. Llamar a la función de Apps Script con los datos, incluyendo el estado del checkbox
+        google.script.run.withSuccessHandler(res => {
+          alert(res);
+          document.getElementById("formAdelanto").reset();
+          document.getElementById("switchManual").checked = false;
+          toggleModoManual();
+          
+          // Resetear el select de Origen a Caja y mostrar turno
+          document.getElementById("selectOrigen").value = "Caja";
+          toggleTurno();
+          
+          btn.disabled = false; btn.innerText = "REGISTRAR RETIRO";
+        }).guardarAdelantoDoble(formData); // Usamos una función nueva en el backend
+      }
+    </script>
+  </body>
+</html>
+
+
+Funciones_RRHH.gs
+
+// ==========================================
+// === LÓGICA DE RRHH (CUENTA CORRIENTE) ===
+// ==========================================
+
+function obtenerEmpleadosParaSelector() {
+  try {
+    var ss = SpreadsheetApp.openById(ID_RRHH);
+    var hoja = ss.getSheetByName("Personal");
+    if (!hoja) return ["Error: Falta hoja 'Personal'"];
+    var datos = hoja.getRange(2, 1, hoja.getLastRow() - 1, 7).getValues();
+    var lista = [];
+    for (var i = 0; i < datos.length; i++) {
+      if (datos[i][0] && datos[i][6] === true) lista.push(datos[i][0]);
+    }
+    return lista.sort();
+  } catch (e) { return ["Error: " + e.message]; }
+}
+
+// --- GUARDAR RETIRO DE MERCADERÍA (Con Turno) ---
+function registrarRetiroMercaderia(empleado, monto, turnoActual) {
+  try {
+    var ssRRHH = SpreadsheetApp.openById(ID_RRHH);
+    var hoja = ssRRHH.getSheetByName("CtaCte Empleados"); 
+    
+    if (!hoja) {
+      hoja = ssRRHH.insertSheet("CtaCte Empleados");
+      hoja.appendRow(["Fecha", "Empleado", "Concepto", "Debe (Pagos)", "Haber (Sueldos)", "Medio Pago"]);
+      hoja.getRange("A1:F1").setFontWeight("bold");
+    }
+    
+    var fecha = new Date();
+    var concepto = "Retiro Mercadería (-20% off)"; 
+    
+    // CONSTRUIR ETIQUETA: "Caja dd/MM/yyyy Turno"
+    var zona = Session.getScriptTimeZone();
+    var fechaStr = Utilities.formatDate(fecha, zona, "dd/MM/yyyy");
+    var medio = "Caja " + fechaStr + " " + turnoActual; 
+    
+    var valorDebe = parseFloat(monto);
+
+    hoja.appendRow([fecha, empleado, concepto, valorDebe, 0, medio]);
+    
+    var lr = hoja.getLastRow();
+    hoja.getRange(lr, 1).setNumberFormat("dd/MM/yyyy");
+    hoja.getRange(lr, 4, 1, 2).setNumberFormat("$ #,##0.00");
+
+    return "OK"; 
+
+  } catch (e) { return "Error: " + e.message; }
+}
+
+// --- ELIMINAR MOVIMIENTO (Para corregir errores) ---
+function eliminarMovimientoRRHH(idFila) {
+  try {
+    var ssRRHH = SpreadsheetApp.openById(ID_RRHH);
+    var hoja = ssRRHH.getSheetByName("CtaCte Empleados");
+    var fila = parseInt(idFila);
+    
+    if (hoja && fila > 1 && fila <= hoja.getLastRow()) {
+      hoja.deleteRow(fila);
+      return "OK";
+    } else {
+      return "Error: Fila no válida.";
+    }
+  } catch (e) { return "Error al eliminar: " + e.message; }
+}
+
+
+Funciones_Compras.gs
+
+
+// ==========================================
+// === LÓGICA DE GASTOS / COMPRAS ===
+// ==========================================
+
+/*
+// --- 1. OBTENER DATOS ---
+function obtenerDatosCompras() {
+  try {
+    var ssConfig = SpreadsheetApp.getActiveSpreadsheet(); 
+    
+    var hojaProv = ssConfig.getSheetByName("Proveedores");
+    var listaProveedores = {};
+    if (hojaProv && hojaProv.getLastRow() > 1) {
+      var datosProv = hojaProv.getRange(2, 1, hojaProv.getLastRow()-1, 4).getValues();
+      for (var i = 0; i < datosProv.length; i++) {
+        var nombre = String(datosProv[i][0]).trim();
+        if (nombre) {
+          listaProveedores[nombre] = { tipo: datosProv[i][1], detalle: datosProv[i][2], pago: datosProv[i][3] };
+        }
+      }
+    }
+
+    var hojaDatos = ssConfig.getSheetByName("Datos");
+    var opciones = { detalles: [], pagos: [] };
+    if (hojaDatos) {
+      var encabezados = hojaDatos.getRange(1, 1, 1, hojaDatos.getLastColumn()).getValues()[0];
+      var colDetalle = encabezados.indexOf("Detalle");
+      var colPago = encabezados.indexOf("Forma de Pago");
+      var lastRow = hojaDatos.getLastRow();
+      if (lastRow > 1) {
+        var datosD = hojaDatos.getRange(2, 1, lastRow-1, hojaDatos.getLastColumn()).getValues();
+        for (var j = 0; j < datosD.length; j++) {
+          if (colDetalle > -1 && datosD[j][colDetalle]) opciones.detalles.push(datosD[j][colDetalle]);
+          if (colPago > -1 && datosD[j][colPago]) opciones.pagos.push(datosD[j][colPago]);
+        }
+      }
+    }
+    opciones.detalles = [...new Set(opciones.detalles)].filter(Boolean).sort();
+    opciones.pagos = [...new Set(opciones.pagos)].filter(Boolean).sort();
+    return { proveedores: listaProveedores, listas: opciones };
+
+  } catch (e) { return { error: e.message }; }
+}
+*/
+
+// --- 2. OBTENER HISTORIAL DE HOY ---
+function obtenerComprasDelDia() {
+  try {
+    var ssRes = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hoja = ssRes.getSheetByName("Compras");
+    if (!hoja) return [];
+
+    var lastRow = hoja.getLastRow();
+    if (lastRow < 2) return [];
+
+    var datos = hoja.getRange(2, 1, lastRow - 1, 6).getValues(); 
+    var hoyStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyyMMdd");
+    var lista = [];
+
+    for (var i = datos.length - 1; i >= 0; i--) {
+      var fechaRow = datos[i][0];
+      if (fechaRow instanceof Date) {
+        var fechaRowStr = Utilities.formatDate(fechaRow, Session.getScriptTimeZone(), "yyyyMMdd");
+        if (fechaRowStr === hoyStr) {
+          lista.push({
+            id: i + 2,
+            proveedor: datos[i][1],
+            tipo: datos[i][2], 
+            detalle: datos[i][3],
+            monto: datos[i][4],
+            pago: datos[i][5]
+          });
+        }
+      }
+    }
+    return lista; 
+  } catch (e) { return []; }
+}
+
+// --- 3. GUARDAR COMPRA ---
+function guardarCompra(form) {
+  try {
+    var ssRes = SpreadsheetApp.openById(ID_MOVIMIENTOS); 
+    
+    var fecha = new Date();
+    if (form.fechaCompra) {
+      var p = form.fechaCompra.split("-");
+      fecha = new Date(p[0], p[1]-1, p[2]);
+    }
+
+    var proveedor = String(form.proveedor).trim(); 
+    var tipo = form.tipo;
+    var detalle = form.detalle;
+    var monto = parseFloat(form.monto);
+    var pago = form.pago; 
+    var factura = form.factura;
+
+    if (!proveedor) return { error: "Falta el proveedor." };
+    if (isNaN(monto) || monto == 0) return { error: "Monto inválido." };
+
+    // Etiqueta Caja (si corresponde)
+    var pagoFinal = pago;
+    var pagoLower = pago.toLowerCase();
+    if (pagoLower.includes("caja") || pagoLower.includes("efectivo")) {
+       if (!form.turnoAsignado) return { error: "Debes asignar un turno para la Caja." };
+       if (esTurnoCerrado(fecha, form.turnoAsignado)) return { error: "Error: La Caja del turno '" + form.turnoAsignado + "' ya fue cerrada." };
+       var zona = Session.getScriptTimeZone();
+       var fechaStr = Utilities.formatDate(fecha, zona, "dd/MM/yyyy");
+       pagoFinal = "Caja " + fechaStr + " " + form.turnoAsignado;
+    }
+
+    // A. GUARDAR EN COMPRAS
+    var hojaCompras = ssRes.getSheetByName("Compras");
+    if (!hojaCompras) {
+      hojaCompras = ssRes.insertSheet("Compras");
+      hojaCompras.appendRow(["Fecha", "Proveedor", "Tipo", "Detalle", "Monto", "Pago", "Factura"]);
+      hojaCompras.getRange("A1:G1").setFontWeight("bold");
+    }
+    hojaCompras.appendRow([fecha, proveedor, tipo, detalle, monto, pagoFinal, factura]);
+    var lr = hojaCompras.getLastRow();
+    hojaCompras.getRange(lr, 1).setNumberFormat("dd/MM/yyyy");
+    hojaCompras.getRange(lr, 5).setNumberFormat("$ #,##0.00");
+
+    // B. IMPACTOS SECUNDARIOS
+    /*
+    if (pagoLower.includes("cta") || pagoLower.includes("corriente")) {
+      var hojaCtaCte = ssRes.getSheetByName("CtaCte Proveedores");
+      if (!hojaCtaCte) {
+        hojaCtaCte = ssRes.insertSheet("CtaCte Proveedores");
+        hojaCtaCte.appendRow(["Fecha registro", "Proveedor", "Detalle", "Fecha pago", "Debe", "Haber", "Observaciones"]);
+      }
+      var detalleCta = "Compra (" + tipo + ") - " + detalle;
+      hojaCtaCte.appendRow([fecha, proveedor, detalleCta, "", 0, monto, "Carga Terminal"]);
+      hojaCtaCte.getRange(hojaCtaCte.getLastRow(), 1).setNumberFormat("dd/MM/yyyy");
+      hojaCtaCte.getRange(hojaCtaCte.getLastRow(), 5, 1, 2).setNumberFormat("$ #,##0.00");
+
+    } 
+    
+    // --- RENDICIONES (CAJA FUERTE) ---
+    else 
+    */
+    if (pagoLower.includes("rendic")) { 
+      var hojaRend = ssRes.getSheetByName("Rendiciones"); 
+      if (hojaRend) {
+        // CORRECCIÓN: USAMOS "Gasto (Rendiciones)" PARA UNIFICAR CRITERIO
+        var detalleRend = "Gasto (Rendiciones): " + proveedor + " - " + detalle;
+        
+        // Haber (Salida)
+        hojaRend.appendRow([fecha, detalleRend, 0, monto, "Compras"]);
+        hojaRend.getRange(hojaRend.getLastRow(), 1).setNumberFormat("dd/MM/yyyy");
+        hojaRend.getRange(hojaRend.getLastRow(), 3, 1, 2).setNumberFormat("$ #,##0.00");
+      }
+    }
+
+    actualizarListaProveedores(proveedor, tipo, detalle, pago);
+
+    return { 
+   status: "OK", 
+   mensaje: "✅ Gasto registrado.", 
+   listasActualizadas: obtenerHistorialCompleto() // <--- CAMBIO AQUÍ
+    };
+
+  } catch (e) { return { error: e.message }; }
+}
+
+// --- 4. ELIMINAR COMPRA ---
+function eliminarCompra(idFila) {
+  try {
+    var ss = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hojaCompras = ss.getSheetByName("Compras");
+    var fila = parseInt(idFila);
+    
+    if (!hojaCompras || fila < 2) return "Error: Fila no válida.";
+    if (fila > hojaCompras.getLastRow()) return "Error: La fila ya no existe.";
+
+    // Leer datos antes de borrar
+    var datosFila = hojaCompras.getRange(fila, 1, 1, 6).getValues()[0];
+    var fechaCompra = datosFila[0];
+    var proveedorCompra = String(datosFila[1]);
+    var detalleCompra = String(datosFila[3]); 
+    var montoCompra = parseFloat(datosFila[4]);
+    var pagoCompra = String(datosFila[5]).toLowerCase();
+
+    // 1. BORRAR DE CTA CTE PROVEEDORES
+    if (pagoCompra.includes("cta") || pagoCompra.includes("corriente")) {
+       eliminarDeCtaCteProveedor(ss, fechaCompra, proveedorCompra, montoCompra);
+    }
+
+    // 2. BORRAR DE RENDICIONES
+    else if (pagoCompra.includes("rendic")) {
+       eliminarDeRendiciones(ss, fechaCompra, montoCompra, proveedorCompra, detalleCompra);
+    }
+
+    // 3. BORRAR DE COMPRAS
+    try {
+      hojaCompras.deleteRow(fila);
+      return "OK";
+    } catch(err) { return "Error Excel: " + err.message; }
+
+  } catch (e) { return "Error crítico: " + e.message; }
+}
+
+// --- AUXILIAR: BORRAR DE RENDICIONES ---
+function eliminarDeRendiciones(ss, fechaTarget, montoTarget, provTarget, detalleTarget) {
+  var hoja = ss.getSheetByName("Rendiciones");
+  if (!hoja) return;
+  
+  var datos = hoja.getDataRange().getValues();
+  var zona = ss.getSpreadsheetTimeZone();
+  var fechaTargetStr = Utilities.formatDate(new Date(fechaTarget), zona, "yyyyMMdd");
+  
+  // CORRECCIÓN: USAMOS EL MISMO STRING QUE AL GUARDAR
+  var detalleBuscado = "Gasto (Rendiciones): " + provTarget + " - " + detalleTarget;
+
+  // Estructura Rendiciones: A=Fecha, B=Detalle, D=Haber
+  for (var i = 1; i < datos.length; i++) {
+    var fechaRow = datos[i][0];
+    var detalleRow = String(datos[i][1]);
+    var haberRow = parseFloat(datos[i][3]); 
+    
+    if (fechaRow instanceof Date) {
+      var fechaRowStr = Utilities.formatDate(fechaRow, zona, "yyyyMMdd");
+      
+      // Coincidencia exacta
+      if (fechaRowStr === fechaTargetStr && haberRow === montoTarget && detalleRow === detalleBuscado) {
+        hoja.deleteRow(i + 1); 
+        break; 
+      }
+    }
+  }
+}
+
+// --- AUXILIAR: BORRAR DE CTA CTE ---
+function eliminarDeCtaCteProveedor(ss, fechaTarget, provTarget, montoTarget) {
+  var hoja = ss.getSheetByName("CtaCte Proveedores");
+  if (!hoja) return;
+  var datos = hoja.getDataRange().getValues();
+  var zona = ss.getSpreadsheetTimeZone();
+  var fechaTargetStr = Utilities.formatDate(new Date(fechaTarget), zona, "yyyyMMdd");
+  var provTargetLimpio = provTarget.toLowerCase().trim();
+
+  for (var i = 1; i < datos.length; i++) {
+    var fechaRow = datos[i][0];
+    var provRow = String(datos[i][1]).toLowerCase().trim();
+    var haberRow = parseFloat(datos[i][5]); 
+    
+    if (fechaRow instanceof Date) {
+      var fechaRowStr = Utilities.formatDate(fechaRow, zona, "yyyyMMdd");
+      if (fechaRowStr === fechaTargetStr && provRow === provTargetLimpio && haberRow === montoTarget) {
+        hoja.deleteRow(i + 1);
+        break;
+      }
+    }
+  }
+}
+
+function actualizarListaProveedores(nombre, tipo, detalle, pago) {
+  try {
+    var ssConfig = SpreadsheetApp.getActiveSpreadsheet();
+    var hojaProv = ssConfig.getSheetByName("Proveedores");
+    if (hojaProv) {
+      var datos = hojaProv.getDataRange().getValues();
+      var existe = false;
+      var nombreBuscado = nombre.toLowerCase().trim();
+      for (var i = 1; i < datos.length; i++) {
+        if (String(datos[i][0]).toLowerCase().trim() === nombreBuscado) { existe = true; break; }
+      }
+      if (!existe) hojaProv.appendRow([nombre, tipo, detalle, pago]);
+    }
+  } catch(e) { console.error(e); }
+}
+
+/*
+// --- 2. OBTENER HISTORIAL (HOY + 30 DÍAS) ---
+function obtenerHistorialCompleto() {
+  try {
+    var ssRes = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hoja = ssRes.getSheetByName("Compras");
+    if (!hoja) return { hoy: [], antiguas: [] };
+
+    var lastRow = hoja.getLastRow();
+    if (lastRow < 2) return { hoy: [], antiguas: [] };
+
+    // Leemos las últimas 500 filas (suficiente para un mes)
+    var startRow = Math.max(2, lastRow - 500);
+    var numRows = lastRow - startRow + 1;
+    var datos = hoja.getRange(startRow, 1, numRows, 6).getValues(); 
+    
+    var zona = Session.getScriptTimeZone();
+    var hoyObj = new Date();
+    var hoyStr = Utilities.formatDate(hoyObj, zona, "yyyyMMdd");
+    
+    // Fecha límite (30 días atrás)
+    var limiteObj = new Date();
+    limiteObj.setDate(limiteObj.getDate() - 30);
+    var limiteStr = Utilities.formatDate(limiteObj, zona, "yyyyMMdd");
+
+    var listaHoy = [];
+    var listaAntiguas = [];
+
+    // Recorremos de abajo hacia arriba (más nuevo primero)
+    for (var i = datos.length - 1; i >= 0; i--) {
+      var fechaRow = datos[i][0];
+      
+      if (fechaRow instanceof Date) {
+        var fechaStr = Utilities.formatDate(fechaRow, zona, "yyyyMMdd");
+        var fechaVisual = Utilities.formatDate(fechaRow, zona, "dd/MM");
+        
+        var item = {
+          id: startRow + i, // ID Real
+          proveedor: datos[i][1],
+          tipo: datos[i][2], 
+          detalle: datos[i][3],
+          monto: datos[i][4],
+          pago: datos[i][5],
+          fecha: fechaVisual
+        };
+
+        if (fechaStr === hoyStr) {
+          // Es de HOY
+          listaHoy.push(item);
+        } else if (fechaStr >= limiteStr && fechaStr < hoyStr) {
+          // Es ANTIGUA (hasta 30 días)
+          listaAntiguas.push(item);
+        }
+      }
+    }
+    
+    return { hoy: listaHoy, antiguas: listaAntiguas };
+
+  } catch (e) { return { hoy: [], antiguas: [], error: e.message }; }
+}
+*/
+
+// ==========================================
+// === LÓGICA DE GASTOS / COMPRAS ===
+// ==========================================
+
+// --- 1. OBTENER DATOS (PROVEEDORES Y LISTAS) ---
+function obtenerDatosCompras() {
+  try {
+    var ssConfig = SpreadsheetApp.getActiveSpreadsheet(); 
+    
+    // ... (Tu lógica de carga de proveedores y listas) ...
+    
+    var hojaProv = ssConfig.getSheetByName("Proveedores");
+    var listaProveedores = {};
+    if (hojaProv && hojaProv.getLastRow() > 1) {
+      var datosProv = hojaProv.getRange(2, 1, hojaProv.getLastRow()-1, 4).getValues();
+      for (var i = 0; i < datosProv.length; i++) {
+        var nombre = String(datosProv[i][0]).trim();
+        if (nombre) {
+          listaProveedores[nombre] = { tipo: datosProv[i][1], detalle: datosProv[i][2], pago: datosProv[i][3] };
+        }
+      }
+    }
+
+    var hojaDatos = ssConfig.getSheetByName("Datos");
+    var opciones = { detalles: [], pagos: [] };
+    if (hojaDatos) {
+      var encabezados = hojaDatos.getRange(1, 1, 1, hojaDatos.getLastColumn()).getValues()[0];
+      var colDetalle = encabezados.indexOf("Detalle");
+      var colPago = encabezados.indexOf("Forma de Pago");
+      var lastRow = hojaDatos.getLastRow();
+      if (lastRow > 1) {
+        var datosD = hojaDatos.getRange(2, 1, lastRow-1, hojaDatos.getLastColumn()).getValues();
+        for (var j = 0; j < datosD.length; j++) {
+          if (colDetalle > -1 && datosD[j][colDetalle]) opciones.detalles.push(datosD[j][colDetalle]);
+          if (colPago > -1 && datosD[j][colPago]) opciones.pagos.push(datosD[j][colPago]);
+        }
+      }
+    }
+    opciones.detalles = [...new Set(opciones.detalles)].filter(Boolean).sort();
+    opciones.pagos = [...new Set(opciones.pagos)].filter(Boolean).sort();
+    return { proveedores: listaProveedores, listas: opciones };
+
+  } catch (e) { return { error: e.message }; }
+}
+
+// --- 2. OBTENER HISTORIAL (HOY + 30 DÍAS CON ORDENAMIENTO) ---
+function obtenerHistorialCompleto(sortType) {
+  try {
+    var ssRes = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hoja = ssRes.getSheetByName("Compras");
+    if (!hoja) return { hoy: [], antiguas: [] };
+
+    var lastRow = hoja.getLastRow();
+    if (lastRow < 2) return { hoy: [], antiguas: [] };
+
+    // Leemos las últimas 500 filas
+    var startRow = Math.max(2, lastRow - 500);
+    var numRows = lastRow - startRow + 1;
+    var datos = hoja.getRange(startRow, 1, numRows, 6).getValues(); 
+    
+    var zona = Session.getScriptTimeZone();
+    var hoyObj = new Date();
+    var hoyStr = Utilities.formatDate(hoyObj, zona, "yyyyMMdd");
+    
+    // Fecha límite (30 días atrás)
+    var limiteObj = new Date();
+    limiteObj.setDate(limiteObj.getDate() - 30);
+    var limiteStr = Utilities.formatDate(limiteObj, zona, "yyyyMMdd");
+
+    var listaHoy = [];
+    var listaAntiguas = [];
+
+    // Recorremos de abajo hacia arriba (más nuevo primero)
+    for (var i = datos.length - 1; i >= 0; i--) {
+      var fechaRow = datos[i][0];
+      
+      if (fechaRow instanceof Date) {
+        var fechaStr = Utilities.formatDate(fechaRow, zona, "yyyyMMdd");
+        var fechaVisual = Utilities.formatDate(fechaRow, zona, "dd/MM");
+        
+        var item = {
+          id: startRow + i, // ID Real
+          proveedor: datos[i][1],
+          tipo: datos[i][2], 
+          detalle: datos[i][3],
+          monto: datos[i][4],
+          pago: datos[i][5],
+          fecha: fechaVisual,
+          fechaRaw: fechaRow // Guardamos el objeto Date para ordenar correctamente
+        };
+
+        if (fechaStr === hoyStr) {
+          listaHoy.push(item);
+        } else if (fechaStr >= limiteStr && fechaStr < hoyStr) {
+          listaAntiguas.push(item);
+        }
+      }
+    }
+    
+    // 3. LÓGICA DE ORDENAMIENTO PARA ANTIGUAS
+    if (sortType === 'proveedor') {
+        listaAntiguas.sort(function(a, b) {
+            return String(a.proveedor).localeCompare(String(b.proveedor));
+        });
+    } else {
+        // Ordenar por fecha (default) - Se hace aquí porque el loop es LIFO. 
+        // Para asegurar que sea por fecha descendente, ordenamos por la propiedad fechaRaw.
+        listaAntiguas.sort(function(a, b) {
+            return b.fechaRaw.getTime() - a.fechaRaw.getTime();
+        });
+    }
+    
+    // Limpiamos las propiedades crudas antes de enviar
+    listaAntiguas.forEach(item => delete item.fechaRaw);
+    listaHoy.forEach(item => delete item.fechaRaw);
+    
+    return { hoy: listaHoy, antiguas: listaAntiguas };
+
+  } catch (e) { return { hoy: [], antiguas: [], error: e.message }; }
+}
+
+
+// --- OBTENER FACTURAS PENDIENTES ---
+function obtenerFacturasPendientes() {
+  try {
+    var ssRes = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hoja = ssRes.getSheetByName("Compras");
+    if (!hoja || hoja.getLastRow() < 2) return [];
+
+    var datos = hoja.getDataRange().getValues();
+    var listaPendientes = [];
+    var zona = Session.getScriptTimeZone();
+
+    // Buscamos las columnas por nombre para mayor seguridad
+    var encabezados = datos[0];
+    var colFecha = 0; // Asumimos Col A
+    var colProveedor = 1; // Asumimos Col B
+    var colDetalle = 3; // Asumimos Col D
+    var colMonto = 4; // Asumimos Col E
+    var colFactura = 6; // Col G: Estado Factura
+
+    for (var i = 1; i < datos.length; i++) {
+      var estadoFactura = String(datos[i][colFactura]).trim();
+      
+      if (estadoFactura === "Pendiente") {
+        var fechaRaw = datos[i][colFecha];
+        
+        listaPendientes.push({
+          fecha: (fechaRaw instanceof Date) ? Utilities.formatDate(fechaRaw, zona, "dd/MM/yyyy") : "",
+          proveedor: datos[i][colProveedor],
+          detalle: datos[i][colDetalle],
+          monto: datos[i][colMonto],
+          id: i + 1 // Fila real
+        });
+      }
+    }
+    
+    // Devolvemos lo más nuevo primero
+    return listaPendientes.reverse(); 
+
+  } catch (e) { return { error: "Error obteniendo pendientes: " + e.message }; }
+}
+
+// --- NUEVA FUNCIÓN: MARCAR FACTURA COMO ENTREGADA ---
+function marcarFacturaEntregada(idFila) {
+  try {
+    var ss = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hoja = ss.getSheetByName("Compras");
+    var fila = parseInt(idFila);
+    
+    // Columna G (índice 6) es el Estado Factura
+    var colEstado = 7; 
+    
+    // Validar y cambiar estado a 'Entregada'
+    if (hoja && fila >= 2 && fila <= hoja.getLastRow()) {
+      hoja.getRange(fila, colEstado).setValue("Entregada");
+      return "OK";
+    } else {
+      return "Error: Fila no válida o no encontrada.";
+    }
+  } catch (e) {
+    return "Error al marcar como entregada: " + e.message;
+  }
+}
+
+ // ... (Asegúrate de que la función obtenerFacturasPendientes exista, la cual devuelve el ID de fila) ...
+ /* Ejemplo de retorno para obtenerFacturasPendientes:
+  listaPendientes.push({
+  fecha: ...,
+  proveedor: ...,
+  detalle: ...,
+  monto: ...,
+  id: i + 1 // <--- LA FILA REAL ES CLAVE
+});
+*/
+
+
+
+Compras.html
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+    <style>
+      body { background-color: #f0f2f5; padding: 20px; font-family: 'Segoe UI', sans-serif; }
+      
+      .card-form { max-width: 600px; margin: 0 auto; background: white; padding: 25px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+      
+      .btn-lg { height: 55px; font-weight: 700; font-size: 1.1rem; }
+      
+      .input-group-text { background-color: #f8f9fa; border-right: none; color: #6c757d; }
+      .form-control, .form-select { border-left: none; border-color: #ced4da; }
+      .form-control:focus, .form-select:focus { border-color: #dc3545; box-shadow: none; }
+      .input-group { border: 1px solid #ced4da; border-radius: 0.375rem; overflow: hidden; }
+      
+      /* Estilo lista */
+      .compra-item { padding: 12px 10px; border-bottom: 1px solid #f0f0f0; }
+      .compra-item:last-child { border-bottom: none; }
+      
+      /* Estilo Acordeón limpio */
+      .accordion-button { 
+        padding: 12px 15px; background-color: #f8f9fa; color: #6c757d; 
+        font-size: 0.9rem; font-weight: bold; text-transform: uppercase; 
+        box-shadow: none; border-radius: 10px !important; 
+      }
+      .accordion-button:not(.collapsed) { color: #dc3545; background-color: #fff0f0; box-shadow: none; }
+      .accordion-item { border: none; background: transparent; }
+      
+      /* Badges */
+      .badge-pago { font-size: 0.75rem; font-weight: normal; border: 1px solid #dee2e6; color: #495057; background-color: #f8f9fa; }
+      
+      /* Botones de consulta */
+      .btn-consulta { padding: 10px 0; font-size: 0.9rem; font-weight: bold; }
+      .btn-success-sm { padding: 4px 8px; font-size: 0.8rem; font-weight: bold; }
+    </style>
+  </head>
+  <body>
+    
+    <div class="mb-4 text-center">
+      <? var url = getAppUrl(); ?>
+      <a href="<?= url ?>?app=empleados" class="text-decoration-none text-secondary fw-bold small">
+        <i class="bi bi-chevron-left"></i> VOLVER AL MENÚ
+      </a>
+    </div>
+
+    <div class="card-form">
+      <h4 class="text-center text-danger fw-bold mb-4">Cargar Compra / Gasto</h4>
+
+      <div id="loading" class="text-center my-5">
+        <div class="spinner-border text-danger" role="status"></div>
+        <div class="small mt-2 text-muted">Cargando...</div>
+      </div>
+
+      <form id="formCompra" onsubmit="enviar(event)" style="display:none;">
+        
+        <div class="mb-3">
+          <label class="fw-bold small text-muted">FECHA</label>
+          <div class="input-group"><span class="input-group-text"><i class="bi bi-calendar"></i></span><input type="date" name="fechaCompra" id="inputFecha" class="form-control fw-bold"></div>
+        </div>
+
+        <div class="mb-3">
+          <label class="fw-bold small text-muted">PROVEEDOR</label>
+          <div class="input-group"><span class="input-group-text"><i class="bi bi-shop"></i></span><input class="form-control fw-bold" list="listaProveedores" id="inputProveedor" name="proveedor" placeholder="Buscar o escribir..." onchange="autocompletar()" required autocomplete="off"><datalist id="listaProveedores"></datalist></div>
+          <div class="form-text small text-success fw-bold" id="infoNuevoProv" style="display:none;"><i class="bi bi-plus-circle-fill"></i> Nuevo proveedor.</div>
+        </div>
+
+        <div class="mb-3">
+          <label class="fw-bold small text-muted">TIPO</label>
+          <div class="input-group"><span class="input-group-text"><i class="bi bi-tags"></i></span><select name="tipo" id="selectTipo" class="form-select" required><option value="" selected disabled>Seleccionar...</option><option value="Mercadería">Mercadería</option><option value="Gasto">Gasto</option><option value="Mantenimiento">Mantenimiento</option><option value="Inversión">Inversión</option><option value="Servicio">Servicio</option><option value="Impuesto">Impuesto</option></select></div>
+        </div>
+
+        <div class="mb-3">
+          <label class="fw-bold small text-muted">DETALLE</label>
+          <div class="input-group"><span class="input-group-text"><i class="bi bi-card-text"></i></span><select name="detalle" id="selectDetalle" class="form-select"><option value="" selected disabled>Seleccionar...</option></select></div>
+        </div>
+
+        <div class="mb-3">
+          <label class="fw-bold small text-muted">MONTO ($)</label>
+          <div class="input-group"><span class="input-group-text bg-danger text-white"><i class="bi bi-currency-dollar"></i></span><input type="number" name="monto" class="form-control fw-bold text-end" step="0.01" placeholder="0" required></div>
+        </div>
+
+        <div class="mb-3">
+          <label class="fw-bold small text-muted">FORMA DE PAGO</label>
+          <div class="input-group"><span class="input-group-text"><i class="bi bi-wallet2"></i></span><select name="pago" id="selectPago" class="form-select" required onchange="verificarPago()"><option value="" selected disabled>Seleccionar...</option></select></div>
+        </div>
+
+        <div class="mb-3" id="divTurnoCompra" style="display:none;">
+          <label class="fw-bold small text-danger">ASIGNAR A CAJA DE:</label>
+          <div class="input-group"><span class="input-group-text bg-danger text-white"><i class="bi bi-clock-history"></i></span><select name="turnoAsignado" id="selectTurnoCompra" class="form-select fw-bold"><option value="" selected disabled>Elegir turno...</option><option value="Mañana">Mañana</option><option value="Tarde">Tarde</option><option value="Delivery">Delivery</option></select></div>
+          <div class="form-text small">Esta compra se descontará del cierre de este turno.</div>
+        </div>
+
+        <div class="mb-4">
+          <label class="fw-bold small text-muted">ESTADO FACTURA</label>
+          <div class="input-group"><span class="input-group-text"><i class="bi bi-receipt"></i></span><select name="factura" id="selectFactura" class="form-select" required><option value="" selected disabled>Seleccionar...</option><option value="Entregada">Entregada</option><option value="Pendiente">Pendiente</option><option value="Sin factura">Sin factura</option></select></div>
+        </div>
+
+        <button type="submit" class="btn btn-danger w-100 btn-lg shadow" id="btnGuardar">REGISTRAR GASTO</button>
+      </form>
+
+      <div class="row g-2 mt-5 pt-3 border-top">
+        <div class="col-6">
+          <button class="btn btn-danger w-100 btn-consulta" type="button" onclick="abrirHistorialAntiguo()">
+            <i class="bi bi-clock-history me-1"></i> Historial (30 Días)
+          </button>
+        </div>
+        <div class="col-6">
+          <button class="btn btn-danger w-100 btn-consulta" type="button" onclick="abrirFacturasPendientes()">
+            <i class="bi bi-receipt me-1"></i> Facturas Pendientes
+          </button>
+        </div>
+      </div>
+      
+      <div class="mt-3">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <span class="text-muted fw-bold small text-uppercase">Compras de Hoy</span>
+          <span class="badge bg-light text-dark border" id="countHoy">0</span>
+        </div>
+        
+        <div class="card border-0 bg-light" style="max-height: 300px; overflow-y: auto;">
+          <div id="listaHoy">
+             <div class="text-center text-muted p-3 small">Cargando...</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    
+    <div class="modal fade" id="modalHistorial" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header bg-dark text-white">
+            <h5 class="modal-title"><i class="bi bi-clock-history me-2"></i> Historial (30 Días)</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-0">
+            <div class="d-flex justify-content-end align-items-center p-3">
+              <span class="small text-muted fw-bold me-2" id="sortLabel">Fecha (Pred.)</span>
+              <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="sortSwitch" onchange="cambiarOrden()">
+                <label class="form-check-label small" for="sortSwitch"></label>
+              </div>
+            </div>
+            
+            <div id="listaAntiguas" class="list-group list-group-flush">
+              <div class="text-center py-5">Cargando...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="modalPendientes" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header bg-danger text-white">
+            <h5 class="modal-title"><i class="bi bi-receipt-cutoff me-2"></i> Facturas Pendientes</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body p-0">
+            <div id="listaFacturasPendientes" class="list-group list-group-flush">
+               <div class="text-center py-5">Cargando...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+      var dataGlobal = {}; 
+      var modalHistorial, modalPendientes;
+      var historialAntiguoData = []; 
+
+      window.onload = function() {
+        var hoy = new Date();
+        var dia = ("0" + hoy.getDate()).slice(-2);
+        var mes = ("0" + (hoy.getMonth() + 1)).slice(-2);
+        document.getElementById("inputFecha").value = hoy.getFullYear() + "-" + mes + "-" + dia;
+        
+        modalHistorial = new bootstrap.Modal(document.getElementById('modalHistorial'));
+        modalPendientes = new bootstrap.Modal(document.getElementById('modalPendientes'));
+
+        google.script.run.withSuccessHandler(function(data){
+           inicializarFormulario(data);
+           cargarHistorial(); 
+        }).obtenerDatosCompras();
+      };
+
+      // --- 1. LÓGICA DE CARGA Y RENDERIZADO PRINCIPAL ---
+      function cargarHistorial() {
+        var sortType = getSortType();
+        google.script.run.withSuccessHandler(renderHistorialCompleto).obtenerHistorialCompleto(sortType);
+      }
+
+      function renderHistorialCompleto(data) {
+        var divHoy = document.getElementById("listaHoy");
+        
+        if (data.error) { alert(data.error); return; }
+
+        historialAntiguoData = data.antiguas || [];
+        
+        // 1. RENDERIZAR HOY (Con botón borrar = true)
+        document.getElementById("countHoy").innerText = data.hoy.length;
+        divHoy.innerHTML = "";
+
+        if(data.hoy.length === 0) {
+          divHoy.innerHTML = '<div class="text-center text-muted p-3 small">No hay compras cargadas hoy.</div>';
+        } else {
+          data.hoy.forEach(item => {
+            divHoy.innerHTML += crearHTMLItem(item, true); 
+          });
+        }
+      }
+
+      // --- 2. FUNCIONES DE MODAL Y CONSULTA ---
+
+      function abrirHistorialAntiguo() {
+         var sortType = getSortType();
+         
+         if (sortType === 'proveedor') {
+            // Ordenamiento alfabético
+            historialAntiguoData.sort((a, b) => String(a.proveedor).localeCompare(String(b.proveedor)));
+         } else {
+            // ORDENAMIENTO POR FECHA (DESCENDENTE - Más nuevo primero)
+            // Se hace más robusto para evitar que fechas inválidas rompan la función.
+            historialAntiguoData.sort((a, b) => {
+                // Extraer el timestamp de la fecha de forma segura
+                const timeA = new Date(a.fechaRaw).getTime();
+                const timeB = new Date(b.fechaRaw).getTime();
+                
+                // Si el tiempo es inválido (NaN), lo tratamos como 0 para la comparación
+                const validTimeA = isNaN(timeA) ? 0 : timeA;
+                const validTimeB = isNaN(timeB) ? 0 : timeB;
+
+                return validTimeB - validTimeA; // Descendente
+            });
+         }
+         
+         renderListaModal(historialAntiguoData, document.getElementById("listaAntiguas"), false, false);
+         modalHistorial.show();
+      }
+
+      function cambiarOrden() {
+          // La función getSortType ya actualiza la etiqueta visual.
+          // Simplemente llamamos a la función que aplica el orden y vuelve a dibujar el modal.
+          if (document.getElementById('modalHistorial').classList.contains('show')) {
+             abrirHistorialAntiguo();
+          }
+      }
+
+      function abrirFacturasPendientes() {
+          var listaDiv = document.getElementById("listaFacturasPendientes");
+          listaDiv.innerHTML = '<div class="text-center py-5"><div class="spinner-border text-danger"></div></div>';
+          
+          google.script.run.withSuccessHandler(function(data) {
+             if (data.error) { listaDiv.innerHTML = `<div class="p-3 text-danger">${data.error}</div>`; return; }
+             renderListaModal(data, listaDiv, false, true); 
+          }).obtenerFacturasPendientes();
+          
+          modalPendientes.show();
+      }
+
+      function renderListaModal(lista, targetDiv, permitirBorrar, isPendingInvoiceList) {
+          targetDiv.innerHTML = "";
+          if (lista.length === 0) {
+             targetDiv.innerHTML = '<div class="p-3 text-muted text-center">No hay ítems para mostrar.</div>';
+             return;
+          }
+          lista.forEach(item => {
+             targetDiv.innerHTML += crearHTMLItem(item, permitirBorrar, isPendingInvoiceList);
+          });
+      }
+      
+      function marcarComoEntregada(idFila) {
+          if (!confirm("¿Confirmar la recepción de esta factura? El estado cambiará a 'Entregada'.")) return;
+          
+          var listaDiv = document.getElementById("listaFacturasPendientes");
+          listaDiv.style.opacity = '0.5';
+
+          google.script.run.withSuccessHandler(function(res) {
+             listaDiv.style.opacity = '1';
+             if (res === "OK") {
+                 alert("Factura marcada como 'Entregada'.");
+                 abrirFacturasPendientes(); // Recargar la lista de pendientes
+             } else {
+                 alert("Error al actualizar estado: " + res);
+             }
+          }).marcarFacturaEntregada(idFila);
+      }
+
+
+      // --- 3. FUNCIONES AUXILIARES DE ORDEN Y ESTILO ---
+
+      function getSortType() {
+          var isChecked = document.getElementById("sortSwitch").checked;
+          var label = document.getElementById("sortLabel");
+          if (isChecked) { label.innerText = "Proveedor"; return "proveedor"; } 
+          else { label.innerText = "Fecha (Pred.)"; return "fecha"; }
+      }
+
+      
+
+      function crearHTMLItem(item, permitirBorrar, isPendingInvoiceList) {
+        var botonBorrar = "";
+        var actionButton = "";
+        
+        // 1. Botón borrar (Solo en la lista de HOY)
+        if (permitirBorrar) {
+           botonBorrar = `<button class="btn btn-sm btn-outline-secondary border-0 ms-2" onclick="borrarCompra(${item.id})" title="Eliminar"><i class="bi bi-trash"></i></button>`;
+        }
+        
+        // 2. Botón Recibir (Solo en el Modal de Pendientes)
+        if (isPendingInvoiceList) {
+             actionButton = `<button class="btn btn-sm btn-success btn-success-sm ms-3" onclick="marcarComoEntregada(${item.id})">Recibir</button>`;
+        }
+        
+        // 3. BURBUJA: Muestra la forma de PAGO (CORRECCIÓN CLAVE: Usar solo item.pago)
+        var pagoBadge = `<span class="badge rounded-pill badge-pago ms-1">${item.pago || 'N/A'}</span>`;
+
+        return `
+            <div class="compra-item d-flex justify-content-between align-items-center">
+              <div class="pe-2" style="line-height: 1.2; overflow: hidden;">
+                ${!permitirBorrar ? `<small class="text-muted fw-bold me-1">[${item.fecha}]</small>` : ''}
+                
+                <span class="fw-bold text-dark">${item.proveedor}</span>
+                <span class="small text-muted mx-1">&bull;</span>
+                <span class="small text-muted text-truncate">${item.detalle}</span>
+                
+                ${pagoBadge}
+              </div>
+              
+              <div class="d-flex align-items-center">
+                 <div class="fw-bold text-danger text-nowrap">$ ${new Intl.NumberFormat('es-AR').format(item.monto)}</div>
+                 ${botonBorrar}
+                 ${actionButton}
+              </div>
+            </div>
+        `;
+      }
+
+      function borrarCompra(id) {
+        if(!confirm("¿Borrar esta compra del día?")) return;
+        var div = document.getElementById("listaHoy");
+        div.style.opacity = '0.5';
+        google.script.run.withSuccessHandler(function(res){
+           div.style.opacity = '1';
+           if(res !== "OK") { alert(res); }
+           cargarHistorial(); 
+        }).eliminarCompra(id);
+      }
+
+      // --- FUNCIONES DEL FORMULARIO ---
+      function inicializarFormulario(data) {
+        document.getElementById("loading").style.display = "none";
+        document.getElementById("formCompra").style.display = "block";
+        if (data.error) { alert(data.error); return; }
+        dataGlobal = data.proveedores || {};
+        var datalist = document.getElementById("listaProveedores"); datalist.innerHTML = ""; 
+        Object.keys(dataGlobal).sort().forEach(nombre => { var op = document.createElement("option"); op.value = nombre; datalist.appendChild(op); });
+        var selDetalle = document.getElementById("selectDetalle"); (data.listas.detalles || []).forEach(d => { setSelectValue(selDetalle, d, true); });
+        var selPago = document.getElementById("selectPago"); (data.listas.pagos || []).forEach(p => { setSelectValue(selPago, p, true); });
+      }
+
+      function autocompletar() {
+        var nombreInput = document.getElementById("inputProveedor").value;
+        var info = dataGlobal[nombreInput]; 
+        var aviso = document.getElementById("infoNuevoProv");
+        var selTipo = document.getElementById("selectTipo"); var selDetalle = document.getElementById("selectDetalle"); var selPago = document.getElementById("selectPago");
+        if (info) {
+          aviso.style.display = "none";
+          if (info.tipo) setSelectValue(selTipo, info.tipo);
+          if (info.detalle) setSelectValue(selDetalle, info.detalle);
+          if (info.pago) { setSelectValue(selPago, info.pago); verificarPago(); }
+        } else {
+          if (nombreInput.length > 2) { aviso.style.display = "block"; selTipo.value = ""; selDetalle.value = ""; selPago.value = ""; verificarPago(); } else { aviso.style.display = "none"; }
+        }
+      }
+
+      function setSelectValue(selectElement, valor, soloAgregar) {
+        var existe = false;
+        for (var i = 0; i < selectElement.options.length; i++) {
+          if (selectElement.options[i].value === valor) { if(!soloAgregar) selectElement.selectedIndex = i; existe = true; break; }
+        }
+        if (!existe) { var op = document.createElement("option"); op.text = valor; op.value = valor; selectElement.add(op); if(!soloAgregar) selectElement.value = valor; }
+      }
+
+      function verificarPago() {
+        var pago = document.getElementById("selectPago").value.toLowerCase();
+        var divTurno = document.getElementById("divTurnoCompra");
+        var selectTurno = document.getElementById("selectTurnoCompra");
+        if (pago.includes("caja") || pago.includes("efectivo")) { divTurno.style.display = "block"; selectTurno.required = true; } else { divTurno.style.display = "none"; selectTurno.required = false; selectTurno.value = ""; }
+      }
+
+      function enviar(e) {
+        e.preventDefault();
+        var btn = document.getElementById("btnGuardar"); 
+        btn.disabled = true; 
+        btn.innerText = "Guardando...";
+
+        google.script.run.withSuccessHandler(res => {
+            // ======================================================
+            //     ZONA: ESTO SUCEDE DESPUÉS DE GUARDAR (RESPUESTA DEL SERVIDOR)
+            // ======================================================
+
+            if(res.error) { 
+                alert(res.error); 
+                btn.disabled = false; 
+                btn.innerText = "REGISTRAR GASTO"; 
+                return; 
+            }
+
+            alert(res.mensaje);
+
+            // Actualizamos las listas visuales
+            if (res.listasActualizadas) {
+                renderHistorialCompleto(res.listasActualizadas);
+            } else {
+                cargarHistorial(); 
+            }
+
+            // 1. PRIMERO: Reseteamos el formulario (borra todo, incluida la fecha usada)
+            document.getElementById("formCompra").reset(); 
+
+            // 2. SEGUNDO: Calculamos la fecha de HOY
+            var hoy = new Date();
+            var dia = String(hoy.getDate()).padStart(2, '0');
+            var mes = String(hoy.getMonth() + 1).padStart(2, '0');
+            var anio = hoy.getFullYear();
+            var fechaDeHoy = anio + '-' + mes + '-' + dia;
+
+            // 3. TERCERO: Ponemos la fecha de HOY en el formulario vacío
+            document.getElementById("inputFecha").value = fechaDeHoy;
+
+            // Resto de la limpieza visual
+            document.getElementById("infoNuevoProv").style.display = "none"; 
+            verificarPago(); 
+            
+            btn.disabled = false; 
+            btn.innerText = "REGISTRAR GASTO";
+            
+            google.script.run.withSuccessHandler(function(data){ 
+                dataGlobal = data.proveedores || {}; 
+            }).obtenerDatosCompras();
+
+        }).guardarCompra(document.getElementById("formCompra")); // <--- AQUÍ se envían los datos originales ANTES de entrar a la función de arriba
+      } 
+
+/*
+      function enviar(e) {
+        e.preventDefault();
+        var btn = document.getElementById("btnGuardar"); btn.disabled = true; btn.innerText = "Guardando...";
+        google.script.run.withSuccessHandler(res => {
+          if(res.error) { alert(res.error); btn.disabled = false; btn.innerText = "REGISTRAR GASTO"; return; }
+          alert(res.mensaje);
+          if (res.listasActualizadas) {
+             renderHistorialCompleto(res.listasActualizadas);
+          } else {
+             cargarHistorial(); 
+          }
+          var fecha = document.getElementById("inputFecha").value; document.getElementById("formCompra").reset(); document.getElementById("inputFecha").value = fecha; document.getElementById("infoNuevoProv").style.display = "none"; verificarPago(); 
+          btn.disabled = false; btn.innerText = "REGISTRAR GASTO";
+          google.script.run.withSuccessHandler(function(data){ dataGlobal = data.proveedores || {}; }).obtenerDatosCompras();
+
+        }).guardarCompra(document.getElementById("formCompra"));
+      }
+
+*/
+    </script>
+  </body>
+</html>
+
+
+
+Funciones_Rendiciones.gs
+
+// ==========================================
+// === LÓGICA DE VISUALIZACIÓN DE CAJA ===
+// ==========================================
+
+function obtenerVistaRendiciones() {
+  try {
+    var ss = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hojaCaja = ss.getSheetByName("Rendiciones");
+    
+    var saldoCiclo = 0;
+    var listaMovimientos = [];
+
+    if (hojaCaja && hojaCaja.getLastRow() > 1) {
+      var datos = hojaCaja.getDataRange().getValues();
+      
+      // Recorremos hacia atrás hasta encontrar "Retiro Total"
+      for (var i = datos.length - 1; i >= 1; i--) {
+        var detalle = String(datos[i][1]);
+        
+        if (detalle.includes("Retiro Total")) break; // CORTAMOS AQUÍ
+
+        var fechaRow = datos[i][0];
+        var debe = Number(datos[i][2]) || 0;
+        var haber = Number(datos[i][3]) || 0;
+        var cat = datos[i][4] || "Gral";
+
+        saldoCiclo += (debe - haber);
+
+        if (fechaRow instanceof Date) {
+           var tipoMov = (debe > 0) ? "INGRESO" : "EGRESO";
+           var montoVisual = (debe > 0) ? debe : haber;
+           var fechaFmt = Utilities.formatDate(fechaRow, Session.getScriptTimeZone(), "dd/MM/yyyy");
+
+           listaMovimientos.push({
+             fecha: fechaFmt,
+             detalle: detalle,
+             monto: montoVisual,
+             tipo: tipoMov,
+             categoria: cat
+           });
+        }
+      }
+    }
+
+    return {
+      saldo: saldoCiclo,
+      movimientos: listaMovimientos // Ya vienen ordenados
+    };
+
+  } catch (e) { return { saldo: 0, movimientos: [], error: e.message }; }
+}
+
+
+
+Rendiciones.html
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+    <style>
+      body { background-color: #f8f9fa; font-family: 'Segoe UI', sans-serif; }
+      
+      /* Tarjeta de Saldo (Verde Rendiciones) */
+      .saldo-card { 
+        background: linear-gradient(135deg, #198754 0%, #146c43 100%); 
+        color: white; 
+        border-radius: 15px; 
+        padding: 30px 20px; 
+        text-align: center; 
+        margin-bottom: 20px; 
+        box-shadow: 0 4px 15px rgba(25, 135, 84, 0.3); 
+      }
+      .saldo-valor { font-size: 3.5rem; font-weight: 800; margin: 5px 0; }
+
+      /* Filtros */
+      .btn-filter { border-radius: 20px; font-size: 0.85rem; font-weight: 600; padding-left: 15px; padding-right: 15px; }
+      .btn-check:checked + .btn-outline-secondary { background-color: #6c757d; color: white; }
+
+      /* Lista Compacta */
+      .list-group-item { 
+        border: none; 
+        border-bottom: 1px solid #f0f0f0; 
+        padding: 12px 15px; 
+        font-size: 0.95rem;
+        transition: background-color 0.2s;
+      }
+      
+      /* Encabezado Fecha */
+      .date-header {
+        background-color: #e9ecef;
+        color: #495057;
+        font-weight: 700;
+        font-size: 0.85rem;
+        padding: 6px 15px;
+        border-top: 1px solid #dee2e6;
+        border-bottom: 1px solid #dee2e6;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+
+      /* Badges */
+      .badge-cat { width: 80px; text-align: center; font-weight: 700; font-size: 0.7rem; text-transform: uppercase; }
+      
+      .cat-ventas { background-color: #198754; color: white; }       
+      .cat-rrhh { background-color: #fd7e14; color: white; }         
+      .cat-compras { background-color: #dc3545; color: white; }
+      .cat-default { background-color: #0d6efd; color: white; }      
+      .cat-retiro { background-color: #212529; color: white; }
+
+      .monto-ingreso { color: #198754; font-weight: 700; }
+      .monto-egreso { color: #dc3545; font-weight: 700; }
+      
+      #loading { display: flex; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.9); z-index: 9999; justify-content: center; align-items: center; flex-direction: column;}
+    </style>
+  </head>
+  <body>
+
+    <div id="loading">
+      <div class="spinner-border text-success" role="status" style="width: 3rem; height: 3rem;"></div>
+      <div class="mt-3 text-dark fw-bold">Consultando...</div>
+    </div>
+
+    <div class="container pt-3" style="max-width: 600px;">
+      
+      <div class="mb-3 text-center">
+        <? var url = getAppUrl(); ?>
+        <a href="<?= url ?>" class="text-decoration-none text-secondary fw-bold small"><i class="bi bi-chevron-left"></i> VOLVER AL MENÚ</a>
+      </div>
+
+      <div class="saldo-card">
+        <div class="text-uppercase small opacity-75">Saldo Actual de Caja</div>
+        <div class="saldo-valor" id="txtSaldo">...</div>
+        <div class="small mt-1 opacity-75">(Desde último retiro total)</div>
+      </div>
+
+      <div class="d-flex justify-content-between align-items-center mb-3 px-1">
+        <h6 class="text-muted fw-bold mb-0">Movimientos</h6>
+        
+        <div class="btn-group" role="group">
+          <input type="radio" class="btn-check" name="filtro" id="btnTodos" autocomplete="off" checked onclick="aplicarFiltro('TODOS')">
+          <label class="btn btn-outline-secondary btn-sm btn-filter" for="btnTodos">Todos</label>
+
+          <input type="radio" class="btn-check" name="filtro" id="btnIngresos" autocomplete="off" onclick="aplicarFiltro('INGRESO')">
+          <label class="btn btn-outline-success btn-sm btn-filter" for="btnIngresos">Entradas</label>
+
+          <input type="radio" class="btn-check" name="filtro" id="btnEgresos" autocomplete="off" onclick="aplicarFiltro('EGRESO')">
+          <label class="btn btn-outline-danger btn-sm btn-filter" for="btnEgresos">Salidas</label>
+        </div>
+      </div>
+
+      <div class="card border-0 shadow-sm">
+        <div id="listaMovimientos" class="list-group list-group-flush"></div>
+      </div>
+
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      var datosGlobales = []; 
+
+      window.onload = function() {
+        cargarDatos();
+      };
+
+      function cargarDatos() {
+        showLoading(true);
+        google.script.run.withSuccessHandler(function(data) {
+          if(data.error) { alert(data.error); showLoading(false); return; }
+
+          document.getElementById("txtSaldo").innerText = "$ " + new Intl.NumberFormat('es-AR').format(data.saldo);
+          datosGlobales = data.movimientos || [];
+          
+          document.getElementById("btnTodos").checked = true;
+          renderLista("TODOS");
+          
+          showLoading(false);
+        }).obtenerVistaRendiciones();
+      }
+
+      function aplicarFiltro(tipo) {
+        renderLista(tipo);
+      }
+
+      function renderLista(filtro) {
+        var div = document.getElementById("listaMovimientos");
+        div.innerHTML = "";
+        
+        var listaMostrar = datosGlobales;
+        if (filtro !== "TODOS") {
+          listaMostrar = datosGlobales.filter(m => m.tipo === filtro);
+        }
+
+        if (listaMostrar.length === 0) {
+           div.innerHTML = '<div class="text-center text-muted p-4 small">Caja en 0 o sin movimientos.</div>'; 
+           return;
+        }
+
+        var ultimoDiaRenderizado = "";
+
+        listaMostrar.forEach(m => {
+           var esIngreso = (m.tipo === "INGRESO");
+           var claseMonto = esIngreso ? "monto-ingreso" : "monto-egreso";
+           var signo = esIngreso ? "+ " : "- ";
+           
+           var catLower = String(m.categoria || "").toLowerCase();
+           var claseBadge = "cat-default"; 
+           
+           if (catLower.includes("venta")) claseBadge = "cat-ventas";
+           else if (catLower.includes("rrhh") || catLower.includes("adelanto")) claseBadge = "cat-rrhh";
+           else if (catLower.includes("compra") || catLower.includes("gasto")) claseBadge = "cat-compras";
+           else if (catLower.includes("retiro")) claseBadge = "cat-retiro";
+
+           // Agrupación por Fecha
+           if (m.fecha !== ultimoDiaRenderizado) {
+               div.innerHTML += `<div class="date-header"><i class="bi bi-calendar-event me-2"></i>${m.fecha}</div>`;
+               ultimoDiaRenderizado = m.fecha;
+           }
+
+           div.innerHTML += `
+             <div class="list-group-item d-flex justify-content-between align-items-center">
+               <div class="d-flex align-items-center text-truncate me-2">
+                 <span class="badge rounded-pill ${claseBadge} badge-cat me-3">${m.categoria || "Gral"}</span>
+                 <span class="text-dark text-truncate">${m.detalle}</span>
+               </div>
+               <div class="${claseMonto} text-nowrap">${signo}$ ${new Intl.NumberFormat('es-AR').format(m.monto)}</div>
+             </div>
+           `;
+        });
+      }
+
+      function showLoading(s) { document.getElementById("loading").style.display = s ? "flex" : "none"; }
+    </script>
+  </body>
+</html>
+
+
+
+Funciones_Tareas.gs
+
+// ==========================================
+// === LÓGICA DE TAREAS ===
+// ==========================================
+
+function obtenerTareas() {
+  try {
+    var ss = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hoja = ss.getSheetByName("Tareas");
+    if (!hoja) return [];
+    
+    var lastRow = hoja.getLastRow();
+    if (lastRow < 2) return [];
+
+    // Leemos todo para filtrar
+    var datos = hoja.getRange(2, 1, lastRow - 1, 5).getValues();
+    var lista = [];
+    var zona = Session.getScriptTimeZone();
+
+    // Recorremos de abajo (más nuevo) hacia arriba
+    for (var i = datos.length - 1; i >= 0; i--) {
+      // ID = Fila real (i + 2)
+      var filaId = i + 2;
+      var estado = String(datos[i][4]).toLowerCase();
+      
+      // Solo mostramos las PENDIENTES o las REALIZADAS de hoy (para que no desaparezcan al instante)
+      // O simplemente traemos las ultimas 10 sin importar, pero priorizamos pendientes
+      
+      lista.push({
+        id: filaId,
+        fecha: (datos[i][0] instanceof Date) ? Utilities.formatDate(datos[i][0], zona, "dd/MM") : "",
+        caracter: datos[i][1],
+        tarea: datos[i][2],
+        usuario: datos[i][3],
+        estado: datos[i][4] // "Pendiente" o "Realizada"
+      });
+      
+      if (lista.length >= 15) break; // Limite visual
+    }
+    
+    // Ordenar: Pendientes primero
+    lista.sort(function(a, b) {
+      return (a.estado === "Pendiente" ? -1 : 1);
+    });
+
+    return lista;
+  } catch (e) { return []; }
+}
+
+function guardarNuevaTarea(form) {
+  try {
+    var ss = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hoja = ss.getSheetByName("Tareas");
+    if (!hoja) { hoja = ss.insertSheet("Tareas"); /* headers... */ }
+    
+    var fecha = new Date();
+    var caracter = form.caracterTarea;
+    var texto = form.textoTarea;
+    var usuario = "Empleado"; // O puedes poner un input para nombre
+    
+    hoja.appendRow([fecha, caracter, texto, usuario, "Pendiente"]);
+    
+    return "OK";
+  } catch (e) { return "Error: " + e.message; }
+}
+
+function cambiarEstadoTarea(idFila) {
+  try {
+    var ss = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hoja = ss.getSheetByName("Tareas");
+    var fila = parseInt(idFila);
+    
+    var estadoActual = hoja.getRange(fila, 5).getValue();
+    var nuevoEstado = (estadoActual === "Pendiente") ? "Realizada" : "Pendiente";
+    
+    hoja.getRange(fila, 5).setValue(nuevoEstado);
+    
+    // Si se marca realizada, se pone fecha de finalización? Opcional.
+    
+    return "OK";
+  } catch (e) { return "Error: " + e.message; }
+}
+
+
+APIHandler.gs
+// ==========================================
+// === API HANDLER (PARA APP ANDROID) ===
+// ==========================================
+
+function doPost(e) {
+  // 1. Preflight / CORS (Opcional si usas 'Content-Type: text/plain' en el cliente)
+  // Pero generalmente doPost maneja la lógica.
+  
+  var output = { status: "ERROR", message: "Solicitud inválida" };
+  
+  try {
+    // 2. Parsear el cuerpo de la solicitud JSON
+    if (!e.postData || !e.postData.contents) {
+      throw new Error("No se recibieron datos JSON.");
+    }
+    
+    var data = JSON.parse(e.postData.contents);
+    var action = data.action;
+    var params = data.params || {};
+    
+    // 3. Router de Acciones
+    switch (action) {
+      // --- TAREAS ---
+      case "obtenerTareas":
+        output = { status: "OK", data: obtenerTareas() };
+        break;
+      case "guardarNuevaTarea":
+        // params: { caracterTarea, textoTarea }
+        output = { status: "OK", data: guardarNuevaTarea(params) };
+        break;
+      case "cambiarEstadoTarea":
+        // params: { idFila }
+        output = { status: "OK", data: cambiarEstadoTarea(params.idFila) };
+        break;
+
+      // --- COMPRAS / GASTOS ---
+      case "obtenerDatosCompras":
+        output = { status: "OK", data: obtenerDatosCompras() };
+        break;
+      case "obtenerHistorialCompleto":
+        // params: { sortType }
+        output = { status: "OK", data: obtenerHistorialCompleto(params.sortType) };
+        break;
+      case "guardarCompra":
+        // params: { formulario... }
+        output = { status: "OK", data: guardarCompra(params) }; 
+        break;
+      case "eliminarCompra":
+        // params: { id }
+        output = { status: "OK", data: eliminarCompra(params.id) };
+        break;
+      case "obtenerFacturasPendientes":
+        output = { status: "OK", data: obtenerFacturasPendientes() };
+        break;
+      case "marcarFacturaEntregada":
+        // params: { id }
+        output = { status: "OK", data: marcarFacturaEntregada(params.id) };
+        break;
+
+      // --- RENDICIONES ---
+      case "obtenerVistaRendiciones":
+        output = { status: "OK", data: obtenerVistaRendiciones() };
+        break;
+
+      // --- ADELANTOS ---
+      case "obtenerEmpleadosParaSelector":
+        output = { status: "OK", data: obtenerEmpleadosParaSelector() };
+        break;
+      case "guardarAdelantoDoble":
+        // params: { formulario... }
+        // Nota: Asegúrate de enviar los campos esperados por guardarAdelantoDoble formObject
+        output = { status: "OK", data: guardarAdelantoDoble(params) };
+        break;
+
+      // --- CIERRE ---
+      case "obtenerUltimosCierres":
+        output = { status: "OK", data: obtenerUltimosCierres() };
+        break;
+      case "obtenerItemsPorTurno":
+        // params: { fecha, turno }
+        output = { status: "OK", data: obtenerItemsPorTurno(params.fecha, params.turno) };
+        break;
+      case "guardarCierre":
+        // params: { formulario... }
+        output = { status: "OK", data: guardarCierre(params) };
+        break;
+        
+      // --- EXTRAS ---
+      case "test":
+        output = { status: "OK", message: "Conexión exitosa con GAS API" };
+        break;
+
+      default:
+        output = { status: "ERROR", message: "Acción desconocida: " + action };
+    }
+
+  } catch (error) {
+    output = { status: "ERROR", message: error.toString() };
+  }
+
+  // 4. Devolver JSON
+  return ContentService.createTextOutput(JSON.stringify(output))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+

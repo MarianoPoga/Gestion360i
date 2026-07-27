@@ -1,0 +1,1923 @@
+Funcion-Proveedores.gs
+
+// ==========================================
+// === LÓGICA DE PROVEEDORES (Cta Cte) AJUSTADA: SOLO COMPRAS 'CUENTA CORRIENTE' ===
+// ==========================================
+
+function obtenerProveedores() {
+  var ss = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+  var sheetCompras = ss.getSheetByName("Compras");
+  var sheetPagos = ss.getSheetByName("Pagos Proveedores");
+  
+  var proveedoresSet = new Set();
+  
+  // Extraer proveedores de Compras (Columna B / index 1)
+  if (sheetCompras && sheetCompras.getLastRow() >= 2) {
+    var datosCompras = sheetCompras.getRange(2, 2, sheetCompras.getLastRow() - 1, 1).getValues();
+    datosCompras.flat().filter(v => v).forEach(v => proveedoresSet.add(String(v).trim()));
+  }
+  
+  // Extraer proveedores de Pagos Proveedores (Columna B / index 1)
+  if (sheetPagos && sheetPagos.getLastRow() >= 2) {
+    var datosPagos = sheetPagos.getRange(2, 2, sheetPagos.getLastRow() - 1, 1).getValues();
+    datosPagos.flat().filter(v => v).forEach(v => proveedoresSet.add(String(v).trim()));
+  }
+
+  var unicos = Array.from(proveedoresSet).sort();
+  return unicos;
+}
+
+// --- OBTENER SALDOS GLOBALES ---
+function obtenerSaldosProveedores() {
+  try {
+    var ss = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hojaCompras = ss.getSheetByName("Compras");
+    var hojaPagos = ss.getSheetByName("Pagos Proveedores"); 
+    
+    var saldos = {}; 
+    var totalGlobalDeuda = 0;
+
+    // A. PROCESAR COMPRAS (Deuda / Haber)
+    if (hojaCompras && hojaCompras.getLastRow() >= 2) {
+      var datosCompras = hojaCompras.getDataRange().getValues();
+      // Col B (Proveedor, index 1), Col E (Monto, index 4), Col F (Pago, index 5)
+      for (var i = 1; i < datosCompras.length; i++) {
+        var proveedor = String(datosCompras[i][1]).trim(); 
+        var montoCompra = Number(datosCompras[i][4]) || 0; 
+        var tipoPago = String(datosCompras[i][5]).trim(); // << LEEMOS COLUMNA F
+
+        // >> FILTRO CLAVE: Solo si el campo Pago es 'Cuenta Corriente'
+        if (proveedor && tipoPago === 'Cuenta Corriente') {
+          if (!saldos[proveedor]) saldos[proveedor] = 0;
+          saldos[proveedor] += montoCompra; // Aumenta la deuda
+        }
+      }
+    }
+    
+    // B. PROCESAR PAGOS (Crédito / Debe) - Sin cambios
+    if (hojaPagos && hojaPagos.getLastRow() >= 2) {
+      var datosPagos = hojaPagos.getDataRange().getValues();
+      // Col B (Proveedor, index 1), Col E (Monto de Pago, index 4)
+      for (var i = 1; i < datosPagos.length; i++) {
+        var proveedor = String(datosPagos[i][1]).trim(); 
+        var montoPago = Number(datosPagos[i][4]) || 0; 
+
+        if (proveedor) {
+          if (!saldos[proveedor]) saldos[proveedor] = 0;
+          saldos[proveedor] -= montoPago; // Disminuye la deuda
+        }
+      }
+    }
+
+    // 1. Convertir mapa a array y sumar la deuda total
+    var listaSaldos = Object.keys(saldos).map(function(prov) {
+      if (saldos[prov] > 0) { 
+        totalGlobalDeuda += saldos[prov];
+      }
+      return {
+        nombre: prov,
+        saldo: saldos[prov]
+      };
+    }).sort(function(a, b) {
+        return b.saldo - a.saldo; 
+    });
+
+    // 2. Devolver la lista y el total global
+    return { listaSaldos: listaSaldos, totalGlobalDeuda: totalGlobalDeuda }; 
+  } catch (e) {
+    return { error: "Error obteniendo saldos: " + e.message, listaSaldos: [], totalGlobalDeuda: 0 };
+  }
+}
+
+
+// --- OBTENER HISTORIAL DETALLADO ---
+function obtenerHistorialProveedor(nombreProveedor) {
+  try {
+    var ss = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hojaCompras = ss.getSheetByName("Compras");
+    var hojaPagos = ss.getSheetByName("Pagos Proveedores"); 
+    var zona = ss.getSpreadsheetTimeZone();
+    var nombreBuscado = String(nombreProveedor).toLowerCase().trim();
+    
+    var todasLasTransacciones = []; 
+
+    // A. PROCESAR COMPRAS
+    if (hojaCompras && hojaCompras.getLastRow() >= 2) {
+      var datosCompras = hojaCompras.getDataRange().getValues();
+      // Col A (Fecha, index 0), Col B (Proveedor, index 1), Col D (Detalle, index 3), Col E (Monto, index 4), Col F (Pago, index 5)
+      for (var i = 1; i < datosCompras.length; i++) {
+        var proveedor = String(datosCompras[i][1]).toLowerCase().trim();
+        var tipoPago = String(datosCompras[i][5]).trim(); // << LEEMOS COLUMNA F
+
+        // >> FILTRO CLAVE: Solo si el proveedor coincide Y el campo Pago es 'Cuenta Corriente'
+        if (proveedor === nombreBuscado && tipoPago === 'Cuenta Corriente') {
+          Logger.log("¡TRANSACCIÓN ENCONTRADA!: Monto: " + monto + ", Fecha: " + fecha);
+          var fecha = datosCompras[i][0];
+          var detalle = datosCompras[i][3]; // Columna Detalle
+          var monto = Number(datosCompras[i][4]) || 0; 
+
+          if (monto >= 0) {
+            todasLasTransacciones.push({
+              fechaObj: (fecha instanceof Date) ? fecha : new Date(fecha),
+              fecha: (fecha instanceof Date) ? Utilities.formatDate(fecha, zona, "dd/MM/yyyy") : fecha,
+              detalle: detalle || "Compra a CC",
+              monto: monto, 
+              tipo: 'DEUDA', 
+              orden: 1 
+            });
+          }
+        }
+      }
+    }
+
+    // B. PROCESAR PAGOS - Sin cambios
+    if (hojaPagos && hojaPagos.getLastRow() >= 2) {
+      var datosPagos = hojaPagos.getDataRange().getValues();
+      // Col A (Fecha Reg, index 0), Col B (Proveedor, index 1), Col C (Medio, index 2), Col E (Monto Pago, index 4)
+      for (var i = 1; i < datosPagos.length; i++) {
+        var proveedor = String(datosPagos[i][1]).toLowerCase().trim();
+        if (proveedor === nombreBuscado) {
+          var fecha = datosPagos[i][0]; 
+          var medio = datosPagos[i][2]; // Detalle/Medio de Pago
+          var monto = Number(datosPagos[i][4]) || 0; 
+
+          if (monto > 0) {
+            todasLasTransacciones.push({
+              fechaObj: (fecha instanceof Date) ? fecha : new Date(fecha), 
+              fecha: (fecha instanceof Date) ? Utilities.formatDate(fecha, zona, "dd/MM/yyyy") : fecha,
+              detalle: "Pago (" + medio + ")",
+              monto: -monto, 
+              tipo: 'PAGO',
+              orden: 2 
+            });
+          }
+        }
+      }
+    }
+    
+    // C. ORDENAR y CALCULAR SALDO
+    todasLasTransacciones.sort(function(a, b) {
+      if (a.fechaObj.getTime() !== b.fechaObj.getTime()) {
+        return a.fechaObj.getTime() - b.fechaObj.getTime();
+      }
+      return a.orden - b.orden;
+    });
+
+    var saldoAcumulado = 0;
+    var movimientosConSaldo = [];
+
+    // Calcular el saldo acumulado
+    todasLasTransacciones.forEach(function(mov) {
+      saldoAcumulado += mov.monto; 
+      movimientosConSaldo.push({
+        fecha: mov.fecha,
+        detalle: mov.detalle,
+        monto: Math.abs(mov.monto), 
+        tipo: mov.tipo,
+        saldo: saldoAcumulado 
+      });
+    });
+    
+    // Devolvemos el saldo actual y los movimientos (los invertimos para ver lo más nuevo arriba en la UI)
+    return {
+      movimientos: movimientosConSaldo.reverse(),
+      total: saldoAcumulado
+    };
+
+  } catch (e) {
+    return { error: "Error cargando historial: " + e.message };
+  }
+}
+
+function registrarPago(formObject) {
+  // Esta función no necesita cambios
+  var ss = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+  var sheet = ss.getSheetByName("Pagos Proveedores"); 
+  
+  if (!sheet) throw new Error("La hoja 'Pagos Proveedores' no existe. Por favor, créala.");
+
+  var parts = formObject.fechaRegistro.split('-');
+  var fechaReg = new Date(parts[0], parts[1] - 1, parts[2]); 
+  
+  var fechaPago = "";
+  if (formObject.fechaPago) {
+    var partsP = formObject.fechaPago.split('-');
+    fechaPago = new Date(partsP[0], partsP[1] - 1, partsP[2]);
+  }
+
+  var montoPago = parseFloat(formObject.monto);
+  var proveedorActual = formObject.proveedor;
+  
+  var observacion = "Pago ERP"; 
+  
+  sheet.appendRow([
+    fechaReg,                
+    proveedorActual,    
+    formObject.medio,        
+    fechaPago,               
+    montoPago,       
+    0,               
+    observacion      
+  ]);
+  
+  var lastRow = sheet.getLastRow();
+  sheet.getRange(lastRow, 5, 1, 1).setNumberFormat('$ #,##0.00'); 
+  
+  return "Éxito";
+}
+
+Proveedores.html 
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+    
+    <style>
+      body { background-color: #f8f9fa; font-family: 'Segoe UI', sans-serif; }
+      .main-card { max-width: 700px; margin: 0 auto; }
+      
+      /* TARJETA SALDO GLOBAL */
+      .global-saldo-card {
+        background: linear-gradient(135deg, #198754 0%, #146c43 100%);
+        color: white;
+        border-radius: 15px;
+        padding: 25px 20px; 
+        text-align: center;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 15px rgba(25, 135, 84, 0.3);
+      }
+      .global-saldo-valor { font-size: 3rem; font-weight: 800; margin: 5px 0; }
+      
+      /* CARD SALDO EN VISTA DETALLE */
+      .saldo-header-card {
+        background: linear-gradient(135deg, #198754 0%, #146c43 100%);
+        color: white; 
+        border-radius: 10px; 
+        padding: 20px;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        margin-bottom: 20px;
+        text-align: center;
+      }
+      .saldo-header-card .saldo-valor { 
+        font-size: 3rem; 
+        font-weight: 700; 
+        margin: 5px 0; 
+        color: white !important;
+      }
+      .saldo-header-card .small { color: white !important; opacity: 0.9; }
+      
+      /* ESTILO DE MOVIMIENTOS INDIVIDUALES */
+      .list-group-item { cursor: pointer; transition: all 0.2s; }
+      .list-group-item:hover { background-color: #f5f5f5; }
+      
+      .list-group-item-detalle { 
+          font-size: 0.9rem; 
+          padding: 10px 15px !important; 
+          border-left: 4px solid transparent; 
+          line-height: 1.3;
+      }
+      .mov-compra { border-left-color: #dc3545; }
+      .mov-pago { border-left-color: #198754; background-color: #f8fff9; } /* Pagos con fondo sutil */
+      
+      /* Estilo cuando una fila está seleccionada para pagar */
+      .row-selected {
+        background-color: #e6f9ee !important; /* Verde muy claro */
+        border-left-width: 6px;
+      }
+
+      .monto-positivo { color: #198754; font-weight: bold; }
+      .monto-negativo { color: #dc3545; font-weight: bold; }
+      
+      .detail-title { color: #dc3545; }
+      
+      /* LOADING SPINNER */
+      #loading { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.85); z-index: 9999; justify-content: center; align-items: center; flex-direction: column;}
+      
+      /* Checkbox personalizado grande */
+      .form-check-input.custom-check {
+          width: 1.4em;
+          height: 1.4em;
+          margin-right: 15px;
+          cursor: pointer;
+          border-color: #aaa;
+      }
+      .form-check-input.custom-check:checked {
+          background-color: #198754;
+          border-color: #198754;
+      }
+    </style>
+  </head>
+  <body>
+
+    <div id="loading">
+      <div class="spinner-border text-success" role="status" style="width: 3rem; height: 3rem;"></div>
+      <div class="mt-2 text-success fw-bold">Cargando...</div>
+    </div>
+
+    <div class="container py-3 main-card">
+      
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="fw-bold text-secondary"><i class="bi bi-person-lines-fill me-2"></i> Cta Cte Proveedores</h5>
+        <? var url = getAppUrl(); ?>
+        <a href="<?= url ?>" class="text-decoration-none text-secondary small"><i class="bi bi-arrow-left-circle-fill"></i> VOLVER</a>
+      </div>
+
+      <div id="vistaSaldos">
+        
+        <div class="global-saldo-card mb-4">
+            <div class="text-uppercase small opacity-75">Total a Pagar a Proveedores</div>
+            <div class="global-saldo-valor" id="txtTotalDeudaGeneral">$ 0,00</div>
+        </div>
+
+        <div class="card shadow-sm border-0 mb-4">
+          <div class="card-header bg-white fw-bold">PROVEEDORES INDIVIDUALES</div>
+          <ul class="list-group list-group-flush" id="listaProveedoresSaldos">
+            <li class="list-group-item text-center text-muted">Cargando...</li>
+          </ul>
+        </div>
+      </div>
+
+      <div id="vistaDetalle" style="display:none;">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+             <button class="btn btn-sm btn-outline-secondary" onclick="volverSaldos()">
+               &larr; Volver
+             </button>
+             <div class="form-check form-switch">
+                </div>
+        </div>
+        
+        <h5 class="detail-title fw-bold mb-3" id="nombreProveedorDetalle"></h5>
+        
+        <div class="saldo-header-card mb-3">
+          <div class="small opacity-75">SALDO ACTUAL:</div>
+          <div class="saldo-valor" id="saldoActualDetalle">$ 0,00</div>
+        </div>
+
+        <div class="alert alert-info py-2 small d-flex align-items-center" role="alert">
+          <i class="bi bi-info-circle-fill me-2"></i>
+          Selecciona las compras de la lista para sumar el pago.
+        </div>
+
+        <div class="card shadow-sm mb-5"> <ul class="list-group list-group-flush" id="listaMovimientosDetalle">
+            <li class="list-group-item text-center text-muted">Cargando...</li>
+          </ul>
+        </div>
+        
+        <button id="btnPagarPrincipal" class="btn btn-success btn-lg w-100 shadow-sm py-3" onclick="abrirModalPago()">
+            <div class="d-flex justify-content-between align-items-center px-2">
+                <span id="textoBtnPagar">REGISTRAR PAGO TOTAL</span>
+                <span class="badge bg-white text-success fs-6" id="montoBtnPagar">$ 0,00</span>
+            </div>
+        </button>
+      </div>
+      
+      <div class="modal fade" id="modalPago" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+          <div class="modal-content">
+            <div class="modal-header bg-success text-white">
+              <h5 class="modal-title"><i class="bi bi-cash-stack"></i> Registrar Pago</h5>
+              <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <form id="formPago" onsubmit="enviarPago(event)">
+                <div class="mb-3">
+                  <label class="form-label text-muted small">Proveedor</label>
+                  <input type="text" class="form-control fw-bold" id="inputProveedorNombreModal" disabled>
+                  <input type="hidden" name="proveedor" id="inputProveedorHidden">
+                </div>
+
+                <div class="row">
+                  <div class="col-6 mb-3">
+                    <label class="form-label small">Fecha</label>
+                    <input type="date" class="form-control" name="fechaRegistro" required id="fechaHoy">
+                  </div>
+                  <div class="col-6 mb-3">
+                    <label class="form-label small fw-bold text-success">Monto a Pagar</label>
+                    <div class="input-group">
+                      <span class="input-group-text">$</span>
+                      <input type="number" step="0.01" class="form-control fw-bold text-success" name="monto" id="inputMonto" placeholder="0,00" required>
+                    </div>
+                    <div id="avisoSeleccion" class="form-text text-end fst-italic small text-success" style="display:none;">*Basado en selección</div>
+                  </div>
+                </div>
+
+                <div class="mb-3">
+                  <label class="form-label small">Medio de Pago</label>
+                  <select class="form-select" name="medio" id="selectMedio" onchange="toggleFechaPago()" required>
+                    <option value="Transferencia">Transferencia</option>
+                    <option value="Efectivo">Efectivo</option>
+                    <option value="Tarjeta">Tarjeta</option>
+                    <option value="Cheque Propio">Cheque Propio</option>
+                    <option value="Cheque Tercero">Cheque Tercero</option>
+                  </select>
+                </div>
+
+                <div class="mb-3 bg-light p-2 rounded border" id="divFechaPago" style="display:none;">
+                  <label class="form-label text-warning small fw-bold"><i class="bi bi-calendar-event"></i> Fecha de Cobro (Cheque)</label>
+                  <input type="date" class="form-control" name="fechaPago" id="inputFechaPago">
+                </div>
+
+                <div class="d-grid mt-4">
+                  <button type="submit" class="btn btn-success btn-lg">Confirmar Pago</button>
+                </div>
+              </form>
+
+            </div>
+          </div>
+        </div>
+      </div>
+      
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      var modalPagoBootstrap;
+      var saldoGlobal = 0; 
+      var nombreProveedorActivo = ""; 
+      
+      // Variable nueva para controlar la suma seleccionada
+      var montoSeleccionado = 0; 
+
+      window.onload = function() {
+        modalPagoBootstrap = new bootstrap.Modal(document.getElementById('modalPago'));
+        cargarSaldosIniciales();
+      };
+
+      function formatMoney(amount) {
+        return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount);
+      }
+
+      function showLoading(show) {
+        document.getElementById("loading").style.display = show ? "flex" : "none";
+      }
+
+      // --- 1. CARGA INICIAL (LISTA DE DEUDAS) ---
+      function cargarSaldosIniciales() {
+        showLoading(true);
+        google.script.run.withSuccessHandler(renderSaldos).obtenerSaldosProveedores();
+      }
+
+      function renderSaldos(data) {
+        showLoading(false);
+        var ul = document.getElementById("listaProveedoresSaldos");
+        ul.innerHTML = "";
+        
+        if (data.error) { ul.innerHTML = `<li class="list-group-item text-danger">${data.error}</li>`; return; }
+        
+        document.getElementById("txtTotalDeudaGeneral").innerText = formatMoney(data.totalGlobalDeuda);
+
+        var listaDeudores = data.listaSaldos.filter(p => p.saldo > 0);
+        
+        if (!listaDeudores || listaDeudores.length === 0) { ul.innerHTML = `<li class="list-group-item text-center text-muted">No hay deudas pendientes.</li>`; return; }
+
+        listaDeudores.forEach(p => {
+          ul.innerHTML += `
+            <li class="list-group-item list-group-item-detalle d-flex justify-content-between align-items-center" onclick="seleccionarProveedor('${p.nombre}')">
+              <span class="fw-bold text-dark">${p.nombre}</span>
+              <span class="text-danger fw-bold fs-5">${formatMoney(p.saldo)}</span>
+            </li>
+          `;
+        });
+      }
+      
+      // --- 2. CARGA DETALLADA (HISTORIAL) ---
+      function seleccionarProveedor(nombre) {
+        nombreProveedorActivo = nombre; 
+        document.getElementById("nombreProveedorDetalle").innerText = "Cuenta de " + nombre;
+        document.getElementById("vistaSaldos").style.display = "none";
+        document.getElementById("vistaDetalle").style.display = "block";
+        
+        // Resetear selección al entrar
+        montoSeleccionado = 0;
+        actualizarBotonPagoUI();
+        
+        showLoading(true);
+        google.script.run.withSuccessHandler(renderDetalle).obtenerHistorialProveedor(nombre);
+      }
+
+      function renderDetalle(data) {
+        showLoading(false);
+        var saldoTotalEl = document.getElementById("saldoActualDetalle");
+        var ul = document.getElementById("listaMovimientosDetalle");
+        ul.innerHTML = "";
+
+        if (data.error) { ul.innerHTML = `<li class="list-group-item text-danger">${data.error}</li>`; return; }
+
+        // Actualizar tarjeta de saldo
+        saldoGlobal = data.total; 
+        saldoTotalEl.innerText = formatMoney(data.total);
+
+        // Actualizar Botón Inicialmente con el total global
+        actualizarBotonPagoUI(); 
+
+        if (data.movimientos.length === 0) {
+            ul.innerHTML = `<li class="list-group-item text-center text-muted">Sin movimientos en el periodo.</li>`;
+            return;
+        }
+
+        data.movimientos.forEach((m, index) => {
+          var esDeuda = m.tipo === "DEUDA";
+          var claseBorde = esDeuda ? "mov-compra" : "mov-pago";
+          var claseMonto = esDeuda ? "monto-negativo" : "monto-positivo"; 
+          var signo = esDeuda ? "" : "+ "; 
+          
+          // GENERAMOS CHECKBOX SOLO SI ES DEUDA
+          // Usamos onclick="toggleSeleccion(this)" en el LI, y prevenimos propagación en el input
+          var checkboxHtml = "";
+          var cursorStyle = "cursor: default;";
+          
+          if(esDeuda) {
+             checkboxHtml = `
+               <input type="checkbox" class="form-check-input custom-check check-pago" 
+                      value="${m.monto}" 
+                      id="chk_${index}"
+                      onchange="calcularSeleccion()" 
+                      onclick="event.stopPropagation()">
+             `;
+             cursorStyle = "cursor: pointer;";
+          } else {
+             // Espacio vacío para alinear si es pago
+             checkboxHtml = `<div style="width: 38px;"></div>`; 
+          }
+
+          // Creamos el elemento LI con un onclick que activa el checkbox si es deuda
+          var clickAction = esDeuda ? `onclick="toggleFila('${index}')"` : "";
+
+          ul.innerHTML += `
+            <li id="fila_${index}" class="list-group-item list-group-item-detalle d-flex align-items-center movimiento-item ${claseBorde}" style="${cursorStyle}" ${clickAction}>
+              
+              ${checkboxHtml}
+
+              <div class="flex-grow-1">
+                <div class="fw-bold text-dark">${m.detalle}</div>
+                <small class="text-secondary">${m.fecha}</small>
+              </div>
+              <span class="${claseMonto} fs-6 text-nowrap">${signo}${formatMoney(Math.abs(m.monto))}</span>
+            </li>
+          `;
+        });
+      }
+
+      // --- LOGICA DE SELECCION ---
+      
+      // Permite hacer click en cualquier parte de la fila para activar el check
+      function toggleFila(index) {
+          var chk = document.getElementById("chk_" + index);
+          if(chk) {
+              chk.checked = !chk.checked;
+              calcularSeleccion();
+          }
+      }
+
+      function calcularSeleccion() {
+          var checkboxes = document.querySelectorAll('.check-pago:checked');
+          var total = 0;
+          
+          // Iteramos y sumamos
+          checkboxes.forEach(function(chk) {
+              total += parseFloat(chk.value);
+          });
+          
+          montoSeleccionado = total;
+          
+          // Estilos visuales a las filas (pintar de verde las seleccionadas)
+          document.querySelectorAll('.movimiento-item').forEach(li => li.classList.remove('row-selected'));
+          checkboxes.forEach(chk => {
+              chk.closest('li').classList.add('row-selected');
+          });
+
+          actualizarBotonPagoUI();
+      }
+
+      function actualizarBotonPagoUI() {
+          var btnTexto = document.getElementById("textoBtnPagar");
+          var btnMonto = document.getElementById("montoBtnPagar");
+          
+          if (montoSeleccionado > 0) {
+              btnTexto.innerText = "PAGAR SELECCIÓN (" + document.querySelectorAll('.check-pago:checked').length + ")";
+              btnMonto.innerText = formatMoney(montoSeleccionado);
+          } else {
+              // Si no hay nada seleccionado, mostramos opción de pagar el total de la deuda
+              btnTexto.innerText = "REGISTRAR PAGO (TOTAL DEUDA)";
+              // Si el saldo global es negativo (a favor), mostrar 0, sino la deuda
+              var montoMostrar = saldoGlobal > 0 ? saldoGlobal : 0;
+              btnMonto.innerText = formatMoney(montoMostrar);
+          }
+      }
+
+      function volverSaldos() {
+        document.getElementById("vistaSaldos").style.display = "block";
+        document.getElementById("vistaDetalle").style.display = "none";
+        cargarSaldosIniciales();
+      }
+      
+      // --- LOGICA DEL MODAL DE PAGO ---
+      function abrirModalPago() {
+        document.getElementById("inputProveedorNombreModal").value = nombreProveedorActivo;
+        document.getElementById("inputProveedorHidden").value = nombreProveedorActivo;
+        document.getElementById("fechaHoy").valueAsDate = new Date();
+        
+        var inputMonto = document.getElementById("inputMonto");
+        var aviso = document.getElementById("avisoSeleccion");
+
+        // >> LÓGICA CLAVE SOLICITADA <<
+        // Si hay selección > 0, usamos eso. Si no, usamos el saldoGlobal.
+        if (montoSeleccionado > 0) {
+          inputMonto.value = montoSeleccionado.toFixed(2);
+          aviso.style.display = "block";
+        } else {
+          if (saldoGlobal > 0) {
+            inputMonto.value = saldoGlobal.toFixed(2); 
+          } else {
+            inputMonto.value = ""; 
+          }
+          aviso.style.display = "none";
+        }
+        
+        document.getElementById("divFechaPago").style.display = "none";
+        document.getElementById("selectMedio").value = "Transferencia"; 
+
+        modalPagoBootstrap.show();
+      }
+
+      function toggleFechaPago() {
+        var medio = document.getElementById("selectMedio").value;
+        var divFecha = document.getElementById("divFechaPago");
+        var inputFecha = document.getElementById("inputFechaPago");
+
+        if (medio.includes("Cheque")) {
+          divFecha.style.display = "block";
+          inputFecha.required = true;
+        } else {
+          divFecha.style.display = "none";
+          inputFecha.required = false;
+          inputFecha.value = "";
+        }
+      }
+
+      function enviarPago(e) {
+        e.preventDefault();
+        modalPagoBootstrap.hide();
+        showLoading(true);
+
+        var form = document.getElementById("formPago");
+        
+        google.script.run.withSuccessHandler(function(res) {
+          alert("Pago registrado correctamente.");
+          seleccionarProveedor(nombreProveedorActivo); 
+        }).registrarPago(form);
+      }
+
+    </script>
+  </body>
+</html>
+
+Funciones_Empleados.gs 
+// ==========================================
+// === LÓGICA DE RRHH (EMPLEADOS) ===
+// ==========================================
+
+function obtenerHistorialEmpleado(nombreEmpleado) {
+  var respuesta = { movimientos: [], total: 0, saldoAnterior: 0 };
+  
+  try {
+    var ss = SpreadsheetApp.openById(ID_RRHH);
+    var hoja = ss.getSheetByName("CtaCte Empleados");
+    
+    if (hoja && hoja.getLastRow() > 1) {
+      var datos = hoja.getDataRange().getValues();
+      var zona = ss.getSpreadsheetTimeZone();
+      var nombreBuscado = String(nombreEmpleado).toLowerCase().trim();
+      
+      // 1. Recolectar TODA la historia cronológica
+      var historiaCompleta = [];
+      
+      for (var i = 1; i < datos.length; i++) {
+        var nombreEnFila = String(datos[i][1]).toLowerCase().trim();
+        
+        if (nombreEnFila == nombreBuscado) {
+          var fechaRaw = datos[i][0];
+          var fechaObj = null;
+          
+          if (fechaRaw instanceof Date) {
+            fechaObj = fechaRaw;
+          } else if (typeof fechaRaw === 'string') {
+             var p = fechaRaw.split("/"); 
+             if(p.length === 3) fechaObj = new Date(p[2], p[1]-1, p[0]);
+          }
+
+          if (!fechaObj) continue;
+
+          var concepto = String(datos[i][2]); 
+          var debe = Number(datos[i][3]) || 0;  
+          var haber = Number(datos[i][4]) || 0; 
+          var medio = datos[i][5]; 
+          
+          historiaCompleta.push({
+            fechaFmt: Utilities.formatDate(fechaObj, zona, "dd/MM/yyyy"),
+            concepto: concepto,
+            debe: debe,
+            haber: haber,
+            medio: medio
+          });
+        }
+      }
+      
+      // 2. Buscar el índice de CORTE (El último "Pago Sueldo" o "Pago Mes")
+      var indiceCorte = -1; 
+      
+      for (var j = historiaCompleta.length - 1; j >= 0; j--) {
+        var c = historiaCompleta[j].concepto.toLowerCase();
+        // Lógica de corte: busca "pago" + ("mes" o "sueldo")
+        if (c.includes("pago") && (c.includes("mes") || c.includes("sueldo"))) {
+           indiceCorte = j; 
+           break; 
+        }
+      }
+
+      // 3. Calcular Saldo Anterior (Suma de todo HASTA el corte inclusive)
+      for (var k = 0; k <= indiceCorte; k++) {
+         var mov = historiaCompleta[k];
+         respuesta.saldoAnterior += (mov.haber - mov.debe);
+      }
+
+      // 4. Armar la lista visible (Solo lo que pasó DESPUÉS del corte)
+      for (var k = indiceCorte + 1; k < historiaCompleta.length; k++) {
+         var mov = historiaCompleta[k];
+         
+         var tipoMov = (mov.haber > 0) ? "ACREDITADO" : "PAGADO";
+         var montoVisual = (mov.haber > 0) ? mov.haber : mov.debe;
+         
+         respuesta.movimientos.push({
+           fecha: mov.fechaFmt,
+           concepto: mov.concepto,
+           tipo: tipoMov,
+           monto: montoVisual,
+           medio: mov.medio
+         });
+      }
+      
+      // 5. Total Global Real
+      var saldoNuevos = 0;
+      respuesta.movimientos.forEach(m => {
+         if (m.tipo === "ACREDITADO") saldoNuevos += m.monto;
+         else saldoNuevos -= m.monto;
+      });
+
+      respuesta.total = respuesta.saldoAnterior + saldoNuevos;
+    }
+    return respuesta;
+
+  } catch (e) { 
+    return { error: "Error Backend: " + e.message, movimientos: [], total: 0 }; 
+  }
+}
+
+// --- GUARDAR MOVIMIENTO (Sueldo, Pago o Ambos) ---
+function registrarMovimientoRRHH(formObject) {
+  try {
+    var ssRRHH = SpreadsheetApp.openById(ID_RRHH);
+    var hojaRRHH = ssRRHH.getSheetByName("CtaCte Empleados");
+    
+    if (!hojaRRHH) {
+      hojaRRHH = ssRRHH.insertSheet("CtaCte Empleados");
+      hojaRRHH.appendRow(["Fecha", "Empleado", "Concepto", "Debe (Pagos)", "Haber (Sueldos)", "Medio Pago"]);
+      hojaRRHH.getRange("A1:F1").setFontWeight("bold");
+    }
+    
+    var fecha = new Date();
+    var monto = parseFloat(formObject.monto);
+    var empleado = formObject.empleado;
+    var concepto = formObject.concepto; 
+    var medioPago = formObject.medioPago;
+    var tipoOperacion = formObject.tipoOperacion; 
+    
+    // --- LÓGICA DE GUARDADO ---
+    
+    if (tipoOperacion === "SueldoPago") {
+      // CASO DOBLE ENTRADA: DOS FILAS SEPARADAS
+      
+      // 1. Fila de devengado (SUELDO/HABER)
+      // Concepto original, va al HABER, sin medio de pago
+      hojaRRHH.appendRow([fecha, empleado, concepto, 0, monto, "-"]);
+      
+      // 2. Fila de pago (PAGO/DEBE)
+      // Agregamos "Pago " al concepto, va al DEBE, con el medio de pago real
+      hojaRRHH.appendRow([fecha, empleado, "Pago " + concepto, monto, 0, medioPago]);
+
+      // Formatear las últimas 2 filas agregadas
+      var lastRow = hojaRRHH.getLastRow();
+      var rango = hojaRRHH.getRange(lastRow - 1, 1, 2, 6); 
+      rango.offset(0,0,2,1).setNumberFormat("dd/MM/yyyy"); 
+      rango.offset(0,3,2,2).setNumberFormat("$ #,##0.00"); 
+
+      // Impactar Caja (Solo por la parte del pago)
+      if (medioPago === "Rendición" || medioPago === "Efectivo" || medioPago === "Caja") {
+         impactarCaja(empleado, "Pago " + concepto, monto, medioPago);
+      }
+
+    } else {
+      // CASO NORMAL (UNA SOLA FILA: O DEBE O HABER)
+      var valorDebe = 0;
+      var valorHaber = 0;
+
+      if (tipoOperacion === "Haber") {
+        valorHaber = monto;
+      } else {
+        valorDebe = monto; 
+      }
+
+      hojaRRHH.appendRow([fecha, empleado, concepto, valorDebe, valorHaber, medioPago]);
+      
+      // Formato última fila
+      var lastRow = hojaRRHH.getLastRow();
+      hojaRRHH.getRange(lastRow, 1).setNumberFormat("dd/MM/yyyy");
+      hojaRRHH.getRange(lastRow, 4, 1, 2).setNumberFormat("$ #,##0.00");
+
+      // Impactar Caja (Solo si es DEBE y sale dinero)
+      if (tipoOperacion === "Debe" && (medioPago === "Rendición" || medioPago === "Efectivo" || medioPago === "Caja")) {
+         impactarCaja(empleado, concepto, monto, medioPago);
+      }
+    }
+
+    return "Éxito";
+
+  } catch (e) { return "Error: " + e.message; }
+}
+
+// Función auxiliar para descontar de la caja central
+function impactarCaja(empleado, concepto, monto, medio) {
+  try {
+    var ssMov = SpreadsheetApp.openById(ID_MOVIMIENTOS);
+    var hojaCaja = ssMov.getSheetByName("Rendiciones");
+    if (!hojaCaja) hojaCaja = ssMov.getSheetByName("Caja");
+    
+    if (hojaCaja) {
+      var detalle = "RRHH: " + empleado + " (" + concepto + ")";
+      
+      // Estructura Caja: Fecha | Detalle | Debe | Haber | Categoria
+      // Salida de dinero -> Haber
+      hojaCaja.appendRow([new Date(), detalle, 0, monto, "RRHH"]);
+      
+      var lr = hojaCaja.getLastRow();
+      hojaCaja.getRange(lr, 1).setNumberFormat("dd/MM/yyyy hh:mm");
+      hojaCaja.getRange(lr, 3, 1, 2).setNumberFormat("$ #,##0.00");
+    }
+  } catch(e) {
+    console.error("Error impactando caja: " + e.message);
+  }
+}
+
+function obtenerListaEmpleados() {
+  try {
+    var ss = SpreadsheetApp.openById(ID_RRHH);
+    var hoja = ss.getSheetByName("Personal");
+    if (!hoja) return ["Error: No existe hoja 'Personal'"];
+    
+    var lastRow = hoja.getLastRow();
+    if (lastRow < 2) return [];
+    
+    // Ahora leemos hasta la columna G (índice 6), así que pedimos 7 columnas
+    var datos = hoja.getRange(2, 1, lastRow - 1, 7).getValues();
+    var lista = [];
+    
+    for (var i = 0; i < datos.length; i++) {
+      var apodo = datos[i][0]; // Columna A: Apodo
+      var estaActivo = datos[i][6]; // Columna G: Activo (se movió de la F a la G)
+
+      if (apodo && estaActivo === true) {
+        lista.push(apodo);
+      }
+    }
+    return lista.sort();
+  } catch (e) { return ["Error: " + e.message]; }
+}
+
+// --- PROCESAMIENTO PDF ---
+function procesarTextoPDF(texto) {
+  var log = [];
+  try {
+    var resultado = { periodo: "Desconocido", empleadosEncontrados: [] };
+    
+    // --- CAMBIO AQUÍ: Mejor detección y formato MM-AAAA ---
+    var matchPeriodo = texto.match(/(\d{1,2})\s*[-/]\s*(\d{4})\s+Haberes/i);
+    if (matchPeriodo) {
+       // padStart(2, '0') asegura que sea '05-2025' y no '5-2025'
+       var mes = matchPeriodo[1].padStart(2, '0');
+       var anio = matchPeriodo[2];
+       resultado.periodo = mes + "-" + anio;
+    }
+    // -----------------------------------------------------
+    
+    var mapaEmpleados = {}; 
+    var listaOpciones = []; 
+    
+    var ss = SpreadsheetApp.openById(ID_RRHH); 
+    var hojaP = ss.getSheetByName("Personal");
+    
+    if (hojaP) {
+       var datosP = hojaP.getDataRange().getValues();
+       for (var k = 1; k < datosP.length; k++) {
+          var apodo = datosP[k][0]; 
+          var cuitRaw = String(datosP[k][4]); 
+          var activo = datosP[k][6]; 
+          
+          if (apodo && activo === true) {
+             listaOpciones.push(apodo);
+             var cuitLimpio = cuitRaw.replace(/[^0-9]/g, ''); 
+             if (cuitLimpio.length > 5) mapaEmpleados[cuitLimpio] = apodo;
+          }
+       }
+    }
+    listaOpciones.sort();
+
+    var bloques = texto.split(/Legajo N[º°]?:/i); 
+    
+    for (var i = 1; i < bloques.length; i++) {
+      var bloque = bloques[i];
+      if (!bloque.includes("TOTALES DEL LEGAJO")) continue; 
+
+      var matchNombre = bloque.match(/Apellido y nombres:\s*([^\r\n]+?)(?=\s+(?:CUIL|CUIT|Tipo))/i);
+      var nombrePDF = matchNombre ? matchNombre[1].trim().replace(/\.{2,}/g, "") : "❌ NO NOMBRE";
+
+      var matchCuil = bloque.match(/(?:CUIL|CUIT):\s*([\d\-\s.]{11,15})/i); 
+      var cuilPDF = matchCuil ? matchCuil[1] : "";
+      var cuilLimpio = cuilPDF.replace(/[^0-9]/g, '');
+
+      var montoNeto = 0;
+      var matchLineaTotales = bloque.match(/TOTALES DEL LEGAJO:(.*?)(\r\n|\r|\n|$)/i); 
+      
+      if (matchLineaTotales) {
+         var lineaNumeros = matchLineaTotales[1].trim();
+         var partesLinea = lineaNumeros.split(/\s+/);
+         var ultimoValor = partesLinea[partesLinea.length - 1]; 
+         if (ultimoValor) {
+            var soloNumeros = ultimoValor.replace(/[^0-9]/g, '');
+            montoNeto = parseFloat(soloNumeros) / 100;
+         }
+      }
+
+      var nombreSugerido = "";
+      if (cuilLimpio && mapaEmpleados[cuilLimpio]) {
+         nombreSugerido = mapaEmpleados[cuilLimpio];
+      }
+      
+      if (montoNeto > 0) {
+        resultado.empleadosEncontrados.push({
+          nombrePDF: nombrePDF,
+          cuilPDF: cuilLimpio, 
+          nombreDB: nombreSugerido, 
+          monto: montoNeto
+        });
+      }
+    }
+    
+    return { status: "OK", data: resultado, listaOpciones: listaOpciones, log: log.join("\n") };
+
+  } catch (e) {
+    return { status: "Error", message: "Error al procesar: " + e.message };
+  }
+}
+
+function guardarImportacionSueldos(jsonString) {
+  try {
+    var datos = JSON.parse(jsonString);
+    var periodo = datos.periodo; // Viene como "11-2025"
+    var items = datos.items;
+    
+    var ss = SpreadsheetApp.openById(ID_RRHH);
+    var hoja = ss.getSheetByName("CtaCte Empleados");
+    var fechaHoy = new Date();
+    var contador = 0;
+
+    items.forEach(function(item) {
+       if (item.importar && item.nombreDB) {
+          
+          // --- CAMBIO AQUÍ: Agregamos "mes" ---
+          var concepto = "Sueldo mes " + periodo; 
+          // Resultado ejemplo: "Sueldo mes 11-2025"
+          // ------------------------------------
+
+          hoja.appendRow([
+             fechaHoy,
+             item.nombreDB,
+             concepto,
+             0, 
+             parseFloat(item.monto), 
+             "-" 
+          ]);
+          contador++;
+       }
+    });
+    
+    var lr = hoja.getLastRow();
+    if(contador > 0) {
+       var rango = hoja.getRange(lr - contador + 1, 1, contador, 6);
+       rango.offset(0,0,contador,1).setNumberFormat("dd/MM/yyyy");
+       rango.offset(0,3,contador,2).setNumberFormat("$ #,##0.00");
+    }
+
+    return "✅ Se importaron " + contador + " liquidaciones.";
+
+  } catch (e) { return "Error: " + e.message; }
+}
+
+function generarTextoRecibo(nombreEmpleado) {
+  try {
+    var ss = SpreadsheetApp.openById(ID_RRHH);
+    var hoja = ss.getSheetByName("CtaCte Empleados");
+    var datos = hoja.getDataRange().getValues();
+    var nombreBuscado = String(nombreEmpleado).toLowerCase().trim();
+    var zona = ss.getSpreadsheetTimeZone();
+
+    // Buscar Teléfono
+    var telefono = "";
+    var hojaPersonal = ss.getSheetByName("Personal");
+    if (hojaPersonal) {
+      var datosP = hojaPersonal.getDataRange().getValues();
+      for (var p = 1; p < datosP.length; p++) {
+        if (String(datosP[p][0]).toLowerCase().trim() == nombreBuscado) {
+           var rawTel = String(datosP[p][8]); 
+           telefono = rawTel.replace(/[^0-9]/g, "");
+           if (telefono.length === 10) telefono = "549" + telefono;
+           break;
+        }
+      }
+    }
+
+    // Obtener historia
+    var historia = [];
+    for (var i = 1; i < datos.length; i++) {
+      if (String(datos[i][1]).toLowerCase().trim() == nombreBuscado) {
+        historia.push({
+          fecha: datos[i][0],
+          concepto: String(datos[i][2]),
+          debe: Number(datos[i][3]) || 0,
+          haber: Number(datos[i][4]) || 0
+        });
+      }
+    }
+
+    if (historia.length === 0) return { texto: "No hay datos.", telefono: "" };
+
+    // Identificar ciclo
+    var itemsCiclo = [];
+    var ultimoSueldoIdx = -1;
+    
+    for (var j = historia.length - 1; j >= 0; j--) {
+      var c = historia[j].concepto.toLowerCase();
+      if (c.includes("sueldo") || c.includes("haberes")) {
+        ultimoSueldoIdx = j;
+        break;
+      }
+    }
+    if (ultimoSueldoIdx === -1) ultimoSueldoIdx = historia.length - 1;
+
+    for (var j = ultimoSueldoIdx; j >= 0; j--) {
+      var c = historia[j].concepto.toLowerCase();
+      if (j !== ultimoSueldoIdx && (c.includes("sueldo") || c.includes("haberes"))) {
+        break;
+      }
+      itemsCiclo.unshift(historia[j]); 
+    }
+
+    // Calcular Saldos
+    var saldoFinalReal = 0;
+    historia.forEach(m => saldoFinalReal += (m.haber - m.debe));
+
+    var sumaIngresos = 0;
+    var sumaEgresos = 0;
+    itemsCiclo.forEach(m => {
+       sumaIngresos += m.haber;
+       sumaEgresos += m.debe;
+    });
+
+    var saldoAnterior = saldoFinalReal - sumaIngresos + sumaEgresos;
+
+    // --- ARMADO DEL TEXTO CON FORMATO ---
+    var txt = "🧾 *RECIBO DE HABERES*\n";
+    txt += "👤 " + nombreEmpleado.toUpperCase() + "\n";
+    txt += "📅 " + Utilities.formatDate(new Date(), zona, "dd/MM/yyyy") + "\n";
+    txt += "--------------------------------\n";
+    
+    txt += "*INGRESOS*\n";
+    var hayIngresos = false;
+    itemsCiclo.forEach(m => {
+      if (m.haber > 0) {
+        var fecha = Utilities.formatDate(new Date(m.fecha), zona, "dd/MM");
+        // USO DE formatearNumero AQUÍ
+        txt += `${fecha} ${m.concepto.padEnd(18).substring(0,18)} ${formatearNumero(m.haber)}\n`;
+        hayIngresos = true;
+      }
+    });
+    if(!hayIngresos) txt += "(Sin ingresos)\n";
+    txt += "--------------------------------\n";
+    txt += `*TOTAL INGRESOS: ${formatearNumero(sumaIngresos)}*\n\n`;
+
+    txt += "*DESCUENTOS / ADELANTOS*\n";
+    var hayEgresos = false;
+    itemsCiclo.forEach(m => {
+      if (m.debe > 0) {
+        var fecha = Utilities.formatDate(new Date(m.fecha), zona, "dd/MM");
+        // Agregamos el signo menos manual antes del formateo
+        txt += `${fecha} ${m.concepto.padEnd(18).substring(0,18)} -${formatearNumero(m.debe).replace("$ ","")}\n`;
+        hayEgresos = true;
+      }
+    });
+    if(!hayEgresos) txt += "(Sin adelantos)\n";
+    txt += "--------------------------------\n";
+    // Total Egresos en negativo
+    txt += `*TOTAL EGRESOS: -${formatearNumero(sumaEgresos).replace("$ ","")}*\n\n`;
+
+    txt += "================================\n";
+    if (Math.abs(saldoAnterior) > 1) {
+       txt += `Saldo Anterior:     ${formatearNumero(saldoAnterior)}\n`;
+    }
+    txt += `*NETO A PAGAR:       ${formatearNumero(saldoFinalReal)}*\n`;
+    txt += "================================";
+
+    return { texto: txt, telefono: telefono };
+
+  } catch (e) {
+    return { texto: "Error: " + e.message, telefono: "" };
+  }
+}
+
+// --- FUNCIÓN DE FORMATO DE MONEDA ---
+function formatearNumero(n) {
+  if (!n && n !== 0) return "$ 0,00";
+  return "$ " + Number(n).toFixed(2).replace(".", ",").replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+}
+
+// --- FUNCIÓN PRINCIPAL PARA GENERAR EL RECIBO ---
+function generarReciboHistorico(nombreEmpleado, mes, anio) {
+  try {
+    var ss = SpreadsheetApp.openById(ID_RRHH);
+    var hoja = ss.getSheetByName("CtaCte Empleados");
+    var datos = hoja.getDataRange().getValues();
+    var nombreBuscado = String(nombreEmpleado).toLowerCase().trim();
+    var zona = ss.getSpreadsheetTimeZone();
+
+    // 1. BUSCAR TELÉFONO EN COLUMNA I (Índice 8)
+    var telefono = "";
+    var hojaPersonal = ss.getSheetByName("Personal");
+    
+    if (hojaPersonal) {
+      var datosP = hojaPersonal.getDataRange().getValues();
+      for (var p = 1; p < datosP.length; p++) {
+        // Columna A (0) es el nombre
+        var nombreEnFila = String(datosP[p][0]).toLowerCase().trim();
+        
+        if (nombreEnFila == nombreBuscado) {
+           // Columna I es el índice 8
+           var rawTel = String(datosP[p][8] || ""); 
+           
+           // Dejar solo números
+           telefono = rawTel.replace(/[^0-9]/g, "");
+           
+           // Si tiene 10 dígitos (ej: 2991234567), agregamos 549 (Argentina)
+           if (telefono.length === 10) {
+              telefono = "549" + telefono;
+           }
+           break; 
+        }
+      }
+    }
+
+    // 2. Definir fechas
+    var mesNum = parseInt(mes);
+    var anioNum = parseInt(anio);
+    var mesActualStr = mesNum.toString().padStart(2, '0') + "-" + anioNum;
+    
+    var mesAntNum = mesNum - 1;
+    var anioAntNum = anioNum;
+    if (mesAntNum === 0) { mesAntNum = 12; anioAntNum--; }
+    var mesAntStr = mesAntNum.toString().padStart(2, '0') + "-" + anioAntNum;
+
+    // 3. Filtrar Historia
+    var historia = [];
+    for (var i = 1; i < datos.length; i++) {
+      if (String(datos[i][1]).toLowerCase().trim() == nombreBuscado) {
+        historia.push({
+          fecha: datos[i][0],
+          concepto: String(datos[i][2]),
+          debe: Number(datos[i][3]) || 0,
+          haber: Number(datos[i][4]) || 0
+        });
+      }
+    }
+
+    if (historia.length === 0) return { texto: "No hay historial.", telefono: "" };
+
+    // 4. Buscar Cortes
+    var idxCorteActual = -1;
+    for (var j = historia.length - 1; j >= 0; j--) {
+       var c = historia[j].concepto.toLowerCase();
+       if ((c.includes("sueldo") || c.includes("pago") || c.includes("haberes")) && c.includes(mesActualStr)) {
+          idxCorteActual = j;
+          break;
+       }
+    }
+    if (idxCorteActual === -1) idxCorteActual = historia.length - 1; 
+
+    var idxCorteAnterior = -1;
+    for (var j = idxCorteActual - 1; j >= 0; j--) {
+       var c = historia[j].concepto.toLowerCase();
+       if ((c.includes("sueldo") || c.includes("pago") || c.includes("haberes")) && c.includes(mesAntStr)) {
+          idxCorteAnterior = j;
+          break;
+       }
+    }
+
+    // 5. Calcular Saldos
+    var saldoAnterior = 0;
+    for (var k = 0; k <= idxCorteAnterior; k++) {
+       saldoAnterior += (historia[k].haber - historia[k].debe);
+    }
+
+    var itemsCiclo = [];
+    var sumaIngresos = 0;
+    var sumaEgresos = 0;
+
+    for (var k = idxCorteAnterior + 1; k <= idxCorteActual; k++) {
+       var m = historia[k];
+       itemsCiclo.push(m);
+       sumaIngresos += m.haber;
+       sumaEgresos += m.debe;
+    }
+
+    var saldoFinalCiclo = saldoAnterior + sumaIngresos - sumaEgresos;
+
+    // 6. Generar Texto
+    var txt = "🧾 *HISTÓRICO: MES " + mesActualStr + "*\n";
+    txt += "👤 " + nombreEmpleado.toUpperCase() + "\n";
+    txt += "--------------------------------\n";
+
+    txt += "*INGRESOS*\n";
+    var hayIngresos = false;
+    itemsCiclo.forEach(m => {
+      if (m.haber > 0) {
+        var fecha = Utilities.formatDate(new Date(m.fecha), zona, "dd/MM");
+        txt += `${fecha} ${m.concepto.padEnd(18).substring(0,18)} ${formatearNumero(m.haber)}\n`;
+        hayIngresos = true;
+      }
+    });
+    if(!hayIngresos) txt += "(Sin ingresos)\n";
+    txt += "--------------------------------\n";
+    txt += `*TOTAL INGRESOS: ${formatearNumero(sumaIngresos)}*\n\n`;
+
+    txt += "*DESCUENTOS / ADELANTOS*\n";
+    var hayEgresos = false;
+    itemsCiclo.forEach(m => {
+      if (m.debe > 0) {
+        var fecha = Utilities.formatDate(new Date(m.fecha), zona, "dd/MM");
+        txt += `${fecha} ${m.concepto.padEnd(18).substring(0,18)} -${formatearNumero(m.debe).replace("$ ","")}\n`;
+        hayEgresos = true;
+      }
+    });
+    if(!hayEgresos) txt += "(Sin adelantos)\n";
+    txt += "--------------------------------\n";
+    txt += `*TOTAL EGRESOS: -${formatearNumero(sumaEgresos).replace("$ ","")}*\n\n`;
+
+    txt += "================================\n";
+    if (idxCorteAnterior > -1 || Math.abs(saldoAnterior) > 1) {
+       txt += `Saldo Mes Ant (${mesAntStr}): ${formatearNumero(saldoAnterior)}\n`;
+    }
+    
+    txt += `*NETO AL ${mesActualStr}:   ${formatearNumero(saldoFinalCiclo)}*\n`;
+    txt += "================================";
+
+    // Retorna Texto y Teléfono encontrado
+    return { texto: txt, telefono: telefono };
+
+  } catch (e) {
+    return { texto: "Error: " + e.message, telefono: "" };
+  }
+}
+
+
+empleados.html
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+    
+    <style>
+      body { background-color: #f8f9fa; font-family: 'Segoe UI', sans-serif; }
+      .rrhh-card {
+        background: linear-gradient(135deg, #fd7e14 0%, #d65b00 100%);
+        color: white; border-radius: 15px; padding: 30px 20px; text-align: center;
+        box-shadow: 0 8px 20px rgba(253, 126, 20, 0.3); margin-bottom: 20px;
+      }
+      .rrhh-valor { font-size: 3rem; font-weight: 800; margin: 5px 0; text-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+      #loading { display: flex; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.9); z-index: 9999; justify-content: center; align-items: center; flex-direction: column;}
+      
+      .text-acreditado { color: #198754; font-weight: bold; } 
+      .text-pagado { color: #dc3545; font-weight: bold; }    
+      .btn-filter { border-radius: 20px; font-size: 0.85rem; font-weight: 600; padding-left: 15px; padding-right: 15px; }
+      .btn-check:checked + .btn-outline-secondary { background-color: #6c757d; color: white; }
+    </style>
+  </head>
+  <body>
+
+    <div id="loading">
+      <div class="spinner-border text-warning" role="status" style="width: 3rem; height: 3rem;"></div>
+      <div class="mt-3 text-dark fw-bold">Cargando...</div>
+    </div>
+
+    <div class="container pt-3">
+      <? var url = getAppUrl(); ?>
+      <a href="<?= url ?>" class="text-decoration-none text-secondary fw-bold small"><i class="bi bi-arrow-left-circle-fill"></i> VOLVER AL MENÚ</a>
+    </div>
+
+    <div class="container py-3" style="max-width: 600px;">
+      
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="fw-bold text-secondary mb-0"><i class="bi bi-people"></i> Cta Cte Empleados</h5>
+        <button class="btn btn-outline-secondary btn-sm fw-bold" onclick="abrirImportar()">
+          <i class="bi bi-file-earmark-pdf-fill"></i> Importar
+        </button>
+      </div>
+
+      <div class="card border-0 shadow-sm p-3 mb-3">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <label class="form-label fw-bold text-muted small mb-0">SELECCIONAR PERSONA</label>
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="switchManual" onchange="toggleModoManual()">
+            <label class="form-check-label small text-muted" for="switchManual">Fijo / Eventual</label>
+          </div>
+        </div>
+
+        <div id="divSelector">
+          <select id="selectEmpleado" class="form-select form-select-lg" onchange="cargarHistorial()">
+            <option value="" selected disabled>Buscar empleado activo...</option>
+          </select>
+        </div>
+
+        <div id="divManual" style="display:none;">
+          <div class="input-group">
+            <input type="text" id="inputNombreManual" class="form-control form-control-lg" placeholder="Escriba el nombre..." onchange="cargarHistorial()">
+            <button class="btn btn-outline-secondary" type="button" onclick="cargarHistorial()"><i class="bi bi-search"></i></button>
+          </div>
+          <div class="form-text small">Para eventuales que no están en la lista oficial.</div>
+        </div>
+      </div>
+
+      <div id="panelEmpleado" style="display:none;">
+        
+        <div class="rrhh-card">
+          <div class="text-uppercase small opacity-75">Saldo a Pagar (Total Histórico)</div>
+          <div class="rrhh-valor" id="txtTotal">$ 0,00</div>
+          
+          <div class="d-grid gap-2 mt-4">
+             <div class="row g-2">
+                <div class="col-6">
+                   <button class="btn btn-dark w-100 fw-bold shadow-sm py-2" onclick="abrirModal('PAGO_SUELDO')">
+                     <i class="bi bi-cash-coin"></i> PAGO SUELDO
+                   </button>
+                </div>
+                <div class="col-6">
+                   <button class="btn btn-secondary w-100 fw-bold shadow-sm py-2" onclick="abrirModal('ADELANTO')">
+                     <i class="bi bi-stopwatch"></i> PAGO ADELANTO
+                   </button>
+                </div>
+             </div>
+             
+             <div class="row g-2">
+                <div class="col-8">
+                   <button class="btn btn-light text-success fw-bold shadow-sm py-2 w-100" onclick="abrirModal('RECIBO')">
+                     <i class="bi bi-file-earmark-plus-fill"></i> GENERAR RECIBO
+                   </button>
+                </div>
+                <div class="col-4">
+                   <button class="btn btn-info text-white fw-bold shadow-sm py-2 w-100" onclick="abrirSelectorRecibo()">
+                     <i class="bi bi-eye-fill"></i> VER
+                   </button>
+                </div>
+             </div>
+          </div>
+        </div>
+        
+        <div class="d-flex justify-content-between align-items-center mb-2 ms-1">
+          <h6 class="text-muted mb-0">Últimos 3 Meses</h6>
+          <div class="btn-group" role="group">
+            <input type="radio" class="btn-check" name="filtro" id="btnFiltroTodos" autocomplete="off" checked onclick="aplicarFiltro('TODOS')">
+            <label class="btn btn-outline-secondary btn-sm btn-filter" for="btnFiltroTodos">Todos</label>
+
+            <input type="radio" class="btn-check" name="filtro" id="btnFiltroIngresos" autocomplete="off" onclick="aplicarFiltro('ACREDITADO')">
+            <label class="btn btn-outline-success btn-sm btn-filter" for="btnFiltroIngresos">Ingresos</label>
+
+            <input type="radio" class="btn-check" name="filtro" id="btnFiltroPagos" autocomplete="off" onclick="aplicarFiltro('PAGADO')">
+            <label class="btn btn-outline-danger btn-sm btn-filter" for="btnFiltroPagos">Pagos</label>
+          </div>
+        </div>
+
+        <div class="card border-0 shadow-sm">
+          <ul class="list-group list-group-flush" id="listaMovimientos"></ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="modalOperacion" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header text-white" id="modalHeader">
+            <h5 class="modal-title fw-bold" id="modalTitle">Registrar</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <form id="formRRHH" onsubmit="enviarMovimiento(event)">
+              <input type="hidden" name="empleado" id="inputEmpleadoHidden">
+              <input type="hidden" name="tipoOperacion" id="inputTipoOperacion">
+              
+              <div class="mb-3 text-center">
+                 <span class="badge bg-light text-dark border fs-6" id="badgeNombreDisplay">...</span>
+              </div>
+
+              <div class="mb-3">
+                  <label class="small fw-bold">Monto ($)</label>
+                  <input type="number" class="form-control form-control-lg fw-bold" name="monto" step="0.01" required>
+              </div>
+
+              <div class="mb-3">
+                  <label class="small fw-bold">Concepto</label>
+                  <input type="text" class="form-control" name="concepto" id="inputConcepto" required>
+              </div>
+              
+              <div class="mb-3 form-check p-3 bg-light border rounded" id="divCheckPagoSimultaneo" style="display:none; margin-left: 0.8rem; margin-right: 0.8rem;">
+                 <input class="form-check-input" type="checkbox" id="chkPagoSimultaneo" onchange="toggleMedioPago()">
+                 <label class="form-check-label fw-bold text-primary" for="chkPagoSimultaneo">
+                   Registrar cobro inmediato
+                 </label>
+                 <div class="small text-muted mt-1" style="line-height: 1.2;">
+                    Tildar si ya le diste el dinero. Generará el recibo y el pago ("Sueldo + Pago") automáticamente.
+                 </div>
+              </div>
+
+              <div class="mb-3" id="divMedioPago">
+                <label class="small fw-bold">Medio de Pago</label>
+                <select class="form-select" name="medioPago" id="selectMedio" onchange="verificarAlertaCaja()">
+                  <option value="Transferencia">Transferencia</option>
+                  <option value="Rendición">Rendición (Caja Negocio)</option>
+                  <option value="Efectivo">Efectivo (Caja Privada)</option>
+                  <option value="-">No aplica</option>
+                </select>
+                <div class="alert alert-warning small mt-2" id="alertaInfo" style="display:none;">
+                   <i class="bi bi-exclamation-triangle-fill me-2"></i> Descuenta de Caja.
+                </div>
+              </div>
+
+              <div class="d-grid mt-4">
+                <button type="submit" class="btn w-100 fw-bold text-white" id="btnGuardar">GUARDAR</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="modalSelectorRecibo" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content">
+          <div class="modal-header bg-info text-white">
+            <h5 class="modal-title fw-bold">Ver Recibo Histórico</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+             <div class="mb-3">
+               <label class="fw-bold small">Mes</label>
+               <select id="selMes" class="form-select mb-2">
+                 <option value="1">Enero</option><option value="2">Febrero</option><option value="3">Marzo</option>
+                 <option value="4">Abril</option><option value="5">Mayo</option><option value="6">Junio</option>
+                 <option value="7">Julio</option><option value="8">Agosto</option><option value="9">Septiembre</option>
+                 <option value="10">Octubre</option><option value="11">Noviembre</option><option value="12">Diciembre</option>
+               </select>
+               <label class="fw-bold small">Año</label>
+               <select id="selAnio" class="form-select">
+                 <option value="2024">2024</option>
+                 <option value="2025" selected>2025</option>
+                 <option value="2026">2026</option>
+               </select>
+             </div>
+             <div class="d-grid">
+               <button class="btn btn-info text-white fw-bold" onclick="consultarReciboHistorico()">GENERAR</button>
+             </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="modalReciboTexto" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header bg-success text-white">
+            <h5 class="modal-title fw-bold"><i class="bi bi-whatsapp"></i> Recibo para enviar</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body text-center">
+            <p class="small text-muted">Copia este texto y pégalo en WhatsApp:</p>
+            <textarea id="txtAreaRecibo" class="form-control font-monospace small bg-light" rows="12" readonly style="font-size: 0.85rem;"></textarea>
+            
+            <div class="d-grid gap-2 mt-3">
+               <button class="btn btn-outline-success fw-bold" onclick="copiarRecibo()">
+                 <i class="bi bi-clipboard"></i> COPIAR TEXTO
+               </button>
+               <a id="btnLinkWhatsapp" href="#" target="_blank" class="btn btn-success fw-bold">
+                 <i class="bi bi-whatsapp"></i> ABRIR WHATSAPP
+               </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="modalImportar" tabindex="-1">
+      <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable"> <div class="modal-content">
+          <div class="modal-header bg-primary text-white">
+            <h5 class="modal-title fw-bold">Control de Importación</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <div id="step1">
+              <p class="small text-muted mb-2">Copia texto PDF:</p>
+              <textarea id="txtPDF" class="form-control mb-3" rows="10"></textarea>
+              <button class="btn btn-primary w-100 fw-bold" onclick="analizarPDF()">ANALIZAR DATOS</button>
+            </div>
+            <div id="step2" style="display:none;">
+              <div class="row mb-3 align-items-center">
+                 <div class="col-auto"><label class="fw-bold small">Periodo:</label></div>
+                 <div class="col"><input type="text" id="inputPeriodo" class="form-control form-control-sm fw-bold bg-light"></div>
+                 <div class="col-auto"><button class="btn btn-sm btn-outline-secondary" onclick="volverStep1()">Volver</button></div>
+              </div>
+              <div class="table-responsive border rounded"><table class="table table-sm table-striped mb-0 small align-middle" id="tablaPreview"><thead class="table-light"><tr><th style="width:30px" class="text-center"><input type="checkbox" checked onclick="toggleAll(this)"></th><th>Nombre PDF</th><th>CUIL</th><th style="min-width: 200px;">Asignar</th><th class="text-end">Neto</th></tr></thead><tbody></tbody></table></div>
+              <div class="d-grid mt-3"><button class="btn btn-success fw-bold p-3" onclick="confirmarImportacion()">CONFIRMAR E IMPACTAR</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+      var modal;
+      var modalImport;
+      var modalRecibo; 
+      var modalSelector; 
+      var datosGlobales = []; 
+      var saldoAnteriorGlobal = 0; 
+      var listaOpcionesGlobal = [];
+      var datosPreview = [];
+      var modoActual = "";
+
+      window.onload = function() { 
+         modal = new bootstrap.Modal(document.getElementById('modalOperacion')); 
+         modalImport = new bootstrap.Modal(document.getElementById('modalImportar'));
+         modalRecibo = new bootstrap.Modal(document.getElementById('modalReciboTexto')); 
+         modalSelector = new bootstrap.Modal(document.getElementById('modalSelectorRecibo')); 
+         cargarLista(); 
+      };
+
+      // --- LOGICA FECHAS ---
+      function getPeriodoCalculado(esConceptoSueldo) {
+        var hoy = new Date();
+        var dia = hoy.getDate();
+        var mes = hoy.getMonth(); 
+        var anio = hoy.getFullYear();
+
+        if (dia <= 25) {
+           if (mes === 0) { 
+              mes = 11; anio = anio - 1;
+           } else {
+              mes = mes - 1;
+           }
+        }
+        var mesStr = (mes + 1).toString().padStart(2, '0');
+        var textoBase = esConceptoSueldo ? "Sueldo Mes" : "Pago Sueldo Mes";
+        return textoBase + " " + mesStr + "-" + anio;
+      }
+
+      // --- MODALES ---
+      function abrirModal(modo) {
+        var nom = getNombreActual();
+        if(!nom) { alert("Seleccione o escriba un nombre primero"); return; }
+        
+        modoActual = modo; 
+        document.getElementById("inputEmpleadoHidden").value = nom;
+        document.getElementById("badgeNombreDisplay").innerText = nom;
+        document.forms["formRRHH"].reset(); 
+        document.getElementById("inputEmpleadoHidden").value = nom; 
+
+        var header = document.getElementById("modalHeader");
+        var title = document.getElementById("modalTitle");
+        var btn = document.getElementById("btnGuardar");
+        var divMedio = document.getElementById("divMedioPago");
+        var inputConcepto = document.getElementById("inputConcepto");
+        var selectMedio = document.getElementById("selectMedio");
+        var divCheck = document.getElementById("divCheckPagoSimultaneo");
+
+        divCheck.style.display = "none";
+        document.getElementById("chkPagoSimultaneo").checked = false;
+
+        if (modo === "PAGO_SUELDO") {
+            header.className = "modal-header bg-dark text-white";
+            title.innerText = "Registrar Pago de Sueldo";
+            btn.className = "btn w-100 fw-bold text-white bg-dark";
+            btn.innerText = "CONFIRMAR PAGO";
+            inputConcepto.value = getPeriodoCalculado(false);
+            divMedio.style.display = "block";
+            selectMedio.value = "Transferencia";
+        } else if (modo === "ADELANTO") {
+            header.className = "modal-header bg-secondary text-white";
+            title.innerText = "Registrar Adelanto";
+            btn.className = "btn w-100 fw-bold text-white bg-secondary";
+            btn.innerText = "CONFIRMAR ADELANTO";
+            inputConcepto.value = "Adelanto";
+            divMedio.style.display = "block";
+            selectMedio.value = "Transferencia";
+        } else if (modo === "RECIBO") {
+            header.className = "modal-header bg-success text-white";
+            title.innerText = "Generar Recibo / Ingreso";
+            btn.className = "btn w-100 fw-bold text-white bg-success";
+            btn.innerText = "GUARDAR RECIBO";
+            inputConcepto.value = getPeriodoCalculado(true);
+            divCheck.style.display = "block";
+            divMedio.style.display = "none";
+            selectMedio.value = "Transferencia"; 
+        }
+
+        verificarAlertaCaja();
+        modal.show();
+      }
+
+      function abrirSelectorRecibo() {
+         var nom = getNombreActual();
+         if(!nom) { alert("Seleccione un empleado."); return; }
+         
+         var hoy = new Date();
+         var mesIndex = hoy.getMonth();
+         var anioActual = hoy.getFullYear();
+         var mesDefecto, anioDefecto;
+
+         if (mesIndex === 0) {
+            mesDefecto = 12; anioDefecto = anioActual - 1;
+         } else {
+            mesDefecto = mesIndex; anioDefecto = anioActual;
+         }
+
+         document.getElementById("selMes").value = mesDefecto;
+         document.getElementById("selAnio").value = anioDefecto;
+         
+         modalSelector.show();
+      }
+
+      function consultarReciboHistorico() {
+         var nom = getNombreActual();
+         var mes = document.getElementById("selMes").value;
+         var anio = document.getElementById("selAnio").value;
+         
+         modalSelector.hide();
+         showLoading(true);
+
+         google.script.run.withSuccessHandler(function(resultado) {
+             showLoading(false);
+             mostrarModalRecibo(resultado, nom);
+         }).generarReciboHistorico(nom, mes, anio);
+      }
+
+      function toggleMedioPago() {
+        var isChecked = document.getElementById("chkPagoSimultaneo").checked;
+        var divMedio = document.getElementById("divMedioPago");
+        var btn = document.getElementById("btnGuardar");
+        if (isChecked) {
+            divMedio.style.display = "block";
+            btn.innerText = "GUARDAR RECIBO + PAGO";
+            document.getElementById("selectMedio").value = "Transferencia"; 
+        } else {
+            divMedio.style.display = "none";
+            btn.innerText = "GUARDAR RECIBO";
+        }
+        verificarAlertaCaja();
+      }
+
+      function verificarAlertaCaja() {
+        var medio = document.getElementById("selectMedio").value;
+        var divMedioVisible = document.getElementById("divMedioPago").style.display !== "none";
+        var alerta = document.getElementById("alertaInfo");
+        if (divMedioVisible && (medio === "Rendición" || medio === "Efectivo" || medio === "Caja")) {
+             alerta.style.display = "block";
+        } else {
+             alerta.style.display = "none";
+        }
+      }
+
+      // --- GUARDAR ---
+      function enviarMovimiento(e) {
+        e.preventDefault();
+        var operacionBackend = "";
+        
+        if (modoActual === "PAGO_SUELDO" || modoActual === "ADELANTO") {
+            operacionBackend = "Debe"; 
+        } else if (modoActual === "RECIBO") {
+            var cobroSimultaneo = document.getElementById("chkPagoSimultaneo").checked;
+            operacionBackend = cobroSimultaneo ? "SueldoPago" : "Haber";
+        }
+        
+        document.getElementById("inputTipoOperacion").value = operacionBackend;
+        
+        modal.hide(); 
+        showLoading(true);
+        
+        google.script.run.withSuccessHandler(() => { 
+          showLoading(false);
+          cargarHistorial(); 
+          alert("Guardado exitosamente."); 
+        }).withFailureHandler((e) => {
+          alert("Error al guardar: " + e.message);
+          showLoading(false);
+        }).registrarMovimientoRRHH(document.getElementById("formRRHH"));
+      }
+
+      // --- VISTA PREVIA (CON TELÉFONO) ---
+      function mostrarModalRecibo(resultado, nombre) {
+            document.getElementById("txtAreaRecibo").value = resultado.texto;
+            var linkBtn = document.getElementById("btnLinkWhatsapp");
+            var textoEncoded = encodeURIComponent(resultado.texto);
+            var telefono = resultado.telefono;
+            
+            // LÓGICA CRÍTICA: SI HAY TELÉFONO, USARLO. SI NO, GENÉRICO.
+            if (telefono && telefono.length > 5) {
+               linkBtn.href = "https://wa.me/" + telefono + "?text=" + textoEncoded;
+               linkBtn.innerHTML = '<i class="bi bi-whatsapp"></i> ENVIAR A ' + nombre.toUpperCase();
+               linkBtn.classList.remove("btn-outline-success");
+               linkBtn.classList.add("btn-success");
+            } else {
+               linkBtn.href = "https://wa.me/?text=" + textoEncoded;
+               linkBtn.innerHTML = '<i class="bi bi-whatsapp"></i> SELECCIONAR CONTACTO';
+               linkBtn.classList.remove("btn-success");
+               linkBtn.classList.add("btn-outline-success");
+            }
+
+            modalRecibo.show();
+      }
+
+      function copiarRecibo() {
+         var copyText = document.getElementById("txtAreaRecibo");
+         copyText.select();
+         copyText.setSelectionRange(0, 99999); 
+         navigator.clipboard.writeText(copyText.value).then(() => {
+            alert("Copiado al portapapeles");
+         });
+      }
+
+      // --- AUXILIARES ---
+      function toggleModoManual() {
+        var isManual = document.getElementById("switchManual").checked;
+        if(isManual) {
+          document.getElementById("divSelector").style.display = "none";
+          document.getElementById("divManual").style.display = "block";
+          document.getElementById("selectEmpleado").value = ""; 
+          document.getElementById("panelEmpleado").style.display = "none";
+        } else {
+          document.getElementById("divSelector").style.display = "block";
+          document.getElementById("divManual").style.display = "none";
+          document.getElementById("inputNombreManual").value = ""; 
+          document.getElementById("panelEmpleado").style.display = "none";
+        }
+      }
+
+      function getNombreActual() {
+        var isManual = document.getElementById("switchManual").checked;
+        if(isManual) return document.getElementById("inputNombreManual").value.trim();
+        else return document.getElementById("selectEmpleado").value;
+      }
+
+      function cargarLista() { 
+        showLoading(true); 
+        google.script.run.withSuccessHandler(function(lista) { 
+           var s = document.getElementById("selectEmpleado"); 
+           if (lista[0] && lista[0].startsWith("Error")) alert(lista[0]); 
+           else lista.forEach(n => { var o = document.createElement("option"); o.text = n; o.value = n; s.add(o); }); 
+           showLoading(false); 
+        }).withFailureHandler(function(e){
+           alert("Error de conexión: " + e.message); showLoading(false);
+        }).obtenerListaEmpleados(); 
+      }
+
+      function cargarHistorial() {
+        var nom = getNombreActual();
+        if (!nom) return; 
+        showLoading(true);
+        document.getElementById("btnFiltroTodos").checked = true;
+        google.script.run.withSuccessHandler(function(data) {
+          if(data.error) { alert(data.error); showLoading(false); return; }
+          var saldoEl = document.getElementById("txtTotal");
+          saldoEl.innerText = formatMoney(data.total || 0);
+          saldoEl.style.color = (data.total || 0) < 0 ? "#ffeaa7" : "white";
+          datosGlobales = (data.movimientos || []); 
+          datosGlobales.reverse(); 
+          saldoAnteriorGlobal = data.saldoAnterior || 0; 
+          renderizarLista("TODOS");
+          document.getElementById("panelEmpleado").style.display = "block";
+          showLoading(false);
+        }).obtenerHistorialEmpleado(nom);
+      }
+
+      function aplicarFiltro(tipo) { renderizarLista(tipo); }
+
+      function renderizarLista(filtro) {
+        var ul = document.getElementById("listaMovimientos");
+        ul.innerHTML = "";
+        var listaMostrar = datosGlobales;
+        if (filtro !== "TODOS") { listaMostrar = datosGlobales.filter(m => m.tipo === filtro); }
+        if (listaMostrar.length === 0 && saldoAnteriorGlobal === 0) {
+           ul.innerHTML = '<li class="list-group-item text-center text-muted py-4">No hay movimientos recientes.</li>'; return;
+        }
+        listaMostrar.forEach(m => {
+          var claseMonto = m.tipo === "ACREDITADO" ? "text-acreditado" : "text-pagado";
+          var signo = m.tipo === "ACREDITADO" ? "+ " : "- ";
+          ul.innerHTML += `
+            <li class="list-group-item d-flex justify-content-between align-items-center">
+              <div><div class="fw-bold text-dark">${m.concepto}</div><small class="text-muted"><i class="bi bi-calendar3"></i> ${m.fecha} &nbsp;|&nbsp; ${m.medio}</small></div>
+              <span class="${claseMonto} fs-5">${signo}${formatMoney(m.monto)}</span>
+            </li>`;
+        });
+        if (filtro === "TODOS") {
+            var colorSaldo = saldoAnteriorGlobal >= 0 ? "text-success" : "text-danger";
+            var htmlSaldo = `
+            <li class="list-group-item d-flex justify-content-between align-items-center bg-light" style="border-top: 2px dashed #ccc;">
+              <div><div class="fw-bold text-secondary fst-italic"><i class="bi bi-clock-history"></i> Saldo Anterior al Ciclo</div><small class="text-muted">Acumulado histórico previo</small></div>
+              <span class="${colorSaldo} fw-bold">${formatMoney(saldoAnteriorGlobal)}</span>
+            </li>`;
+            ul.innerHTML += htmlSaldo;
+        }
+      }
+
+      function abrirImportar() { modalImport.show(); }
+      function analizarPDF() {
+         var txt = document.getElementById("txtPDF").value;
+         if(txt.length < 50) { alert("Pega el texto del PDF primero."); return; }
+         showLoading(true);
+         google.script.run.withSuccessHandler(function(res){
+            showLoading(false);
+            if(res.status === "Error") { alert("Error en servidor. " + res.message); return; }
+            if (res.data.empleadosEncontrados.length === 0) { alert("No se encontraron empleados válidos."); return; }
+            document.getElementById("step1").style.display = "none";
+            document.getElementById("step2").style.display = "block";
+            document.getElementById("inputPeriodo").value = res.data.periodo || "11-2025";
+            listaOpcionesGlobal = res.listaOpciones; datosPreview = res.data.empleadosEncontrados; 
+            renderTablaImportacion();
+         }).procesarTextoPDF(txt); 
+      }
+      function renderTablaImportacion() {
+         var tbody = document.querySelector("#tablaPreview tbody");
+         tbody.innerHTML = "";
+         if (datosPreview.length === 0) { tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-danger">Sin datos.</td></tr>'; return; }
+         datosPreview.forEach((item, idx) => {
+            var tr = document.createElement("tr");
+            var tdCheck = `<td><input type="checkbox" class="chk-item" data-idx="${idx}" ${item.nombreDB ? 'checked' : ''}></td>`;
+            var tdNombrePDF = `<td><span class="fw-bold text-dark">${item.nombrePDF}</span></td>`;
+            var tdCuil = `<td><span class="badge bg-light text-dark border font-monospace">${item.cuilPDF || 'N/A'}</span></td>`;
+            var selectHTML = `<select class="form-select form-select-sm sel-empleado" data-idx="${idx}" style="font-weight:bold;"><option value="">❌ NO IMPORTAR</option>`;
+            listaOpcionesGlobal.forEach(op => { var selected = (op === item.nombreDB) ? "selected" : ""; selectHTML += `<option value="${op}" ${selected}>${op}</option>`; });
+            selectHTML += `</select>`;
+            var estiloAlerta = !item.nombreDB ? "border-left: 3px solid red;" : "";
+            var tdSys = `<td style="${estiloAlerta}">${selectHTML}</td>`;
+            var tdMonto = `<td class="text-end fw-bold text-success fs-6">$ ${formatMoney(item.monto)}</td>`;
+            tr.innerHTML = tdCheck + tdNombrePDF + tdCuil + tdSys + tdMonto;
+            tbody.appendChild(tr);
+         });
+      }
+      function confirmarImportacion() {
+         var periodo = document.getElementById("inputPeriodo").value;
+         var itemsFinales = [];
+         var checks = document.querySelectorAll("#tablaPreview .chk-item");
+         checks.forEach(chk => {
+            if(chk.checked) {
+               var idx = chk.getAttribute("data-idx");
+               var select = document.querySelector(`.sel-empleado[data-idx="${idx}"]`);
+               var nombreDB = select.value;
+               var monto = datosPreview[idx].monto;
+               if(nombreDB) itemsFinales.push({ nombreDB: nombreDB, monto: monto, importar: true });
+            }
+         });
+         if(itemsFinales.length === 0) { alert("No hay empleados válidos seleccionados."); return; }
+         if(!confirm(`¿Importar ${itemsFinales.length} sueldos para ${periodo}?`)) return;
+         showLoading(true);
+         var payload = JSON.stringify({ periodo: periodo, items: itemsFinales });
+         google.script.run.withSuccessHandler(function(res){
+            showLoading(false); alert(res); modalImport.hide(); cargarHistorial(); volverStep1();
+         }).guardarImportacionSueldos(payload);
+      }
+      function volverStep1() { document.getElementById("step1").style.display = "block"; document.getElementById("step2").style.display = "none"; document.getElementById("txtPDF").value = ""; }
+      function toggleAll(source) { document.querySelectorAll('.chk-item').forEach(c => c.checked = source.checked); }
+      function formatMoney(n) { return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(n); }
+      function showLoading(s) { document.getElementById("loading").style.display = s ? "flex" : "none"; }
+    </script>
+  </body>
+</html>

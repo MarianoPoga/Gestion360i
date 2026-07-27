@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+
+# Environment (secretos)
+.env
+.env.local
+.env.*.local
+
+# Certificados AFIP / claves privadas — NUNCA subir
+*.key
+*.crt
+*.csr
+*.pem
+privada.key
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Supabase local
+supabase/.temp/

@@ -1,0 +1,55 @@
+[ÁRBOLES DE CONTROL DEFINITIVO Y COMPLETO - CASA DE COMIDAS]
+ │
+ ├── 1. COMPRAS/GASTOS EVENTUALES (Flujo a demanda, según necesidad)
+ │    │
+ │    ├── 1.1. Stock y Ventas
+ │    │    ├── Alimentos frescos (Carnes, verduras, lácteos)
+ │    │    ├── Almacén (Harina, aceite, condimentos, salsas)
+ │    │    ├── Bebidas (Gaseosas, aguas, cervezas)
+ │    │    ├── Insumos y Descartables (Bandejas plásticas, servilletas, bolsas)
+ │    │    ├── Elementos de Limpieza (Detergente, lavandina, trapos, bolsas de consorcio)
+ │    │    ├── Ropa del Personal / Uniformes (Delantales, cofias, remeras con logo)
+ │    │    └── Nafta / Combustible (Para motos de delivery o vehículos de reparto)
+ │    │
+ │    ├── 1.2. Mantenimiento y Emergencias
+ │    │    ├── Service de maquinarias (Heladeras, cocinas, hornos, campanas)
+ │    │    ├── Arreglos del local (Plomería, cerrajería, electricidad)
+ │    │    └── Gas Envasado (Compra de garrafas o tubos al agotarse)
+ │    │
+ │    └── 1.3. Inversiones y Equipamiento
+ │         ├── Maquinarias nuevas (Freidoras industriales, tarteras, balanzas)
+ │         ├── Equipamiento de frío (Freezers, heladeras exhibidoras)
+ │         └── Mobiliario e infraestructura (Mesas, sillas, reformas del local, cartel)
+ │
+ └── 2. PAGOS PERIÓDICOS (Vencimientos con fecha fija en el calendario)
+      │
+      ├── 2.1. Personal y Cargas Sociales (Mensual)                     <-- ¡Nueva Subdivisión!
+      │    ├── Sueldos Netos (Lo que le pagás en mano al empleado/delivery)
+      │    ├── Aportes y Contribuciones (Cargas sociales - Formulario 931)
+      │    ├── Sindicato (Aporte mensual al gremio de gastronómicos / pasteleros)
+      │    └── ART (Aseguradora de Riesgos del Trabajo)
+      │
+      ├── 2.2. Estructura y Gestión (Mensual)
+      │    ├── Alquiler del Local
+      │    ├── Expensas / Gastos del consorcio
+      │    ├── Honorarios del Contador
+      │    ├── Software de Gestión (Abono mensual de comandas y facturación)
+      │    └── Publicidad (Abono fijo mensual si tenés agencia de marketing o diseñador)
+      │
+      ├── 2.3. Servicios (Mensual / Bimestral)
+      │    ├── Electricidad (Luz)
+      │    ├── Gas (Natural de red)
+      │    ├── Internet y Telefonía (Para recibir pedidos y conectar el Posnet)
+      │    └── Monitoreo de Alarma y Seguridad
+      │
+      ├── 2.4. Impuestos y Tasas (Mensual / Anual)
+      │    ├── IVA e Ingresos Brutos (Liquidación mensual)
+      │    ├── Monotributo / Autónomos (Mensual)
+      │    ├── Tasa Municipal de Seguridad e Higiene
+      │    └── Impuestos Anuales (Ganancias, Automotor, Habilitación comercial)
+      │
+      ├── 2.5. Seguros (Mensual / Anual)
+      │    └── Seguro Integral de Comercio y Responsabilidad Civil
+      │
+      └── 2.6. Gastos Bancarios (Mensual)
+           └── Impuesto al Débito/Crédito y Comisiones (Carga consolidada por resumen)
