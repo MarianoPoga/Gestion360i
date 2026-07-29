@@ -3645,7 +3645,10 @@ function Clientes({ navigate, profile, accentColor }) {
                       Importados: <strong>{importClientesResult.imported}</strong>
                       {' · '}Omitidos (duplicados): <strong>{importClientesResult.skipped}</strong>
                       {importClientesResult.skippedEmpty > 0 && (
-                        <>{' · '}Sin nombre: <strong>{importClientesResult.skippedEmpty}</strong></>
+                        <>{' · '}Vacías: <strong>{importClientesResult.skippedEmpty}</strong></>
+                      )}
+                      {importClientesResult.inferredNames > 0 && (
+                        <>{' · '}Nombre inferido: <strong>{importClientesResult.inferredNames}</strong></>
                       )}
                       {' · '}Fallidos: <strong>{importClientesResult.failed}</strong>
                     </div>

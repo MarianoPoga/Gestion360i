@@ -92,8 +92,39 @@ const normalizeCuit = (value) => {
 
 const normalizePhone = (value) => String(value || '').replace(/[^0-9]/g, '');
 
+const buildRowGetter = (row, indexes) => (key) => {
+  const idx = indexes[key];
+  if (idx < 0) return '';
+  return String(row[idx] ?? '').trim();
+};
+
+const resolveNombre = (row, indexes, line) => {
+  const get = buildRowGetter(row, indexes);
+  const nombreColA = String(row[0] ?? '').trim();
+  if (nombreColA) return { nombre: nombreColA, inferred: false };
+
+  const razonSocial = get('razon_social');
+  if (razonSocial) return { nombre: razonSocial, inferred: true };
+
+  const telefono = get('telefono');
+  if (telefono) return { nombre: `Cliente ${telefono}`, inferred: true };
+
+  const cuit = get('cuit');
+  if (cuit) return { nombre: `Cliente CUIT ${cuit}`, inferred: true };
+
+  const direccion = get('direccion');
+  if (direccion) return { nombre: direccion.slice(0, 80), inferred: true };
+
+  for (let i = 0; i < row.length; i += 1) {
+    const value = String(row[i] ?? '').trim();
+    if (value) return { nombre: value.slice(0, 80), inferred: true };
+  }
+
+  return null;
+};
+
 export const mapCsvRowsToClientes = (rows) => {
-  if (!rows?.length) return { clients: [], errors: ['El archivo está vacío.'], skippedEmpty: 0 };
+  if (!rows?.length) return { clients: [], errors: ['El archivo está vacío.'], skippedEmpty: 0, inferredNames: 0 };
 
   const headers = rows[0].map(normalizeHeader);
   const hasHeaderRow =
@@ -124,24 +155,21 @@ export const mapCsvRowsToClientes = (rows) => {
   const clients = [];
   const errors = [];
   let skippedEmpty = 0;
+  let inferredNames = 0;
 
   dataRows.forEach((row, rowIndex) => {
     const line = hasHeaderRow ? rowIndex + 2 : rowIndex + 1;
-    const nombre = String(row[0] ?? '').trim();
+    const resolved = resolveNombre(row, indexes, line);
 
-    if (!nombre) {
-      if (row.some((value) => String(value ?? '').trim() !== '')) {
-        skippedEmpty += 1;
-      }
+    if (!resolved) {
+      skippedEmpty += 1;
       return;
     }
 
-    const get = (key) => {
-      const idx = indexes[key];
-      if (idx < 0) return '';
-      return String(row[idx] ?? '').trim();
-    };
+    const { nombre, inferred } = resolved;
+    if (inferred) inferredNames += 1;
 
+    const get = buildRowGetter(row, indexes);
     const direccion = get('direccion');
     if (!direccion) {
       errors.push(`Fila ${line} (${nombre}): sin dirección — se importará sin domicilio.`);
@@ -163,16 +191,16 @@ export const mapCsvRowsToClientes = (rows) => {
   });
 
   if (!clients.length) {
-    errors.unshift('No hay filas con nombre en la primera columna para importar.');
+    errors.unshift('No hay filas con datos para importar.');
   }
 
-  return { clients, errors, headers, skippedEmpty };
+  return { clients, errors, headers, skippedEmpty, inferredNames };
 };
 
 export const CSV_IMPORT_HELP = [
   'En Google Sheets: Archivo → Descargar → Valores separados por comas (.csv)',
-  'La primera fila debe ser encabezados. La columna A = nombre (obligatoria).',
+  'La primera fila debe ser encabezados. Columna A = nombre (si está vacía, usa razón social u otros datos).',
   'Columnas: nombre, razon_social, cuit, telefono, direccion, condicion_iva, saldo',
   'IVA: CF = Consumidor Final, RI = Responsable Inscripto, EX = Exento',
-  'Filas con nombre vacío se ignoran. Podés borrar todos los clientes antes de importar.',
+  'Podés borrar todos los clientes antes de importar.',
 ];

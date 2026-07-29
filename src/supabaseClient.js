@@ -1231,13 +1231,14 @@ export const db = {
 
   importClientesFromCsv: async (csvText, { replaceAll = false } = {}) => {
     const rows = parseCsvText(csvText);
-    const { clients, errors: parseErrors, skippedEmpty = 0 } = mapCsvRowsToClientes(rows);
+    const { clients, errors: parseErrors, skippedEmpty = 0, inferredNames = 0 } = mapCsvRowsToClientes(rows);
     if (!clients.length) {
       return {
         success: false,
         imported: 0,
         skipped: 0,
         skippedEmpty,
+        inferredNames,
         failed: 0,
         deleted: 0,
         errors: parseErrors.length ? parseErrors : ['No hay clientes para importar.'],
@@ -1260,8 +1261,11 @@ export const db = {
     let skipped = 0;
     let failed = 0;
     const errors = [...parseErrors];
+    if (inferredNames > 0) {
+      errors.unshift(`${inferredNames} fila(s) importada(s) con nombre inferido (columna A vacía).`);
+    }
     if (skippedEmpty > 0) {
-      errors.unshift(`${skippedEmpty} fila(s) omitida(s) por nombre vacío en columna A.`);
+      errors.unshift(`${skippedEmpty} fila(s) completamente vacía(s) omitida(s).`);
     }
 
     for (const row of clients) {
@@ -1312,6 +1316,7 @@ export const db = {
       imported,
       skipped,
       skippedEmpty,
+      inferredNames,
       failed,
       deleted,
       errors,
