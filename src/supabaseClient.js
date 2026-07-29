@@ -3537,45 +3537,81 @@ export const db = {
     const roleError = rejectAdminRoleAssignment(role);
     if (roleError) return { success: false, error: roleError };
 
+    const businessId = await ensureBusinessContext();
+    if (!businessId || INVALID_BUSINESS_ID.includes(String(businessId))) {
+      return { success: false, error: 'Empresa no configurada' };
+    }
+
     const { url, key } = getCredentials();
-    const businessId = getBusinessId();
-    if (!url || !key) return { success: false, error: "Supabase not configured" };
+    if (!url || !key) return { success: false, error: 'Supabase not configured' };
+
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail || !password) {
+      return { success: false, error: 'Email y contraseña son obligatorios' };
+    }
 
     try {
-      // Use a temporary client to avoid logging out the current admin
-      const tempSupabase = createClient(url, key, { auth: { persistSession: false } });
+      const tempSupabase = createClient(url, key, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
+
       const { data, error } = await tempSupabase.auth.signUp({
-        email,
+        email: normalizedEmail,
         password,
         options: {
           data: {
             full_name: fullName,
             business_id: businessId,
-            role: role || 'cajero'
-          }
-        }
+            role: role || 'cajero',
+            employee_id: employeeId,
+          },
+        },
       });
 
       if (error) throw error;
-      if (!data.user) throw new Error("No user returned from signUp");
+      if (!data.user) throw new Error('No se pudo crear el usuario de acceso');
 
-      // 2. Create Profile in gst_profiles
-      const { error: profError } = await supabase
-        .from('gst_profiles')
-        .insert([{
-          id: data.user.id,
-          business_id: businessId,
-          employee_id: employeeId,
-          full_name: fullName,
-          role: role || 'cajero'
-        }]);
+      if (Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+        throw new Error('Este correo ya está registrado. Usá otro email.');
+      }
 
-      if (profError) throw profError;
+      const profilePayload = {
+        id: data.user.id,
+        business_id: businessId,
+        employee_id: employeeId,
+        full_name: fullName,
+        role: role || 'cajero',
+        assigned_cajas: [],
+      };
 
-      return { success: true, user: data.user };
+      const { error: rpcError } = await supabase.rpc('gst_create_employee_profile', {
+        p_user_id: data.user.id,
+        p_employee_id: employeeId,
+        p_full_name: fullName,
+        p_role: role || 'cajero',
+        p_assigned_cajas: [],
+      });
+
+      if (rpcError) {
+        console.warn('gst_create_employee_profile RPC failed, trying direct insert:', rpcError.message);
+        const { error: profError } = await supabase.from('gst_profiles').insert([profilePayload]);
+        if (profError) {
+          throw new Error(
+            profError.message.includes('employee_id')
+              ? 'Falta migrar la base: ejecutá migrate_gst_profiles_employee.sql en Supabase.'
+              : profError.message
+          );
+        }
+      }
+
+      return {
+        success: true,
+        user: data.user,
+        needsEmailConfirmation: !data.session,
+      };
     } catch (err) {
-      console.error("Error creating employee user:", err);
-      return { success: false, error: err.message };
+      console.error('Error creating employee user:', err);
+      return { success: false, error: err.message || 'No se pudo crear el acceso del empleado' };
     }
   },
 

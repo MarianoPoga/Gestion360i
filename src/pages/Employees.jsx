@@ -21,8 +21,7 @@ function Employees() {
   const [movForm, setMovForm] = useState({ concepto: '', monto: '', tipo: 'Debe', medio: 'Efectivo' });
   const [employeeForm, setEmployeeForm] = useState({ nombre: '', apodo: '', cuit: '', cbu: '', telefono: '', direccion: '', is_active: true });
   const [saveStatus, setSaveStatus] = useState('');
-  
-  // Design-specific states
+  const [accessErrorMessage, setAccessErrorMessage] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [sortField, setSortField] = useState('nombre');
   const [sortAsc, setSortAsc] = useState(true);
@@ -157,6 +156,7 @@ function Employees() {
       return;
     }
     setDetailLoading(true);
+    setAccessErrorMessage('');
     const res = await db.createEmployeeUser(
       accessForm.email, 
       accessForm.password, 
@@ -166,10 +166,22 @@ function Employees() {
     );
     if (res.success) {
       setSaveStatus('success');
+      setAccessForm({ email: '', password: '', role: accessForm.role, assigned_cajas: [] });
       await loadAllData();
-      setTimeout(() => setSaveStatus(''), 2000);
+      const profile = (await db.getProfiles()).find(p => p.employee_id === selectedEmployee.id);
+      if (profile) {
+        setAccessForm({
+          email: '',
+          role: profile.role || 'cajero',
+          assigned_cajas: profile.assigned_cajas || [],
+        });
+      }
+      if (res.needsEmailConfirmation) {
+        setAccessErrorMessage('Usuario creado. Si Supabase exige confirmar email, el empleado debe confirmar el correo antes de ingresar.');
+      }
+      setTimeout(() => setSaveStatus(''), 3000);
     } else {
-      alert("Error: " + res.error);
+      setAccessErrorMessage(res.error || 'No se pudo crear el acceso');
       setSaveStatus('error');
     }
     setDetailLoading(false);
@@ -477,6 +489,12 @@ function Employees() {
                   <form onSubmit={handleCreateNewAccess} className="row g-3">
                     <div className="col-12">
                       <p className="small text-info-emphasis mb-3">Este empleado no tiene acceso. Completa los datos para habilitarlo.</p>
+                      {saveStatus === 'success' && (
+                        <div className="alert alert-success py-2 small mb-3">Acceso creado correctamente.</div>
+                      )}
+                      {accessErrorMessage && (
+                        <div className="alert alert-danger py-2 small mb-3">{accessErrorMessage}</div>
+                      )}
                     </div>
                     <div className="col-md-6">
                       <label className="form-label small fw-bold">Correo Electrónico</label>
