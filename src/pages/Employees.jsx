@@ -15,7 +15,6 @@ function Employees() {
   const [employees, setEmployees] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [cajas, setCajas] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [selectedEmployee, setSelectedEmployee] = useState(null);
   const [history, setHistory] = useState([]);
   const [showMovModal, setShowMovModal] = useState(false);
@@ -28,6 +27,9 @@ function Employees() {
   const [sortField, setSortField] = useState('nombre');
   const [sortAsc, setSortAsc] = useState(true);
   const [activeTab, setActiveTab] = useState('rrhh');
+  const [showGuide, setShowGuide] = useState(false);
+  const [listLoading, setListLoading] = useState(true);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [accessForm, setAccessForm] = useState({ email: '', password: '', role: 'cajero', assigned_cajas: [] });
   const [roleOptions, setRoleOptions] = useState([]);
   const [roleLabels, setRoleLabels] = useState({ ...DEFAULT_ROLE_LABELS });
@@ -37,7 +39,7 @@ function Employees() {
   }, []);
 
   const loadAllData = async () => {
-    setLoading(true);
+    setListLoading(true);
     try {
       const [e, p, c, rp] = await Promise.all([
         db.getEmpleados(),
@@ -61,7 +63,7 @@ function Employees() {
     } catch (err) {
       console.error(err);
     } finally {
-      setLoading(false);
+      setListLoading(false);
     }
   };
 
@@ -88,25 +90,32 @@ function Employees() {
   });
 
   const handleSelectEmployee = async (emp) => {
-    setLoading(true);
-    setSelectedEmployee(emp);
-    const data = await db.getEmpleadoMovimientos(emp.id);
-    setHistory(data);
-    
-    const profile = profiles.find(p => p.employee_id === emp.id);
-    if (profile) {
-      setAccessForm({
-        email: '',
-        role: profile.role || 'cajero',
-        assigned_cajas: profile.assigned_cajas || []
-      });
-    } else {
-      setAccessForm({ email: '', password: '', role: 'cajero', assigned_cajas: [] });
+    setDetailLoading(true);
+    try {
+      setSelectedEmployee(emp);
+      const data = await db.getEmpleadoMovimientos(emp.id, emp.nombre);
+      setHistory(Array.isArray(data) ? data : []);
+
+      const profile = profiles.find(p => p.employee_id === emp.id);
+      if (profile) {
+        setAccessForm({
+          email: '',
+          role: profile.role || 'cajero',
+          assigned_cajas: profile.assigned_cajas || []
+        });
+      } else {
+        setAccessForm({ email: '', password: '', role: 'cajero', assigned_cajas: [] });
+      }
+
+      setShowGuide(false);
+      setView('detalle');
+      setActiveTab('rrhh');
+    } catch (err) {
+      console.error('Error abriendo ficha de empleado:', err);
+      alert('No se pudo abrir la ficha del empleado.');
+    } finally {
+      setDetailLoading(false);
     }
-    
-    setView('detalle');
-    setActiveTab('rrhh');
-    setLoading(false);
   };
 
   const [errorMessage, setErrorMessage] = useState('');
@@ -129,7 +138,7 @@ function Employees() {
     }
   };
   const handleUpdateExistingAccess = async () => {
-    setLoading(true);
+    setDetailLoading(true);
     const res = await db.updateEmployeeAccess(selectedEmployee.id, accessForm.role, accessForm.assigned_cajas);
     if (res.success) {
       setSaveStatus('success');
@@ -138,7 +147,7 @@ function Employees() {
     } else {
       setSaveStatus('error');
     }
-    setLoading(false);
+    setDetailLoading(false);
   };
 
   const handleCreateNewAccess = async (e) => {
@@ -147,7 +156,7 @@ function Employees() {
       alert("Email y Contraseña son obligatorios");
       return;
     }
-    setLoading(true);
+    setDetailLoading(true);
     const res = await db.createEmployeeUser(
       accessForm.email, 
       accessForm.password, 
@@ -163,12 +172,12 @@ function Employees() {
       alert("Error: " + res.error);
       setSaveStatus('error');
     }
-    setLoading(false);
+    setDetailLoading(false);
   };
 
   const handleSeed = async () => {
     if (window.confirm("¿Importar los 5 empleados de Empresa360i?")) {
-      setLoading(true);
+      setDetailLoading(true);
       const fictional = [
         { nombre: "Carlos Rodriguez", apodo: "Carlitos", cuit: "20-30444555-1", cbu: "0000003100012345678901", telefono: "11 4455-6677", direccion: "Av. Corrientes 1234" },
         { nombre: "Maria Luz Garcia", apodo: "Mari", cuit: "27-32555666-2", cbu: "0000003100012345678902", telefono: "11 5566-7788", direccion: "Calle Falsa 123" },
@@ -184,7 +193,7 @@ function Employees() {
         }
       }
       await loadAllData();
-      setLoading(false);
+      setDetailLoading(false);
     }
   };
 
@@ -196,7 +205,7 @@ function Employees() {
     return movs.reduce((acc, curr) => acc + (parseFloat(curr.haber || 0) - parseFloat(curr.debe || 0)), 0);
   };
 
-  if (loading && view === 'list') {
+  if (listLoading && view === 'list') {
     return <div className="p-5 text-center"><div className="spinner-border text-primary"></div></div>;
   }
   return (
@@ -354,6 +363,11 @@ function Employees() {
 
       {view === 'detalle' && selectedEmployee && (
         <div className="animate__animated animate__fadeIn">
+          {detailLoading && (
+            <div className="text-center py-2 mb-2">
+              <div className="spinner-border spinner-border-sm text-primary" role="status"></div>
+            </div>
+          )}
           {/* Header Ficha Simplificada */}
           <div style={{ display: 'flex', gap: '25px', marginBottom: '30px', flexWrap: 'wrap', alignItems: 'center' }}>
             <div style={{ width: '80px', height: '80px', borderRadius: '20px', backgroundColor: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#6610f2', fontSize: '2rem' }}>
@@ -481,7 +495,7 @@ function Employees() {
                       </select>
                     </div>
                     <div className="col-12 mt-3">
-                       <button type="submit" className="btn btn-primary btn-sm rounded-pill px-4 fw-bold" disabled={loading}>
+                       <button type="submit" className="btn btn-primary btn-sm rounded-pill px-4 fw-bold" disabled={detailLoading}>
                          Habilitar Acceso
                        </button>
                     </div>
@@ -503,7 +517,7 @@ function Employees() {
                       </select>
                     </div>
                     <div className="col-12 mt-3">
-                      <button type="button" className="btn btn-dark btn-sm rounded-pill px-4 fw-bold" onClick={handleUpdateExistingAccess} disabled={loading}>
+                      <button type="button" className="btn btn-dark btn-sm rounded-pill px-4 fw-bold" onClick={handleUpdateExistingAccess} disabled={detailLoading}>
                         Guardar Cambios
                       </button>
                     </div>
@@ -587,7 +601,7 @@ function Employees() {
                   setTimeout(async () => {
                     setShowMovModal(false);
                     setSaveStatus('');
-                    const data = await db.getEmpleadoMovimientos(selectedEmployee.id);
+                    const data = await db.getEmpleadoMovimientos(selectedEmployee.id, selectedEmployee.nombre);
                     setHistory(data);
                   }, 1000);
                 } else { 

@@ -520,6 +520,74 @@ const rejectAdminRoleAssignment = (role) => {
   return null;
 };
 
+const fetchAdelantosMovimientos = async (limitDays = 90) => {
+  const businessId = getBusinessId();
+  const limitDate = new Date();
+  limitDate.setDate(limitDate.getDate() - limitDays);
+  const limitIso = limitDate.toISOString();
+
+  if (isSupabaseConfigured() && supabase) {
+    try {
+      const [recentRes, pendingRes] = await Promise.all([
+        supabase.from('gst_empleado_movimientos').select('*').eq('business_id', businessId).gte('fecha', limitIso),
+        supabase.from('gst_empleado_movimientos').select('*').eq('business_id', businessId).is('caja_cierre', null)
+      ]);
+
+      if (recentRes.error) throw recentRes.error;
+      if (pendingRes.error) throw pendingRes.error;
+
+      const combined = [...(recentRes.data || []), ...(pendingRes.data || [])];
+      const map = {};
+      combined.forEach(item => {
+        map[item.id] = item;
+      });
+      const list = Object.values(map);
+      list.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+      return list;
+    } catch (err) {
+      console.warn('Supabase fetchAdelantosMovimientos failed:', err);
+    }
+  }
+
+  const stored = localStorage.getItem('mock_empleado_movimientos');
+  if (!stored) return [];
+  const list = JSON.parse(stored);
+  return list
+    .filter(ad => new Date(ad.fecha) >= new Date(limitIso) || ad.caja_cierre === null)
+    .sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+};
+
+const fetchEmpleadoMovimientosByEmployee = async (empleadoId, empleadoNombre) => {
+  const businessId = getBusinessId();
+  if (isSupabaseConfigured() && supabase) {
+    try {
+      if (empleadoNombre) {
+        const { data, error } = await supabase
+          .from('gst_empleado_movimientos')
+          .select('*')
+          .eq('business_id', businessId)
+          .eq('empleado', empleadoNombre)
+          .order('fecha', { ascending: false });
+        if (!error) return data || [];
+      }
+
+      if (empleadoId) {
+        const { data, error } = await supabase
+          .from('gst_empleado_movimientos')
+          .select('*')
+          .eq('business_id', businessId)
+          .eq('empleado_id', empleadoId)
+          .order('fecha', { ascending: false });
+        if (!error) return data || [];
+        if (error) throw error;
+      }
+    } catch (err) {
+      console.error('Error fetching employee movements:', err);
+    }
+  }
+  return [];
+};
+
 export const forceHistoricalSync = async () => {
   sessionStorage.removeItem(HISTORICAL_SYNC_KEY);
   const businessId = await ensureBusinessContext();
@@ -2481,43 +2549,11 @@ export const db = {
     return { success: false, error: "Empleado no encontrado." };
   },
 
-  getEmpleadoMovimientos: async (limitDays = 90) => {
-    const businessId = getBusinessId();
-    const limitDate = new Date();
-    limitDate.setDate(limitDate.getDate() - limitDays);
-    const limitIso = limitDate.toISOString();
-
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        const [recentRes, pendingRes] = await Promise.all([
-          supabase.from('gst_empleado_movimientos').select('*').eq('business_id', businessId).gte('fecha', limitIso),
-          supabase.from('gst_empleado_movimientos').select('*').eq('business_id', businessId).is('caja_cierre', null)
-        ]);
-
-        if (recentRes.error) throw recentRes.error;
-        if (pendingRes.error) throw pendingRes.error;
-
-        const combined = [...(recentRes.data || []), ...(pendingRes.data || [])];
-        const map = {};
-        combined.forEach(item => {
-          map[item.id] = item;
-        });
-        const list = Object.values(map);
-        list.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
-        return list;
-      } catch (err) {
-        console.warn("Supabase getEmpleadoMovimientos failed:", err);
-      }
+  getEmpleadoMovimientos: async (empleadoIdOrLimit, empleadoNombre) => {
+    if (typeof empleadoIdOrLimit === 'number') {
+      return fetchAdelantosMovimientos(empleadoIdOrLimit);
     }
-    // Mock
-    const stored = localStorage.getItem('mock_empleado_movimientos');
-    if (!stored) {
-      return [];
-    }
-    const list = JSON.parse(stored);
-    return list
-      .filter(ad => new Date(ad.fecha) >= new Date(limitIso) || ad.caja_cierre === null)
-      .sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+    return fetchEmpleadoMovimientosByEmployee(empleadoIdOrLimit, empleadoNombre);
   },
 
   deleteEmpleadoMovimiento: async (id) => {
@@ -3588,40 +3624,30 @@ export const db = {
     return { success: true };
   },
 
-  getEmpleadoMovimientos: async (empleadoId) => {
-    const businessId = getBusinessId();
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        const { data, error } = await supabase
-          .from('gst_empleado_movimientos')
-          .select('*')
-          .eq('business_id', businessId)
-          .eq('empleado_id', empleadoId)
-          .order('fecha', { ascending: false });
-        if (error) throw error;
-        return data || [];
-      } catch (err) {
-        console.error("Error fetching employee movements:", err);
-      }
-    }
-    return [];
-  },
-
   saveEmpleadoMovimiento: async (mov) => {
     const businessId = getBusinessId();
     if (isSupabaseConfigured() && supabase) {
       try {
+        const payload = {
+          business_id: businessId,
+          empleado: mov.nombre_empleado || mov.empleado,
+          concepto: mov.concepto,
+          monto: parseFloat(mov.debe || mov.haber || mov.monto || 0),
+          fecha: mov.fecha || new Date().toISOString(),
+        };
+        if (mov.empleado_id) payload.empleado_id = mov.empleado_id;
+
         const { error } = await supabase
           .from('gst_empleado_movimientos')
-          .insert({ ...mov, business_id: businessId });
+          .insert(payload);
         if (error) throw error;
         return { success: true };
       } catch (err) {
-        console.error("Error saving employee movement:", err);
+        console.error('Error saving employee movement:', err);
         return { success: false, error: err.message };
       }
     }
-    return { success: false, error: "Not configured" };
+    return { success: false, error: 'Not configured' };
   },
 
   // --- PROVIDERS CTA CTE ---
