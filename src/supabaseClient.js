@@ -383,10 +383,7 @@ const migrateLegacyTerminalConfig = async (businessId, key) => {
     const adminCheck = await requireBusinessAdmin();
     if (!adminCheck.ok) return data.config_value;
 
-    await supabase.from('gst_configs').upsert(
-      { business_id: businessId, key, value: data.config_value },
-      { onConflict: 'business_id,key' }
-    );
+    await upsertBusinessConfigRow(businessId, key, data.config_value);
     return data.config_value;
   } catch (err) {
     console.warn(`[Gestion360i] migrateLegacyTerminalConfig(${key}):`, err);
@@ -401,23 +398,70 @@ const saveBusinessConfig = async (key, value) => {
   return saveTenantConfig(key, value);
 };
 
+const buildConfigRowPayload = (businessId, key, value) => ({
+  business_id: businessId,
+  key,
+  value,
+  config_key: key,
+  config_value: value,
+  updated_at: new Date().toISOString(),
+});
+
+const upsertBusinessConfigRow = async (businessId, key, value) => {
+  if (!isSupabaseConfigured() || !supabase || !businessId) {
+    return { ok: false, error: 'Empresa no configurada' };
+  }
+
+  const payload = buildConfigRowPayload(businessId, key, value);
+
+  try {
+    const { error: upsertError } = await supabase.from('gst_configs').upsert(
+      payload,
+      { onConflict: 'business_id,key' }
+    );
+    if (!upsertError) return { ok: true };
+
+    console.warn(`[Gestion360i] upsert gst_configs(${key}):`, upsertError.message);
+
+    const { data: existing, error: selectError } = await supabase
+      .from('gst_configs')
+      .select('id')
+      .eq('business_id', businessId)
+      .eq('key', key)
+      .maybeSingle();
+
+    if (selectError) return { ok: false, error: selectError.message };
+
+    if (existing?.id) {
+      const { error: updateError } = await supabase
+        .from('gst_configs')
+        .update({
+          value,
+          config_value: value,
+          config_key: key,
+          updated_at: payload.updated_at,
+        })
+        .eq('id', existing.id);
+      if (updateError) return { ok: false, error: updateError.message };
+      return { ok: true };
+    }
+
+    const { error: insertError } = await supabase.from('gst_configs').insert(payload);
+    if (insertError) return { ok: false, error: insertError.message };
+    return { ok: true };
+  } catch (err) {
+    console.warn(`[Gestion360i] upsertBusinessConfigRow(${key}):`, err);
+    return { ok: false, error: err.message || 'Error al guardar configuración' };
+  }
+};
+
 const saveTenantConfig = async (key, value) => {
   const businessId = await ensureBusinessContext();
   if (!isSupabaseConfigured() || !supabase || !businessId || INVALID_BUSINESS_ID.includes(String(businessId))) {
     return { ok: false, error: 'Empresa no configurada' };
   }
 
-  try {
-    const { error } = await supabase.from('gst_configs').upsert(
-      { business_id: businessId, key, value },
-      { onConflict: 'business_id,key' }
-    );
-    if (error) throw error;
-    return { ok: true };
-  } catch (err) {
-    console.warn(`[Gestion360i] saveTenantConfig(${key}):`, err);
-    return { ok: false, error: err.message };
-  }
+  return upsertBusinessConfigRow(businessId, key, value);
 };
 
 const saveOperationalConfig = async (key, value) => {
@@ -749,18 +793,8 @@ export const db = {
     }
 
     try {
-      const { error: kvError } = await supabase
-        .from('gst_configs')
-        .upsert(
-          {
-            business_id: businessId,
-            key: ARCA_CONFIG_KEY,
-            value: normalized,
-          },
-          { onConflict: 'business_id,key' }
-        );
-
-      if (!kvError) {
+      const kvResult = await upsertBusinessConfigRow(businessId, ARCA_CONFIG_KEY, normalized);
+      if (kvResult.ok) {
         return { success: true, stored: 'cloud' };
       }
 
@@ -780,10 +814,10 @@ export const db = {
         if (!cfgError) {
           return { success: true, stored: 'cloud' };
         }
-        throw cfgError;
+        throw new Error(cfgError.message);
       }
 
-      throw kvError;
+      throw new Error(kvResult.error || 'No se pudo guardar ARCA');
     } catch (err) {
       console.warn('Supabase saveArcaConfig failed:', err);
       return { success: true, stored: 'local', warning: err.message };
@@ -861,17 +895,13 @@ export const db = {
     const structure = stripCierreMediosUsed(normalized);
     const businessId = getBusinessId();
     if (isSupabaseConfigured() && supabase) {
-      try {
-        await supabase
-          .from('gst_configs')
-          .upsert({
-            business_id: businessId,
-            key: BUSINESS_CONFIG.CIERRE_CONCEPTOS,
-            value: structure
-          }, { onConflict: 'business_id,key' });
-      } catch (err) {
-        console.warn("Supabase saveCierreConceptos failed:", err);
-        return { success: false, error: err.message };
+      const result = await upsertBusinessConfigRow(
+        businessId,
+        BUSINESS_CONFIG.CIERRE_CONCEPTOS,
+        structure
+      );
+      if (!result.ok) {
+        return { success: false, error: result.error };
       }
     }
     localStorage.setItem('cierre_conceptos', JSON.stringify(structure));

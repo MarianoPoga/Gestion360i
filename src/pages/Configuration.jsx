@@ -156,6 +156,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   
   // UI States
   const [saveStatus, setSaveStatus] = useState(''); // 'success', 'error', ''
+  const [saveErrorMessage, setSaveErrorMessage] = useState('');
   const [testStatus, setTestStatus] = useState(''); // 'testing', 'success', 'error', ''
   const [testError, setTestError] = useState('');
   const [clearStatus, setClearStatus] = useState(''); // 'clearing', 'success', 'error', ''
@@ -565,6 +566,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       localStorage.setItem('gemini_api_key', geminiApiKey.trim());
 
       setSaveStatus('success');
+      setSaveErrorMessage('');
       refreshModules(); // Notify App.jsx about module updates
       
       // Auto close/redirect or show success message briefly
@@ -574,7 +576,11 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       }, 1500);
     } catch (err) {
       setSaveStatus('error');
-      setTimeout(() => setSaveStatus(''), 3000);
+      setSaveErrorMessage(err.message || 'No se pudo guardar la configuración');
+      setTimeout(() => {
+        setSaveStatus('');
+        setSaveErrorMessage('');
+      }, 5000);
     }
   };
 
@@ -1700,7 +1706,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
           {saveStatus === 'error' && (
             <div className="alert-box" style={{ marginBottom: '15px', backgroundColor: '#fee2e2', borderColor: '#fecaca', color: '#991b1b' }}>
               <i className="bi bi-exclamation-circle-fill"></i>
-              <div>Error al intentar guardar en el navegador.</div>
+              <div>{saveErrorMessage || 'No se pudo guardar la configuración.'}</div>
             </div>
           )}
           <button type="submit" className="btn-submit" style={{ padding: '14px', fontSize: '1.05rem' }}>
