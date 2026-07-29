@@ -56,6 +56,7 @@ function Clientes({ navigate, profile, accentColor }) {
   const [newClientRazon, setNewClientRazon] = useState('');
   const [newClientCuit, setNewClientCuit] = useState('');
   const [newClientTelefono, setNewClientTelefono] = useState('');
+  const [newClientAddress, setNewClientAddress] = useState('');
   const [newClientCondicionIva, setNewClientCondicionIva] = useState('Consumidor Final');
   const [newClientError, setNewClientError] = useState('');
 
@@ -1160,7 +1161,20 @@ function Clientes({ navigate, profile, accentColor }) {
       return;
     }
 
+    if (!newClientAddress.trim()) {
+      setNewClientError('Agregá al menos una dirección de envío.');
+      return;
+    }
+
+    if (!isValidGpsAddress(newClientAddress)) {
+      const proceed = window.confirm(
+        'La dirección parece incompleta o no apta para guía por GPS (se recomienda calle, número y localidad). ¿Desea registrarla de todas formas?'
+      );
+      if (!proceed) return;
+    }
+
     try {
+      const addressText = newClientAddress.trim();
       const res = await db.saveCliente({
         nombre: newClientName.trim(),
         razon_social: newClientRazon.trim() || newClientName.trim(),
@@ -1170,13 +1184,27 @@ function Clientes({ navigate, profile, accentColor }) {
       });
 
       if (res.success && res.data) {
+        const dirRes = await db.saveDireccion(res.data.id, addressText);
+        if (!dirRes.success) {
+          throw new Error('El cliente se creó pero no se pudo guardar la dirección.');
+        }
+
+        await db.updateCliente(res.data.id, {
+          direccion_predeterminada: addressText,
+        });
+
         const cl = await db.getClientes();
         setClientes(cl);
-        handleSelectClient(res.data);
+        const createdClient = cl.find(c => c.id === res.data.id) || {
+          ...res.data,
+          direccion_predeterminada: addressText,
+        };
+        handleSelectClient(createdClient);
         setNewClientName('');
         setNewClientRazon('');
         setNewClientCuit('');
         setNewClientTelefono('');
+        setNewClientAddress('');
         setNewClientCondicionIva('Consumidor Final');
         setNewClientModal(false);
       }
@@ -3505,7 +3533,11 @@ function Clientes({ navigate, profile, accentColor }) {
           <div className="modal-content-card">
             <div className="modal-header" style={{ backgroundColor: '#8b5cf6' }}>
               <h5 className="modal-title"><i className="bi bi-person-plus-fill me-2"></i>Nuevo Cliente</h5>
-              <button className="modal-close-btn" onClick={() => setNewClientModal(false)}>
+              <button className="modal-close-btn" onClick={() => {
+                setNewClientModal(false);
+                setNewClientError('');
+                setNewClientAddress('');
+              }}>
                 <i className="bi bi-x-lg"></i>
               </button>
             </div>
@@ -3570,6 +3602,20 @@ function Clientes({ navigate, profile, accentColor }) {
                     value={newClientTelefono}
                     onChange={(e) => setNewClientTelefono(e.target.value.replace(/[^0-9]/g, ''))}
                   />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Dirección de envío</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    required
+                    placeholder="Ej: Av. Argentina 120, Neuquén"
+                    value={newClientAddress}
+                    onChange={(e) => setNewClientAddress(e.target.value)}
+                  />
+                  <small className="text-muted" style={{ display: 'block', marginTop: '6px' }}>
+                    Obligatoria. Incluí calle, número y localidad para pedidos con envío.
+                  </small>
                 </div>
                 <button type="submit" className="btn-submit" style={{ backgroundColor: '#8b5cf6', marginTop: '10px' }}>
                   REGISTRAR CLIENTE
