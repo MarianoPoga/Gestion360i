@@ -3605,16 +3605,49 @@ function Clientes({ navigate, profile, accentColor }) {
                 </div>
                 <div className="form-group">
                   <label className="form-label">Dirección de envío</label>
-                  <input
-                    type="text"
-                    className="form-input"
-                    required
-                    placeholder="Ej: Av. Argentina 120, Neuquén"
-                    value={newClientAddress}
-                    onChange={(e) => setNewClientAddress(e.target.value)}
-                  />
+                  <div className="flex-row-group mb-2" style={{ flexWrap: 'wrap', gap: '8px' }}>
+                    <input
+                      type="text"
+                      className="form-input"
+                      required
+                      placeholder="Ej: Av. Argentina 120, Neuquén"
+                      value={newClientAddress}
+                      onChange={(e) => setNewClientAddress(e.target.value)}
+                      style={{ margin: 0, flex: 1, minWidth: '150px' }}
+                    />
+                    {newClientAddress.trim() && isValidGpsAddress(newClientAddress) && (
+                      <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                        <a
+                          href={getGmapsUrl(newClientAddress)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="btn-nav-back"
+                          style={{ padding: '8px 10px', fontSize: '0.9rem', border: '1px solid #cbd5e1', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: 0, textDecoration: 'none', backgroundColor: '#f1f5f9' }}
+                          title="Ver en Google Maps"
+                        >
+                          🗺️
+                        </a>
+                        <button
+                          type="button"
+                          className="btn-nav-back"
+                          style={{ padding: '8px 10px', fontSize: '0.9rem', border: '1px solid #cbd5e1', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: 0, backgroundColor: '#f1f5f9' }}
+                          onClick={() => {
+                            const gmapsUrl = getGmapsUrl(newClientAddress);
+                            setLocationQrData({
+                              address: cleanAddressText(newClientAddress),
+                              qrUrl: `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(gmapsUrl)}`
+                            });
+                            setShowLocationQrModal(true);
+                          }}
+                          title="Mostrar Código QR de Ubicación"
+                        >
+                          📱
+                        </button>
+                      </div>
+                    )}
+                  </div>
                   <small className="text-muted" style={{ display: 'block', marginTop: '6px' }}>
-                    Obligatoria. Incluí calle, número y localidad para pedidos con envío.
+                    Obligatoria. Incluí calle, número y ciudad.
                   </small>
                 </div>
                 <button type="submit" className="btn-submit" style={{ backgroundColor: '#8b5cf6', marginTop: '10px' }}>
