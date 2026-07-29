@@ -1183,20 +1183,75 @@ export const db = {
     return { success: true, data: newCliente };
   },
 
-  importClientesFromCsv: async (csvText) => {
+  clearAllClientes: async () => {
+    const adminCheck = await requireBusinessAdmin();
+    if (!adminCheck.ok) throw new Error(adminCheck.error);
+
+    const businessId = await ensureBusinessContext();
+    if (isSupabaseConfigured() && supabase) {
+      const { error: itemsErr } = await supabase
+        .from('gst_pedido_items')
+        .delete()
+        .eq('business_id', businessId);
+      if (itemsErr) throw itemsErr;
+
+      const { error: ordersErr } = await supabase
+        .from('gst_pedidos')
+        .delete()
+        .eq('business_id', businessId);
+      if (ordersErr) throw ordersErr;
+
+      const { error: movsErr } = await supabase
+        .from('gst_cliente_movimientos')
+        .delete()
+        .eq('business_id', businessId);
+      if (movsErr) throw movsErr;
+
+      const { error: dirsErr } = await supabase
+        .from('gst_cliente_direcciones')
+        .delete()
+        .eq('business_id', businessId);
+      if (dirsErr) throw dirsErr;
+
+      const { error: clientsErr } = await supabase
+        .from('gst_clientes')
+        .delete()
+        .eq('business_id', businessId);
+      if (clientsErr) throw clientsErr;
+
+      return { success: true };
+    }
+
+    localStorage.setItem('mock_clientes', JSON.stringify([]));
+    localStorage.setItem('mock_direcciones', JSON.stringify([]));
+    localStorage.setItem('mock_movimientos', JSON.stringify([]));
+    localStorage.setItem('mock_pedidos', JSON.stringify([]));
+    return { success: true };
+  },
+
+  importClientesFromCsv: async (csvText, { replaceAll = false } = {}) => {
     const rows = parseCsvText(csvText);
-    const { clients, errors: parseErrors } = mapCsvRowsToClientes(rows);
+    const { clients, errors: parseErrors, skippedEmpty = 0 } = mapCsvRowsToClientes(rows);
     if (!clients.length) {
       return {
         success: false,
         imported: 0,
         skipped: 0,
+        skippedEmpty,
         failed: 0,
+        deleted: 0,
         errors: parseErrors.length ? parseErrors : ['No hay clientes para importar.'],
       };
     }
 
-    const existing = await db.getClientes();
+    let deleted = 0;
+    if (replaceAll) {
+      const existing = await db.getClientes();
+      deleted = existing?.length || 0;
+      await db.clearAllClientes();
+    }
+
+    const existing = replaceAll ? [] : await db.getClientes();
     const existingNames = new Set(
       (existing || []).map((cliente) => String(cliente.nombre || '').trim().toLowerCase())
     );
@@ -1205,6 +1260,9 @@ export const db = {
     let skipped = 0;
     let failed = 0;
     const errors = [...parseErrors];
+    if (skippedEmpty > 0) {
+      errors.unshift(`${skippedEmpty} fila(s) omitida(s) por nombre vacío en columna A.`);
+    }
 
     for (const row of clients) {
       const key = row.nombre.trim().toLowerCase();
@@ -1253,7 +1311,9 @@ export const db = {
       success: failed === 0,
       imported,
       skipped,
+      skippedEmpty,
       failed,
+      deleted,
       errors,
     };
   },

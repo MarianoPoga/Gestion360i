@@ -76,12 +76,12 @@ export const parseCsvText = (text) => {
 };
 
 const normalizeIva = (value) => {
-  const raw = String(value || '').trim();
+  const raw = String(value || '').trim().toUpperCase();
   if (!raw) return 'Consumidor Final';
-  const lower = raw.toLowerCase();
-  if (lower.includes('inscripto') || lower === 'ri') return 'Responsable Inscripto';
-  if (lower.includes('monotrib')) return 'Monotributista';
-  if (lower.includes('exento')) return 'Exento';
+  if (raw === 'CF' || raw.includes('CONSUMIDOR')) return 'Consumidor Final';
+  if (raw === 'RI' || raw.includes('INSCRIPT')) return 'Responsable Inscripto';
+  if (raw === 'EX' || raw.includes('EXENT')) return 'Exento';
+  if (raw.includes('MONOTRIB')) return 'Monotributista';
   return 'Consumidor Final';
 };
 
@@ -93,40 +93,54 @@ const normalizeCuit = (value) => {
 const normalizePhone = (value) => String(value || '').replace(/[^0-9]/g, '');
 
 export const mapCsvRowsToClientes = (rows) => {
-  if (!rows?.length) return { clients: [], errors: ['El archivo está vacío.'] };
+  if (!rows?.length) return { clients: [], errors: ['El archivo está vacío.'], skippedEmpty: 0 };
 
   const headers = rows[0].map(normalizeHeader);
-  const indexes = {
-    nombre: findColumnKey(headers, 'nombre'),
-    razon_social: findColumnKey(headers, 'razon_social'),
-    cuit: findColumnKey(headers, 'cuit'),
-    telefono: findColumnKey(headers, 'telefono'),
-    direccion: findColumnKey(headers, 'direccion'),
-    condicion_iva: findColumnKey(headers, 'condicion_iva'),
-    saldo: findColumnKey(headers, 'saldo'),
-  };
+  const hasHeaderRow =
+    headers[0] === 'nombre' ||
+    findColumnKey(headers, 'nombre') >= 0;
+  const dataRows = hasHeaderRow ? rows.slice(1) : rows;
 
-  if (indexes.nombre < 0) {
-    return {
-      clients: [],
-      errors: [
-        'No se encontró columna "nombre". Usá encabezados como: nombre, razon_social, cuit, telefono, direccion',
-      ],
-    };
-  }
+  const indexes = hasHeaderRow
+    ? {
+        nombre: 0,
+        razon_social: findColumnKey(headers, 'razon_social'),
+        cuit: findColumnKey(headers, 'cuit'),
+        telefono: findColumnKey(headers, 'telefono'),
+        direccion: findColumnKey(headers, 'direccion'),
+        condicion_iva: findColumnKey(headers, 'condicion_iva'),
+        saldo: findColumnKey(headers, 'saldo'),
+      }
+    : {
+        nombre: 0,
+        razon_social: 1,
+        cuit: 2,
+        telefono: 3,
+        direccion: 4,
+        condicion_iva: 5,
+        saldo: 6,
+      };
 
   const clients = [];
   const errors = [];
+  let skippedEmpty = 0;
 
-  rows.slice(1).forEach((row, rowIndex) => {
-    const line = rowIndex + 2;
+  dataRows.forEach((row, rowIndex) => {
+    const line = hasHeaderRow ? rowIndex + 2 : rowIndex + 1;
+    const nombre = String(row[0] ?? '').trim();
+
+    if (!nombre) {
+      if (row.some((value) => String(value ?? '').trim() !== '')) {
+        skippedEmpty += 1;
+      }
+      return;
+    }
+
     const get = (key) => {
       const idx = indexes[key];
-      return idx >= 0 ? String(row[idx] ?? '').trim() : '';
+      if (idx < 0) return '';
+      return String(row[idx] ?? '').trim();
     };
-
-    const nombre = get('nombre');
-    if (!nombre) return;
 
     const direccion = get('direccion');
     if (!direccion) {
@@ -149,16 +163,16 @@ export const mapCsvRowsToClientes = (rows) => {
   });
 
   if (!clients.length) {
-    errors.unshift('No hay filas con nombre para importar.');
+    errors.unshift('No hay filas con nombre en la primera columna para importar.');
   }
 
-  return { clients, errors, headers };
+  return { clients, errors, headers, skippedEmpty };
 };
 
 export const CSV_IMPORT_HELP = [
   'En Google Sheets: Archivo → Descargar → Valores separados por comas (.csv)',
-  'La primera fila debe ser encabezados.',
-  'Columnas reconocidas: nombre, razon_social, cuit, telefono, direccion, condicion_iva, saldo',
-  'Obligatorio: nombre. Recomendado: direccion (calle, número, ciudad).',
-  'Clientes con el mismo nombre se omiten (no se duplican).',
+  'La primera fila debe ser encabezados. La columna A = nombre (obligatoria).',
+  'Columnas: nombre, razon_social, cuit, telefono, direccion, condicion_iva, saldo',
+  'IVA: CF = Consumidor Final, RI = Responsable Inscripto, EX = Exento',
+  'Filas con nombre vacío se ignoran. Podés borrar todos los clientes antes de importar.',
 ];

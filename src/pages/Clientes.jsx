@@ -63,6 +63,7 @@ function Clientes({ navigate, profile, accentColor }) {
   const [importClientesModal, setImportClientesModal] = useState(false);
   const [importClientesStatus, setImportClientesStatus] = useState('');
   const [importClientesResult, setImportClientesResult] = useState(null);
+  const [importReplaceAll, setImportReplaceAll] = useState(true);
   const csvFileInputRef = useRef(null);
   const [clientSearchQuery, setClientSearchQuery] = useState('');
   const [clientSortField, setClientSortField] = useState('nombre');
@@ -1160,25 +1161,36 @@ function Clientes({ navigate, profile, accentColor }) {
     event.target.value = '';
     if (!file) return;
 
+    if (importReplaceAll) {
+      const ok = window.confirm(
+        'Se borrarán TODOS los clientes de tu empresa (y sus pedidos/direcciones/movimientos) antes de importar. ¿Continuar?'
+      );
+      if (!ok) return;
+    }
+
     setImportClientesStatus('importing');
     setImportClientesResult(null);
 
     try {
       const csvText = await file.text();
-      const result = await db.importClientesFromCsv(csvText);
+      const result = await db.importClientesFromCsv(csvText, { replaceAll: importReplaceAll });
       setImportClientesResult(result);
       setImportClientesStatus(result.imported > 0 ? 'success' : 'error');
 
-      if (result.imported > 0) {
+      if (result.imported > 0 || result.deleted > 0) {
         const cl = await db.getClientes();
         setClientes(cl);
+        setSelectedClient(null);
+        setClientSearch('');
       }
     } catch (err) {
       setImportClientesStatus('error');
       setImportClientesResult({
         imported: 0,
         skipped: 0,
+        skippedEmpty: 0,
         failed: 0,
+        deleted: 0,
         errors: [err.message || 'No se pudo leer el archivo CSV.'],
       });
     }
@@ -3591,8 +3603,18 @@ function Clientes({ navigate, profile, accentColor }) {
 
               <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '12px', marginBottom: '16px', fontSize: '0.82rem', fontFamily: 'monospace' }}>
                 nombre,razon_social,cuit,telefono,direccion,condicion_iva,saldo<br />
-                Dietética Central,Central SRL,30754321012,5492994123456,Av. Argentina 120 Neuquén,Consumidor Final,0
+                Dietética Central,Central SRL,30754321012,5492994123456,Av. Argentina 120 Neuquén,CF,0
               </div>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', cursor: 'pointer', fontSize: '0.9rem' }}>
+                <input
+                  type="checkbox"
+                  checked={importReplaceAll}
+                  onChange={(e) => setImportReplaceAll(e.target.checked)}
+                  style={{ width: '16px', height: '16px' }}
+                />
+                Borrar todos los clientes actuales antes de importar
+              </label>
 
               <input
                 ref={csvFileInputRef}
@@ -3617,8 +3639,14 @@ function Clientes({ navigate, profile, accentColor }) {
                   <div className="alert-box-success" style={{ marginBottom: '10px' }}>
                     <i className="bi bi-check-circle-fill"></i>
                     <div>
+                      {importClientesResult.deleted > 0 && (
+                        <>Eliminados: <strong>{importClientesResult.deleted}</strong>{' · '}</>
+                      )}
                       Importados: <strong>{importClientesResult.imported}</strong>
                       {' · '}Omitidos (duplicados): <strong>{importClientesResult.skipped}</strong>
+                      {importClientesResult.skippedEmpty > 0 && (
+                        <>{' · '}Sin nombre: <strong>{importClientesResult.skippedEmpty}</strong></>
+                      )}
                       {' · '}Fallidos: <strong>{importClientesResult.failed}</strong>
                     </div>
                   </div>
