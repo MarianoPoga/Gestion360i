@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import ExcelJS from 'exceljs'
 import { db, isSupabaseConfigured, supabase } from '../supabaseClient'
+import { CSV_IMPORT_HELP } from '../clientesImport'
 
 const cleanAddressText = (str) => {
   if (!str) return '';
@@ -59,8 +60,10 @@ function Clientes({ navigate, profile, accentColor }) {
   const [newClientAddress, setNewClientAddress] = useState('');
   const [newClientCondicionIva, setNewClientCondicionIva] = useState('Consumidor Final');
   const [newClientError, setNewClientError] = useState('');
-
-  // Client list management states
+  const [importClientesModal, setImportClientesModal] = useState(false);
+  const [importClientesStatus, setImportClientesStatus] = useState('');
+  const [importClientesResult, setImportClientesResult] = useState(null);
+  const csvFileInputRef = useRef(null);
   const [clientSearchQuery, setClientSearchQuery] = useState('');
   const [clientSortField, setClientSortField] = useState('nombre');
   const [clientSortAsc, setClientSortAsc] = useState(true);
@@ -1150,6 +1153,35 @@ function Clientes({ navigate, profile, accentColor }) {
       formatted += '-' + value.substring(10, 11);
     }
     setNewClientCuit(formatted);
+  };
+
+  const handleImportCsvFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    setImportClientesStatus('importing');
+    setImportClientesResult(null);
+
+    try {
+      const csvText = await file.text();
+      const result = await db.importClientesFromCsv(csvText);
+      setImportClientesResult(result);
+      setImportClientesStatus(result.imported > 0 ? 'success' : 'error');
+
+      if (result.imported > 0) {
+        const cl = await db.getClientes();
+        setClientes(cl);
+      }
+    } catch (err) {
+      setImportClientesStatus('error');
+      setImportClientesResult({
+        imported: 0,
+        skipped: 0,
+        failed: 0,
+        errors: [err.message || 'No se pudo leer el archivo CSV.'],
+      });
+    }
   };
 
   const handleCreateClient = async (e) => {
@@ -2301,6 +2333,19 @@ function Clientes({ navigate, profile, accentColor }) {
                   </ul>
                 )}
               </div>
+
+              <button 
+                type="button" 
+                className="btn-new-task" 
+                style={{ backgroundColor: '#475569', padding: '10px 14px', height: '42px', flexShrink: 0 }}
+                onClick={() => {
+                  setImportClientesModal(true);
+                  setImportClientesStatus('');
+                  setImportClientesResult(null);
+                }}
+              >
+                <i className="bi bi-file-earmark-spreadsheet me-1"></i> Importar CSV
+              </button>
 
               <button 
                 type="button" 
@@ -3526,6 +3571,73 @@ function Clientes({ navigate, profile, accentColor }) {
       {/* ============================================================== */}
       {/* MODALS SECTION                                                 */}
       {/* ============================================================== */}
+
+      {/* MODAL: IMPORT CLIENTES CSV */}
+      {importClientesModal && (
+        <div className="modal-overlay">
+          <div className="modal-content-card">
+            <div className="modal-header" style={{ backgroundColor: '#475569' }}>
+              <h5 className="modal-title"><i className="bi bi-file-earmark-spreadsheet me-2"></i>Importar clientes desde Google Sheets</h5>
+              <button className="modal-close-btn" onClick={() => setImportClientesModal(false)}>
+                <i className="bi bi-x-lg"></i>
+              </button>
+            </div>
+            <div className="modal-body">
+              <ol style={{ fontSize: '0.9rem', color: 'var(--text-muted)', paddingLeft: '18px', marginBottom: '16px' }}>
+                {CSV_IMPORT_HELP.map((line) => (
+                  <li key={line} style={{ marginBottom: '6px' }}>{line}</li>
+                ))}
+              </ol>
+
+              <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '12px', marginBottom: '16px', fontSize: '0.82rem', fontFamily: 'monospace' }}>
+                nombre,razon_social,cuit,telefono,direccion,condicion_iva,saldo<br />
+                Dietética Central,Central SRL,30754321012,5492994123456,Av. Argentina 120 Neuquén,Consumidor Final,0
+              </div>
+
+              <input
+                ref={csvFileInputRef}
+                type="file"
+                accept=".csv,text/csv"
+                style={{ display: 'none' }}
+                onChange={handleImportCsvFile}
+              />
+
+              <button
+                type="button"
+                className="btn-submit"
+                style={{ backgroundColor: '#475569', marginBottom: '12px' }}
+                disabled={importClientesStatus === 'importing'}
+                onClick={() => csvFileInputRef.current?.click()}
+              >
+                {importClientesStatus === 'importing' ? 'IMPORTANDO...' : 'ELEGIR ARCHIVO CSV'}
+              </button>
+
+              {importClientesResult && (
+                <div style={{ fontSize: '0.9rem' }}>
+                  <div className="alert-box-success" style={{ marginBottom: '10px' }}>
+                    <i className="bi bi-check-circle-fill"></i>
+                    <div>
+                      Importados: <strong>{importClientesResult.imported}</strong>
+                      {' · '}Omitidos (duplicados): <strong>{importClientesResult.skipped}</strong>
+                      {' · '}Fallidos: <strong>{importClientesResult.failed}</strong>
+                    </div>
+                  </div>
+                  {importClientesResult.errors?.length > 0 && (
+                    <div style={{ maxHeight: '160px', overflowY: 'auto', backgroundColor: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '8px', padding: '10px', fontSize: '0.8rem' }}>
+                      {importClientesResult.errors.slice(0, 20).map((msg) => (
+                        <div key={msg} style={{ marginBottom: '4px' }}>{msg}</div>
+                      ))}
+                      {importClientesResult.errors.length > 20 && (
+                        <div>... y {importClientesResult.errors.length - 20} avisos más.</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL: NEW CLIENT */}
       {newClientModal && (

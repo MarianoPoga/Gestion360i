@@ -28,6 +28,7 @@ import {
   findExistingPeriodicItem,
   normalizePeriodicPayment,
 } from './periodicPaymentsDefaults'
+import { mapCsvRowsToClientes, parseCsvText } from './clientesImport'
 
 // Credentials: localStorage first, then Vite env vars (for local dev)
 const getCredentials = () => {
@@ -1143,10 +1144,13 @@ export const db = {
           razon_social: cliente.razon_social,
           cuit: cliente.cuit,
           condicion_iva: cliente.condicion_iva || 'Consumidor Final',
-          saldo: 0.00
+          saldo: cliente.saldo ?? 0,
         };
         if (cliente.telefono) {
           insertData.telefono = cliente.telefono;
+        }
+        if (cliente.direccion_predeterminada) {
+          insertData.direccion_predeterminada = cliente.direccion_predeterminada;
         }
         const { data, error } = await supabase
           .from('gst_clientes')
@@ -1171,11 +1175,87 @@ export const db = {
       cuit: cliente.cuit,
       condicion_iva: cliente.condicion_iva || 'Consumidor Final',
       telefono: cliente.telefono || '',
-      saldo: 0.00
+      saldo: cliente.saldo ?? 0,
+      direccion_predeterminada: cliente.direccion_predeterminada || null,
     };
     clientes.push(newCliente);
     localStorage.setItem('mock_clientes', JSON.stringify(clientes));
     return { success: true, data: newCliente };
+  },
+
+  importClientesFromCsv: async (csvText) => {
+    const rows = parseCsvText(csvText);
+    const { clients, errors: parseErrors } = mapCsvRowsToClientes(rows);
+    if (!clients.length) {
+      return {
+        success: false,
+        imported: 0,
+        skipped: 0,
+        failed: 0,
+        errors: parseErrors.length ? parseErrors : ['No hay clientes para importar.'],
+      };
+    }
+
+    const existing = await db.getClientes();
+    const existingNames = new Set(
+      (existing || []).map((cliente) => String(cliente.nombre || '').trim().toLowerCase())
+    );
+
+    let imported = 0;
+    let skipped = 0;
+    let failed = 0;
+    const errors = [...parseErrors];
+
+    for (const row of clients) {
+      const key = row.nombre.trim().toLowerCase();
+      if (existingNames.has(key)) {
+        skipped += 1;
+        continue;
+      }
+
+      try {
+        const res = await db.saveCliente({
+          nombre: row.nombre,
+          razon_social: row.razon_social,
+          cuit: row.cuit,
+          telefono: row.telefono,
+          condicion_iva: row.condicion_iva,
+          saldo: row.saldo,
+          direccion_predeterminada: row.direccion || undefined,
+        });
+
+        if (!res.success || !res.data?.id) {
+          failed += 1;
+          errors.push(`Fila ${row.sourceLine} (${row.nombre}): no se pudo guardar.`);
+          continue;
+        }
+
+        if (row.direccion) {
+          const dirRes = await db.saveDireccion(res.data.id, row.direccion);
+          if (!dirRes.success) {
+            errors.push(`Fila ${row.sourceLine} (${row.nombre}): cliente creado pero falló la dirección.`);
+          }
+        }
+
+        if (row.saldo !== 0) {
+          await db.updateClienteSaldo(res.data.id, row.saldo);
+        }
+
+        existingNames.add(key);
+        imported += 1;
+      } catch (err) {
+        failed += 1;
+        errors.push(`Fila ${row.sourceLine} (${row.nombre}): ${err.message || 'error desconocido'}`);
+      }
+    }
+
+    return {
+      success: failed === 0,
+      imported,
+      skipped,
+      failed,
+      errors,
+    };
   },
 
   updateCliente: async (id, updates) => {
