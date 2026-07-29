@@ -1,5 +1,13 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { db } from '../supabaseClient';
+import { DEFAULT_CAJA_FUERTE_NAME } from '../moduleLabels';
+import {
+  getProviderCategories,
+  normalizeCategoryName,
+  normalizeComprasCategories,
+} from '../expenseTypes';
+import ExpenseGuideModal from '../components/ExpenseGuideModal';
+import { clampDateToToday, getTodayLocalDateString } from '../dateUtils';
 function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
   const isSameLocalDate = (isoString, localDateString) => {
     if (!isoString) return false;
@@ -79,11 +87,12 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
   const [uniqueDetails, setUniqueDetails] = useState([]);
   const [uniquePayments, setUniquePayments] = useState([]);
   const [comprasCategorias, setComprasCategorias] = useState([]);
+  const [showGuiaModal, setShowGuiaModal] = useState(false);
   const [cierreTurnos, setCierreTurnos] = useState([]);
   const [ultimosCierres, setUltimosCierres] = useState([]);
 
   const [rendConfig, setRendConfig] = useState({
-    caja_nombre: 'Caja fuerte',
+    caja_nombre: DEFAULT_CAJA_FUERTE_NAME,
     allow_compras: true
   });
 
@@ -318,12 +327,7 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
   }, [navState, uniqueDetails]);
 
   useEffect(() => {
-    // Current date default
-    const today = new Date();
-    const yyyy = today.getFullYear();
-    const mm = String(today.getMonth() + 1).padStart(2, '0');
-    const dd = String(today.getDate()).padStart(2, '0');
-    setFecha(`${yyyy}-${mm}-${dd}`);
+    setFecha(getTodayLocalDateString());
 
     // Load dynamic data from DB/LS
     loadDBData();
@@ -375,14 +379,10 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
       setProducts(pr || []);
       setUltimosCierres(cierres || []);
 
-      const cats = await db.getComprasCategorias();
-      const formattedCats = (cats || []).map(cat => {
-        if (typeof cat === 'string') return { name: cat, details: [] };
-        return cat;
-      });
-      setComprasCategorias(formattedCats);
-      if (formattedCats && formattedCats.length > 0) {
-        setTipo(prev => formattedCats.some(c => c.name === prev) ? prev : formattedCats[0].name);
+      const cats = normalizeComprasCategories(await db.getComprasCategorias());
+      setComprasCategorias(cats);
+      if (cats.length > 0) {
+        setTipo((prev) => (cats.some((c) => c.name === prev) ? prev : cats[0].name));
       }
 
       const turnos = await db.getCierreTurnos();
@@ -391,7 +391,7 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
         setTurnoAsignado(turnos[0]);
       }
 
-      const loadedRendConfig = JSON.parse(localStorage.getItem('rendiciones_config') || '{"caja_nombre":"Caja fuerte","allow_adelantos":true,"allow_compras":true,"allow_pagos":true}');
+      const loadedRendConfig = JSON.parse(localStorage.getItem('rendiciones_config') || `{"caja_nombre":"${DEFAULT_CAJA_FUERTE_NAME}","allow_adelantos":true,"allow_compras":true,"allow_pagos":true}`);
       setRendConfig(loadedRendConfig);
     } catch (err) {
       console.error("Error loading DB configuration lists:", err);
@@ -1089,7 +1089,7 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
 
           setProveedor(fakeResult.proveedor);
           setCuit(formatCuit(fakeResult.cuit));
-          setFecha(fakeResult.fecha);
+          setFecha(clampDateToToday(fakeResult.fecha));
           setTipo(fakeResult.tipo);
           setDetalle(fakeResult.detalle);
            
@@ -1140,7 +1140,7 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
   "proveedor": "Nombre comercial del proveedor",
   "cuit": "CUIT del emisor (solo números, 11 dígitos, sin guiones)",
   "fecha": "Fecha de emisión en formato YYYY-MM-DD",
-  "tipo": "Mercadería" | "Gasto" | "Mantenimiento" | "Inversión" | "Servicio" | "Impuesto",
+  "tipo": "Mercadería" | "Mantenimiento" | "Inversión" | "Servicios" | "Estructura y Gestión" | "Seguros",
   "detalle": "Descripción breve de lo comprado",
   "monto_neto": neto gravado al 21% en número decimal (0.00 si no aplica),
   "iva_21": total IVA 21% en número decimal (0.00 si no aplica),
@@ -1202,7 +1202,7 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
 
       setProveedor(cleanJson.proveedor || '');
       setCuit(formatCuit(cleanJson.cuit || ''));
-      if (cleanJson.fecha) setFecha(cleanJson.fecha);
+      if (cleanJson.fecha) setFecha(clampDateToToday(cleanJson.fecha));
       if (cleanJson.tipo) setTipo(cleanJson.tipo);
       setDetalle(cleanJson.detalle || '');
       
@@ -1253,6 +1253,12 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
     e.preventDefault();
     if (!proveedor.trim()) {
       alert("Por favor introduce el nombre del proveedor.");
+      return;
+    }
+
+    const todayStr = getTodayLocalDateString();
+    if (fecha > todayStr) {
+      alert("No se pueden registrar compras con fecha posterior a hoy.");
       return;
     }
 
@@ -1547,6 +1553,11 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
 
   const isOcrApiKeyAvailable = !!localStorage.getItem('gemini_api_key');
 
+  const providerCategorias = useMemo(
+    () => getProviderCategories(comprasCategorias),
+    [comprasCategorias]
+  );
+
   return (
     <div className="page-card" style={{ borderLeft: '5px solid ' + (accentColor || '#ef4444') }}>
       {/* TABS HEADER: CARGAR COMPRA VS PROVEEDORES */}
@@ -1556,7 +1567,20 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
           {viewMode === 'register' ? 'Cargar Compra' : 'Gestión de Proveedores'}
         </h2>
         
-        <div className="flex-row-group">
+        <div className="flex-row-group" style={{ alignItems: 'center', gap: '8px' }}>
+          <button
+            type="button"
+            className="btn-new-task"
+            style={{
+              backgroundColor: '#f8fafc',
+              color: '#1e40af',
+              border: '1px solid #93c5fd',
+              padding: '8px 14px',
+            }}
+            onClick={() => setShowGuiaModal(true)}
+          >
+            <i className="bi bi-journal-text me-1"></i> Guía
+          </button>
           <button 
             type="button" 
             className="btn-new-task"
@@ -1583,6 +1607,12 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
           </button>
         </div>
       </div>
+
+      <ExpenseGuideModal
+        open={showGuiaModal}
+        onClose={() => setShowGuiaModal(false)}
+        accentColor={accentColor || '#ef4444'}
+      />
 
       {viewMode === 'register' && (
         <>
@@ -1676,9 +1706,12 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
                   type="date" 
                   className="form-input fw-bold" 
                   value={fecha}
-                  onChange={(e) => setFecha(e.target.value)}
+                  max={getTodayLocalDateString()}
+                  onChange={(e) => setFecha(clampDateToToday(e.target.value))}
+                  onInput={(e) => setFecha(clampDateToToday(e.target.value))}
                   required
                 />
+                <small className="text-muted d-block mt-1" style={{ fontSize: '0.7rem' }}>No se permiten fechas futuras</small>
               </div>
 
               {/* Alias */}
@@ -2919,7 +2952,12 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
                               setNewProvNombre(p.nombre);
                               setNewProvAlias(p.alias || '');
                               setNewProvCuit(formatCuit(p.cuit || ''));
-                              setNewProvTipo(p.tipo || 'Mercadería');
+                              const normalizedTipo = normalizeCategoryName(p.tipo);
+                              setNewProvTipo(
+                                providerCategorias.some((c) => c.name === normalizedTipo)
+                                  ? normalizedTipo
+                                  : 'Mercadería'
+                              );
                               setNewProvDetalle(p.detalle || '');
                               setNewProvPago(p.pago || 'Caja');
                               setNewProvFactura(p.factura || 'Sin factura');
@@ -3280,7 +3318,7 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
                   onChange={(e) => setNewProvTipo(e.target.value)}
                   required
                 >
-                  {comprasCategorias.map((cat, idx) => (
+                  {providerCategorias.map((cat, idx) => (
                     <option key={idx} value={cat.name}>{cat.name}</option>
                   ))}
                 </select>

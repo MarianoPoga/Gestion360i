@@ -1,7 +1,51 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../supabaseClient';
+import { MODULE_LABELS } from '../moduleLabels';
+import {
+  PERIODIC_SUBGROUPS,
+  buildFullSubgroup,
+  normalizePeriodicPayment,
+  resolvePaymentSubgroupId,
+  sortPeriodicPayments,
+} from '../periodicPaymentsDefaults';
 
-const PeriodicPayments = ({ navigate, accentColor }) => {
+const isSinFacturaType = (tipo) => String(tipo || '').toLowerCase() === 'sin factura';
+
+const parseConceptosDesglose = (value) => {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const matchesPeriodicPaymentName = (compra, paymentName) => {
+  const target = paymentName.toLowerCase().trim();
+  if (!target) return false;
+
+  const detalle = (compra.detalle || '').toLowerCase().trim();
+  if (detalle === target || detalle.includes(target)) return true;
+
+  return parseConceptosDesglose(compra.conceptos_desglose).some((item) => {
+    const concept = String(item.concepto || item.nombre || '')
+      .toLowerCase()
+      .trim();
+    return concept === target || concept.includes(target);
+  });
+};
+
+const PeriodicPayments = ({
+  navigate,
+  accentColor,
+  embedded = false,
+  viewMode: controlledViewMode,
+  onViewModeChange,
+  hideHeader = false,
+  onRegisterPayment,
+}) => {
   const [payments, setPayments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expandedGroups, setExpandedGroups] = useState({
@@ -10,12 +54,18 @@ const PeriodicPayments = ({ navigate, accentColor }) => {
     '2.3': true,
     '2.4': true,
     '2.5': true,
-    '2.6': true
+    '2.6': true,
+    '2.7': true,
   });
   const [showModal, setShowModal] = useState(false);
   const [editingPayment, setEditingPayment] = useState(null);
   const [isFixedGroup, setIsFixedGroup] = useState(false);
-  const [viewMode, setViewMode] = useState('simulation'); // Default to simulation
+  const [internalViewMode, setInternalViewMode] = useState('simulation');
+  const viewMode = controlledViewMode ?? internalViewMode;
+  const setViewMode = (mode) => {
+    if (onViewModeChange) onViewModeChange(mode);
+    if (controlledViewMode === undefined) setInternalViewMode(mode);
+  };
   const [purchases, setPurchases] = useState([]);
   const [showPaymentInfo, setShowPaymentInfo] = useState(null);
   
@@ -32,14 +82,7 @@ const PeriodicPayments = ({ navigate, accentColor }) => {
   const [draggedItem, setDraggedItem] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
 
-  const subgroups = [
-    { id: '2.1', name: 'Personal y Cargas Sociales' },
-    { id: '2.2', name: 'Estructura y Gestión' },
-    { id: '2.3', name: 'Servicios' },
-    { id: '2.4', name: 'Impuestos y Tasas' },
-    { id: '2.5', name: 'Seguros' },
-    { id: '2.6', name: 'Gastos Bancarios' }
-  ];
+  const subgroups = PERIODIC_SUBGROUPS;
 
   useEffect(() => {
     fetchPayments();
@@ -54,10 +97,20 @@ const PeriodicPayments = ({ navigate, accentColor }) => {
 
   const fetchPayments = async () => {
     setLoading(true);
-    const data = await db.getPagosPeriodicos();
-    setPayments(data);
-    setLoading(false);
+    try {
+      const data = await db.getPagosPeriodicos();
+      const normalized = (Array.isArray(data) ? data : []).map(normalizePeriodicPayment);
+      setPayments(sortPeriodicPayments(normalized));
+    } catch (error) {
+      console.error('Error loading pagos periódicos:', error);
+      setPayments([]);
+    } finally {
+      setLoading(false);
+    }
   };
+
+  const getGroupPayments = (groupId) =>
+    payments.filter((payment) => resolvePaymentSubgroupId(payment) === groupId);
 
   const toggleGroup = (id) => {
     setExpandedGroups(prev => ({ ...prev, [id]: !prev[id] }));
@@ -95,55 +148,6 @@ const PeriodicPayments = ({ navigate, accentColor }) => {
     setSubgrupo(groupId);
     setIsFixedGroup(true);
     handleOpenModal();
-  };
-
-  const handleSeedDefaults = async () => {
-    if (payments.length > 0 && !window.confirm("Ya hay ítems cargados. ¿Deseas agregar los predeterminados de todas formas?")) {
-      return;
-    }
-
-    const defaultItems = [
-      { sg: '2.1', items: ['Sueldos', 'Aportes', 'Sindicato'] },
-      { sg: '2.2', items: ['Alquiler', 'Contador', 'Desinfección', 'Toro Gestion', 'Google', 'Facebook', 'Hosting', 'ChatGPT'] },
-      { sg: '2.3', items: ['Electricidad', 'Gas', 'Internet', 'ADT', 'Celular'] },
-      { sg: '2.4', items: ['Autónomo', 'Iva', 'IIBB', 'Ganancias', 'Bs Personales', 'Municipal', 'Patente M 2023', 'Patente F 2014', 'Patente F 2017'] },
-      { sg: '2.5', items: ['Seguro Acc Pers', 'Seguro Local', 'Seguro M 2014', 'Seguro M 2023', 'Seguro F 2014', 'Seguro F 2017'] },
-      { sg: '2.6', items: ['Banco Galicia', 'Banco Nacion', 'Banco HSBC', 'Banco BPN', 'Alleata', 'Payway', 'MercadoPago'] }
-    ];
-
-    setLoading(true);
-    try {
-      // Check if we already have these items to avoid duplicates
-      const existing = await db.getPagosPeriodicos();
-      const existingNames = new Set(existing.map(p => `${p.subgrupo}-${p.nombre}`));
-
-      for (const group of defaultItems) {
-        const subgroupName = subgroups.find(s => s.id === group.sg)?.name;
-        const fullSubgroup = `${group.sg}. ${subgroupName}`;
-
-        for (const item of group.items) {
-          if (existingNames.has(`${fullSubgroup}-${item}`)) continue;
-
-          await db.savePagoPeriodico({
-            subgrupo: fullSubgroup,
-            nombre: item,
-            monto_mensual: 0,
-            dia_vencimiento: 10,
-            tipo_factura: 'Factura C',
-            iva_alicuota: 21,
-            medio_pago: 'Banco',
-            observaciones: '',
-            periodicidad: 'Mensual',
-            estado_valor: 'VALOR ESTIMADO'
-          });
-        }
-      }
-      await fetchPayments();
-    } catch (error) {
-      console.error("Error seeding defaults:", error);
-    } finally {
-      setLoading(false);
-    }
   };
 
   const handleSave = async (e) => {
@@ -203,16 +207,20 @@ const PeriodicPayments = ({ navigate, accentColor }) => {
     const day = payment.dia_vencimiento || 10;
     const paymentDate = new Date(currentYear, monthIdx, day);
 
-    if (payment.tipo_factura === 'Sin Factura') {
-      // Navigate to Pago Impuestos/Servicios with the payment details
-      navigate('pago-impuestos', { 
+    if (isSinFacturaType(payment.tipo_factura)) {
+      const payload = {
         periodicPayment: {
           ...payment,
           monto: payment.monto_mensual || 0,
           detalle: payment.nombre,
-          fecha_sugerida: paymentDate.toISOString()
-        }
-      });
+          fecha_sugerida: paymentDate.toISOString(),
+        },
+      };
+      if (onRegisterPayment) {
+        onRegisterPayment(payload.periodicPayment);
+        return;
+      }
+      navigate('pago-impuestos', payload);
     } else {
       // Navigate to Compras with the payment item in the state
       navigate('compras', { 
@@ -273,10 +281,7 @@ const PeriodicPayments = ({ navigate, accentColor }) => {
       if (!inFortnight) return false;
 
       // Check in detail or breakdown
-      const inDetalle = compra.detalle?.toLowerCase().includes(paymentName.toLowerCase());
-      const inDesglose = compra.conceptos_desglose?.some(c => c.concepto?.toLowerCase().includes(paymentName.toLowerCase()));
-      
-      return inDetalle || inDesglose;
+      return matchesPeriodicPaymentName(compra, paymentName);
     });
 
     if (paymentPurchases.length > 0) {
@@ -371,12 +376,17 @@ const PeriodicPayments = ({ navigate, accentColor }) => {
     }
   };
 
+  const wrapperStyle = embedded
+    ? { padding: 0, border: 'none', boxShadow: 'none', background: 'transparent' }
+    : { borderLeft: '5px solid ' + (accentColor || '#6366f1'), padding: '15px' };
+
   return (
-    <div className="page-card" style={{ borderLeft: '5px solid ' + (accentColor || '#6366f1'), padding: '15px' }}>
+    <div className="page-card" style={wrapperStyle}>
+      {!hideHeader && (
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '10px', marginBottom: '15px' }}>
         <h2 style={{ fontSize: '1.2rem', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
           <i className="bi bi-calendar-check-fill" style={{ color: accentColor || '#6366f1' }}></i>
-          Calendario de Pagos Periódicos
+          {MODULE_LABELS['pagos-periodicos']}
         </h2>
         <div style={{ display: 'flex', gap: '8px' }}>
           <button 
@@ -386,17 +396,15 @@ const PeriodicPayments = ({ navigate, accentColor }) => {
           >
             {viewMode === 'simulation' ? 'Vista Lista' : 'Vista Calendario'}
           </button>
-          <button className="btn btn-primary btn-sm fw-bold" onClick={handleSeedDefaults} style={{ fontSize: '0.75rem' }}>
-            Cargar Conceptos Guía
-          </button>
         </div>
       </div>
+      )}
 
       {viewMode === 'list' ? (
         <>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
         {subgroups.map(group => {
-          const groupPayments = payments.filter(p => p.subgrupo.startsWith(group.id));
+          const groupPayments = getGroupPayments(group.id);
           const isExpanded = expandedGroups[group.id];
 
           return (
@@ -543,9 +551,7 @@ const PeriodicPayments = ({ navigate, accentColor }) => {
               </thead>
               <tbody>
                 {subgroups.map(group => {
-                  const groupPayments = payments
-                    .filter(p => p.subgrupo.startsWith(group.id))
-                    .sort((a, b) => (a.orden || 0) - (b.orden || 0) || a.nombre.localeCompare(b.nombre));
+                  const groupPayments = getGroupPayments(group.id);
                   
                   if (groupPayments.length === 0) return null;
                   const isExpanded = expandedGroups[group.id] !== false; // Default to expanded
@@ -828,7 +834,7 @@ const PeriodicPayments = ({ navigate, accentColor }) => {
                     <option value="Factura B">Factura B</option>
                     <option value="Factura C">Factura C</option>
                     <option value="Ticket">Ticket</option>
-                    <option value="Sin Factura">Sin Factura</option>
+                    <option value="Sin factura">Sin factura</option>
                   </select>
                 </div>
                 <div>
@@ -886,7 +892,7 @@ const PeriodicPayments = ({ navigate, accentColor }) => {
               <div className="d-flex justify-content-between"><span className="text-muted">Fecha:</span> <strong>{new Date(showPaymentInfo.fecha).toLocaleDateString()}</strong></div>
               <div className="d-flex justify-content-between"><span className="text-muted">Concepto:</span> <strong>{showPaymentInfo.detalle}</strong></div>
               <div className="d-flex justify-content-between"><span className="text-muted">Total:</span> <strong className="text-success" style={{ fontSize: '1.2rem' }}>${showPaymentInfo.total?.toLocaleString()}</strong></div>
-              <div className="d-flex justify-content-between"><span className="text-muted">Proveedor:</span> <strong>{showPaymentInfo.proveedor_nombre}</strong></div>
+              <div className="d-flex justify-content-between"><span className="text-muted">Proveedor:</span> <strong>{showPaymentInfo.proveedor || showPaymentInfo.proveedor_nombre || '-'}</strong></div>
               <div className="d-flex justify-content-between"><span className="text-muted">Nro Factura:</span> <strong>{showPaymentInfo.nro_factura}</strong></div>
             </div>
             <button 

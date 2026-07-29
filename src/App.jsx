@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import Dashboard from './pages/Dashboard'
 import Configuration from './pages/Configuration'
 import { db, setBusinessId } from './supabaseClient'
+import { normalizeRoleKey } from './rolePermissions'
 import Clientes from './pages/Clientes'
 import Cierre from './pages/Cierre'
 import Compras from './pages/Compras'
@@ -13,7 +14,6 @@ import Login from './pages/Login'
 import Employees from './pages/Employees'
 import Providers from './pages/Providers'
 import Results from './pages/Results'
-import PeriodicPayments from './pages/PeriodicPayments'
 
 const DEFAULT_MODULE_COLORS = {
   cierre: '#f59e0b',
@@ -72,7 +72,7 @@ function App() {
         if (sessionData) {
           setSession(sessionData.user);
           setProfile(sessionData.profile);
-          await refreshModules();
+          await Promise.all([refreshModules(), db.getArcaConfig()]);
         }
       } catch (err) {
         console.error('Auth init error:', err);
@@ -91,7 +91,7 @@ function App() {
       if (prof.business_id) {
         setBusinessId(prof.business_id);
       }
-      await refreshModules();
+      await Promise.all([refreshModules(), db.getArcaConfig()]);
     }
   };
 
@@ -136,7 +136,7 @@ function App() {
       case 'dashboard':
         return <Dashboard navigate={navigate} modules={modules} moduleColors={moduleColors} refreshModules={refreshModules} profile={profile} />;
       case 'configuration':
-        return profile?.role === 'admin' ? (
+        return normalizeRoleKey(profile?.role) === 'admin' ? (
           <Configuration navigate={navigate} modules={modules} moduleColors={moduleColors} refreshModules={refreshModules} />
         ) : (
           <Dashboard navigate={navigate} modules={modules} moduleColors={moduleColors} refreshModules={refreshModules} profile={profile} />
@@ -162,7 +162,14 @@ function App() {
       case 'clientes':
         return <Clientes navigate={navigate} profile={profile} navState={navState} accentColor={getActiveModuleColor('clientes')} />;
       case 'pagos-periodicos':
-        return <PeriodicPayments navigate={navigate} profile={profile} navState={navState} accentColor={getActiveModuleColor('pagos-periodicos')} />;
+        return (
+          <PagoImpuestos
+            navigate={navigate}
+            modules={modules}
+            navState={{ ...navState, openSection: 'calendar' }}
+            accentColor={getActiveModuleColor('pago-impuestos')}
+          />
+        );
       default:
         return <Dashboard navigate={navigate} modules={modules} moduleColors={moduleColors} refreshModules={refreshModules} profile={profile} />;
     }
@@ -179,31 +186,27 @@ function App() {
           <div className="user-badge">
             <i className="bi bi-person-circle"></i>
             <span>{profile?.full_name || 'Usuario'}</span>
-            {profile?.role === 'admin' && <span className="badge bg-danger ms-2" style={{ fontSize: '0.6rem' }}>OWNER</span>}
+            {normalizeRoleKey(profile?.role) === 'admin' && <span className="badge bg-danger ms-2" style={{ fontSize: '0.6rem' }}>OWNER</span>}
           </div>
         </div>
         <div className="header-actions">
-          <h1 className="app-title">{profile?.role === 'admin' ? 'PANEL DE CONTROL' : 'TERMINAL DE EMPLEADOS'}</h1>
+          <h1 className="app-title">{normalizeRoleKey(profile?.role) === 'admin' ? 'PANEL DE CONTROL' : 'TERMINAL DE EMPLEADOS'}</h1>
           <button className="logout-btn" onClick={handleLogout} title="Cerrar Sesión">
             <i className="bi bi-box-arrow-right"></i>
           </button>
         </div>
       </header>
 
-      {/* Navegación - Botón Volver al Menú si no está en Dashboard */}
       {currentPage !== 'dashboard' && (
-        <div 
-          className="nav-back-container"
-          style={{ 
-            borderLeft: `5px solid ${getActiveModuleColor(currentPage)}`,
-            paddingLeft: '12px',
-            transition: 'border-color 0.3s ease'
-          }}
+        <button
+          type="button"
+          className="floating-menu-btn"
+          style={{ backgroundColor: getActiveModuleColor(currentPage) }}
+          onClick={() => navigate('dashboard')}
+          title="Volver al Menú"
         >
-          <button className="btn-nav-back" onClick={() => navigate('dashboard')}>
-            <i className="bi bi-chevron-left"></i> Volver al Menú
-          </button>
-        </div>
+          Volver
+        </button>
       )}
 
       {/* Renderizado de Página Activa */}
@@ -212,14 +215,16 @@ function App() {
       </main>
 
       {/* Botones de Administración (solo en Dashboard y para admin) */}
-      {currentPage === 'dashboard' && profile?.role === 'admin' && (
+      {currentPage === 'dashboard' && normalizeRoleKey(profile?.role) === 'admin' && (
         <div className="admin-floating-actions">
           <button 
             className="floating-config-btn" 
             onClick={() => navigate('configuration')}
             title="Configuración del Sistema"
+            aria-label="Configuración del Sistema"
           >
             <i className="bi bi-gear-fill"></i>
+            <span className="floating-config-btn__label">Config</span>
           </button>
         </div>
       )}

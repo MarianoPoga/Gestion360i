@@ -1,5 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../supabaseClient';
+import {
+  normalizeRolePermissions,
+  toggleMatrixPermission,
+  updateRoleLabel,
+  getEnabledPermissionModules,
+  ROLE_KEYS,
+  DEFAULT_ROLE_LABELS,
+} from '../rolePermissions';
+import { MODULE_LABELS } from '../moduleLabels';
 
 function Employees() {
   const [view, setView] = useState('list'); // 'list', 'detalle', 'edit'
@@ -20,13 +29,8 @@ function Employees() {
   const [sortAsc, setSortAsc] = useState(true);
   const [activeTab, setActiveTab] = useState('rrhh');
   const [accessForm, setAccessForm] = useState({ email: '', password: '', role: 'cajero', assigned_cajas: [] });
-  const [showGuide, setShowGuide] = useState(false);
-
-  const rolesConfig = {
-    cajero: { label: 'Cajero', permissions: { cierre: true, clientes: true }, desc: 'Pedidos y Cierre (Básico)' },
-    operario: { label: 'Operario', permissions: { cierre: true, clientes: true, adelantos: true, rendiciones: true }, desc: 'Cajero + Pagos y Adelantos' },
-    admin: { label: 'Administrador', permissions: { all: true }, desc: 'Acceso total' }
-  };
+  const [roleOptions, setRoleOptions] = useState([]);
+  const [roleLabels, setRoleLabels] = useState({ ...DEFAULT_ROLE_LABELS });
 
   useEffect(() => {
     loadAllData();
@@ -35,14 +39,25 @@ function Employees() {
   const loadAllData = async () => {
     setLoading(true);
     try {
-      const [e, p, c] = await Promise.all([
+      const [e, p, c, rp] = await Promise.all([
         db.getEmpleados(),
         db.getProfiles(),
-        db.getCierreTurnos()
+        db.getCierreTurnos(),
+        db.getRolePermissions()
       ]);
       setEmployees(e || []);
       setProfiles(p || []);
       setCajas(c || []);
+      if (rp) {
+        const normalized = normalizeRolePermissions(rp);
+        setRoleLabels(normalized.roles);
+        setRoleOptions(
+          ROLE_KEYS.filter((k) => k !== 'admin').map((key) => ({
+            value: key,
+            label: normalized.roles[key] || DEFAULT_ROLE_LABELS[key],
+          }))
+        );
+      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -190,7 +205,7 @@ function Employees() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1.5px solid var(--border-color)', paddingBottom: '12px', marginBottom: '24px' }}>
         <h2 style={{ fontSize: '1.5rem', margin: 0, display: 'flex', alignItems: 'center', gap: '10px' }}>
           <i className="bi bi-person-badge" style={{ color: '#6610f2' }}></i>
-          {view === 'list' ? 'Gestión de Personal' : view === 'detalle' ? 'Ficha de Empleado' : 'Editar Empleado'}
+          {view === 'list' ? MODULE_LABELS.empleados : view === 'detalle' ? 'Ficha de Empleado' : 'Editar Empleado'}
         </h2>
         
         <div className="flex-row-group">
@@ -305,7 +320,7 @@ function Employees() {
                         <td style={{ padding: '10px 15px', textAlign: 'center' }}>
                           {profile ? (
                             <span className="badge-tag" style={{ backgroundColor: '#eff6ff', color: '#1e40af', border: '1px solid #bfdbfe', textTransform: 'capitalize' }}>
-                              <i className="bi bi-shield-lock-fill me-1"></i> {profile.role}
+                              <i className="bi bi-shield-lock-fill me-1"></i> {roleLabels[profile.role] || profile.role}
                             </span>
                           ) : (
                             <span className="badge-tag" style={{ backgroundColor: '#f1f5f9', color: '#64748b', border: '1px solid #cbd5e1' }}>
@@ -436,31 +451,9 @@ function Employees() {
                   
                   {showGuide && (
                     <div style={{ padding: '12px', paddingTop: 0, display: 'flex', flexDirection: 'column', gap: '12px', borderTop: '1px solid #e0f2fe' }}>
-                      <div style={{ fontSize: '0.75rem', lineHeight: '1.4', marginTop: '10px' }}>
-                        <strong style={{ color: '#0369a1' }}>👤 CAJERO:</strong>
-                        <div className="ps-2 text-muted">
-                          • Perfil básico: Solo <strong>Cerrar Caja</strong> y <strong>Pedidos</strong>.<br/>
-                          • Ve <strong>Compras</strong> (Si el administrador lo habilita).<br/>
-                          • No tiene acceso a Pagos de personal ni Caja fuerte.
-                        </div>
-                      </div>
-
-                      <div style={{ fontSize: '0.75rem', lineHeight: '1.4' }}>
-                        <strong style={{ color: '#0369a1' }}>👷 OPERARIO (Recomendado):</strong>
-                        <div className="ps-2 text-muted">
-                          • Ve <strong>Cerrar Caja</strong> y <strong>Pedidos</strong>.<br/>
-                          • Ve <strong>Pagos y Adelantos</strong> (Sueldos/Gastos).<br/>
-                          • Ve <strong>Caja Fuerte</strong> (Historial y saldo total).<br/>
-                          • Ve <strong>Compras</strong> (Si el administrador lo habilita).<br/>
-                          • <span className="text-primary fw-bold">Nuevo:</span> Puede retirar dinero si se activa en Configuración.
-                        </div>
-                      </div>
-                      
-                      <div style={{ fontSize: '0.75rem', lineHeight: '1.4' }}>
-                        <strong style={{ color: '#0369a1' }}>🔑 ADMINISTRADOR:</strong>
-                        <div className="ps-2 text-muted">
-                          • Acceso total: Configuración, Resultados y Empleados.
-                        </div>
+                      <div style={{ fontSize: '0.75rem', lineHeight: '1.4', marginTop: '10px' }} className="text-muted">
+                        Los permisos de cada rol se configuran en <strong>Configuración → Permisos por Rol</strong>.
+                        Podés renombrar los roles y habilitar módulos en la grilla.
                       </div>
                     </div>
                   )}
@@ -482,9 +475,9 @@ function Employees() {
                     <div className="col-md-12">
                       <label className="form-label small fw-bold">Rol / Categoría</label>
                       <select className="form-select form-select-sm" value={accessForm.role} onChange={e => setAccessForm({...accessForm, role: e.target.value})}>
-                        <option value="cajero">Cajero</option>
-                        <option value="operario">Operario</option>
-                        <option value="admin">Administrador</option>
+                        {roleOptions.map((r) => (
+                          <option key={r.value} value={r.value}>{r.label}</option>
+                        ))}
                       </select>
                     </div>
                     <div className="col-12 mt-3">
@@ -504,9 +497,9 @@ function Employees() {
                     <div className="col-md-12">
                       <label className="form-label small fw-bold">Rol / Categoría</label>
                       <select className="form-select form-select-sm" value={accessForm.role} onChange={e => setAccessForm({...accessForm, role: e.target.value})}>
-                        <option value="cajero">Cajero</option>
-                        <option value="operario">Operario</option>
-                        <option value="admin">Administrador</option>
+                        {roleOptions.map((r) => (
+                          <option key={r.value} value={r.value}>{r.label}</option>
+                        ))}
                       </select>
                     </div>
                     <div className="col-12 mt-3">

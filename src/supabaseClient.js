@@ -1,4 +1,33 @@
 import { createClient } from '@supabase/supabase-js'
+import {
+  ARCA_CONFIG_KEY,
+  applyArcaToCache,
+  clearArcaLegacyCache,
+  emptyArcaConfig,
+  isValidBusinessId,
+  normalizeArcaConfig,
+  readArcaFromCache,
+  readLegacyArcaFromLocalStorage,
+} from './arcaConfig'
+import {
+  normalizeCierreMedios,
+  createDefaultCierreMedios,
+  buildCierreSlotRow,
+  applyUsedMedioFlags,
+} from './cierreMedios'
+import { normalizeRoleKey } from './rolePermissions'
+import {
+  DEFAULT_COMPRAS_CATEGORIES,
+  normalizeComprasCategories,
+} from './expenseTypes'
+import {
+  BUSINESS_FISCAL_CONFIG_KEY,
+  DEFAULT_PERIODIC_CONCEPTS,
+  buildFullSubgroup,
+  buildPeriodicPaymentFromConcept,
+  findExistingPeriodicItem,
+  normalizePeriodicPayment,
+} from './periodicPaymentsDefaults'
 
 // Credentials: localStorage first, then Vite env vars (for local dev)
 const getCredentials = () => {
@@ -13,6 +42,9 @@ export const isSupabaseConfigured = () => {
   const { url, key } = getCredentials();
   return !!(url && key && key !== 'tu_anon_key_aqui');
 };
+
+export const hasEnvSupabaseCredentials = () =>
+  !!(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY);
 
 export const testSupabaseConnection = async (url, key) => {
   if (!url?.trim() || !key?.trim()) {
@@ -31,13 +63,26 @@ export const testSupabaseConnection = async (url, key) => {
 
 // --- IDENTITY HELPERS (For Multi-tenancy) ---
 let cachedBusinessId = localStorage.getItem('gst_business_id') || localStorage.getItem('gst_business_id') || '00000000-0000-0000-0000-000000000000';
-let cachedTerminalId = localStorage.getItem('gst_terminal_id') || localStorage.getItem('gst_terminal_id');
+let cachedTerminalId = localStorage.getItem('gst_terminal_id') || null;
 
-if (!cachedTerminalId) {
-  cachedTerminalId = (typeof crypto !== 'undefined' && crypto.randomUUID) 
-    ? crypto.randomUUID() 
-    : 't-' + Math.random().toString(36).substring(2, 11);
-  localStorage.setItem('gst_terminal_id', cachedTerminalId);
+async function resolveTerminalIdForInsert(businessId) {
+  const terminalId = getTerminalId();
+  if (!isSupabaseConfigured() || !supabase || !terminalId) return null;
+  try {
+    const { data } = await supabase
+      .from('gst_terminals')
+      .select('id')
+      .eq('id', terminalId)
+      .eq('business_id', businessId)
+      .maybeSingle();
+    if (!data?.id) {
+      setTerminalId(null);
+      return null;
+    }
+    return data.id;
+  } catch {
+    return null;
+  }
 }
 
 export const getBusinessId = () => {
@@ -57,8 +102,9 @@ export const setBusinessId = (id) => {
 };
 
 export const setTerminalId = (id) => {
-  cachedTerminalId = id;
-  localStorage.setItem('gst_terminal_id', id);
+  cachedTerminalId = id || null;
+  if (id) localStorage.setItem('gst_terminal_id', id);
+  else localStorage.removeItem('gst_terminal_id');
 };
 // Caching variables for dynamic initialization
 let cachedUrl = null;
@@ -200,10 +246,12 @@ const syncHistoricalData = async (businessId) => {
 
   let activeBusinessId = businessId;
   const { data: businesses } = await instance.from('gst_businesses').select('id');
+  // Solo reasigna business_id cuando hay UNA sola empresa (migración legacy).
+  // Con varias empresas en la BD no se tocan filas de otros tenants.
   if (businesses?.length === 1) {
     activeBusinessId = businesses[0].id;
     setBusinessId(activeBusinessId);
-    for (const table of ['gst_clientes', 'gst_personal', 'gst_proveedores', 'gst_productos', 'gst_pedidos']) {
+    for (const table of ['gst_clientes', 'gst_personal', 'gst_proveedores', 'gst_productos', 'gst_pedidos', 'gst_pagos_periodicos', 'gst_compras']) {
       await instance.from(table).update({ business_id: activeBusinessId }).neq('business_id', activeBusinessId);
     }
   }
@@ -255,6 +303,179 @@ const syncHistoricalData = async (businessId) => {
   return activeBusinessId;
 };
 
+const repairPagosPeriodicosBusinessId = async (businessId) => {
+  const instance = getSupabaseInstance();
+  if (!instance || !businessId) return businessId;
+
+  const { data: businesses, error } = await instance.from('gst_businesses').select('id');
+  if (error || !businesses || businesses.length !== 1) return businessId;
+
+  const activeBusinessId = businesses[0].id;
+  if (activeBusinessId !== businessId) {
+    setBusinessId(activeBusinessId);
+  }
+
+  const { error: repairError } = await instance
+    .from('gst_pagos_periodicos')
+    .update({ business_id: activeBusinessId })
+    .neq('business_id', activeBusinessId);
+
+  if (repairError) {
+    console.warn('[Gestion360i] repairPagosPeriodicosBusinessId:', repairError.message);
+  }
+
+  return activeBusinessId;
+};
+
+const BUSINESS_CONFIG = {
+  ENABLED_MODULES: 'enabled_modules',
+  ROLE_PERMISSIONS: 'role_permissions',
+  CIERRE_TURNOS: 'cierre_turnos',
+  CIERRE_CONCEPTOS: 'cierre_conceptos',
+  CIERRE_MEDIOS_USED: 'cierre_medios_used',
+};
+
+const OPERATIONAL_CONFIG_KEYS = new Set([
+  BUSINESS_CONFIG.CIERRE_MEDIOS_USED,
+]);
+
+const readConfigRow = (row) => row?.value ?? row?.config_value ?? null;
+
+const getBusinessConfig = async (key) => {
+  const businessId = await ensureBusinessContext();
+  if (!isSupabaseConfigured() || !supabase || !businessId || INVALID_BUSINESS_ID.includes(String(businessId))) {
+    return null;
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('gst_configs')
+      .select('value, config_value')
+      .eq('business_id', businessId)
+      .eq('key', key)
+      .maybeSingle();
+
+    if (!error && data) {
+      return readConfigRow(data);
+    }
+  } catch (err) {
+    console.warn(`[Gestion360i] getBusinessConfig(${key}):`, err);
+  }
+
+  return null;
+};
+
+const migrateLegacyTerminalConfig = async (businessId, key) => {
+  const terminalId = getTerminalId();
+  if (!isSupabaseConfigured() || !supabase || !terminalId || !businessId) return null;
+
+  try {
+    const { data, error } = await supabase
+      .from('gst_configs')
+      .select('config_value')
+      .eq('business_id', businessId)
+      .eq('terminal_id', terminalId)
+      .eq('config_key', key)
+      .maybeSingle();
+
+    if (error || !data?.config_value) return null;
+
+    const adminCheck = await requireBusinessAdmin();
+    if (!adminCheck.ok) return data.config_value;
+
+    await supabase.from('gst_configs').upsert(
+      { business_id: businessId, key, value: data.config_value },
+      { onConflict: 'business_id,key' }
+    );
+    return data.config_value;
+  } catch (err) {
+    console.warn(`[Gestion360i] migrateLegacyTerminalConfig(${key}):`, err);
+    return null;
+  }
+};
+
+const saveBusinessConfig = async (key, value) => {
+  const adminCheck = await requireBusinessAdmin();
+  if (!adminCheck.ok) return adminCheck;
+
+  return saveTenantConfig(key, value);
+};
+
+const saveTenantConfig = async (key, value) => {
+  const businessId = await ensureBusinessContext();
+  if (!isSupabaseConfigured() || !supabase || !businessId || INVALID_BUSINESS_ID.includes(String(businessId))) {
+    return { ok: false, error: 'Empresa no configurada' };
+  }
+
+  try {
+    const { error } = await supabase.from('gst_configs').upsert(
+      { business_id: businessId, key, value },
+      { onConflict: 'business_id,key' }
+    );
+    if (error) throw error;
+    return { ok: true };
+  } catch (err) {
+    console.warn(`[Gestion360i] saveTenantConfig(${key}):`, err);
+    return { ok: false, error: err.message };
+  }
+};
+
+const saveOperationalConfig = async (key, value) => {
+  if (!OPERATIONAL_CONFIG_KEYS.has(key)) {
+    return { ok: false, error: 'Config operativa no permitida' };
+  }
+  return saveTenantConfig(key, value);
+};
+
+const mergeCierreMediosUsed = (medios, usedMap) => {
+  if (!usedMap || typeof usedMap !== 'object' || Object.keys(usedMap).length === 0) {
+    return medios;
+  }
+  return medios.map((medio) => ({
+    ...medio,
+    used: usedMap[medio.id] === true,
+  }));
+};
+
+const stripCierreMediosUsed = (medios = []) =>
+  medios.map(({ used, ...medio }) => medio);
+
+const buildCierreMediosUsedMap = (medios = []) => {
+  const usedMap = {};
+  medios.forEach((medio) => {
+    if (medio?.id && medio.used === true) usedMap[medio.id] = true;
+  });
+  return usedMap;
+};
+
+const requireBusinessAdmin = async () => {
+  const instance = getSupabaseInstance();
+  if (!instance) return { ok: false, error: 'Supabase no configurado' };
+
+  const { data: { session } } = await instance.auth.getSession();
+  if (!session?.user) return { ok: false, error: 'Debe iniciar sesión' };
+
+  const { data: profile, error } = await instance
+    .from('gst_profiles')
+    .select('role')
+    .eq('id', session.user.id)
+    .maybeSingle();
+
+  if (error) return { ok: false, error: error.message };
+  if (normalizeRoleKey(profile?.role) !== 'admin') {
+    return { ok: false, error: 'Solo el administrador de la empresa puede modificar la configuración' };
+  }
+
+  return { ok: true };
+};
+
+const rejectAdminRoleAssignment = (role) => {
+  if (normalizeRoleKey(role) === 'admin') {
+    return 'Solo puede existir un administrador por empresa. El rol administrador no se asigna manualmente.';
+  }
+  return null;
+};
+
 export const forceHistoricalSync = async () => {
   sessionStorage.removeItem(HISTORICAL_SYNC_KEY);
   const businessId = await ensureBusinessContext();
@@ -268,7 +489,7 @@ export const forceHistoricalSync = async () => {
  */
 export const db = {
   // --- AUTH & USER MANAGEMENT ---
-  signUp: async (email, password, businessName, fullName) => {
+  signUp: async (email, password, businessName, fullName, { isMonotributo = false } = {}) => {
     if (!isSupabaseConfigured() || !supabase) return { error: 'Supabase not configured' };
     
     try {
@@ -288,7 +509,24 @@ export const db = {
         .single();
       if (bizError) throw bizError;
 
-      // 3. Create Default Terminal
+      // 3. Create Profile (admin único — antes de la terminal para RLS)
+      const { error: profError } = await supabase
+        .from('gst_profiles')
+        .insert([{
+          id: authData.user.id,
+          business_id: bizData.id,
+          full_name: fullName,
+          role: 'admin'
+        }]);
+      if (profError) throw profError;
+
+      setBusinessId(bizData.id);
+
+      await saveTenantConfig(BUSINESS_FISCAL_CONFIG_KEY, {
+        condicion: isMonotributo ? 'monotributo' : 'responsable_inscripto',
+      });
+
+      // 4. Create Default Terminal
       const { data: termData, error: termError } = await supabase
         .from('gst_terminals')
         .insert([{
@@ -302,16 +540,7 @@ export const db = {
       
       setTerminalId(termData.id);
 
-      // 4. Create Profile
-      const { error: profError } = await supabase
-        .from('gst_profiles')
-        .insert([{
-          id: authData.user.id,
-          business_id: bizData.id,
-          full_name: fullName,
-          role: 'admin'
-        }]);
-      if (profError) throw profError;
+      await db.seedDefaultPeriodicPayments({ isMonotributo });
 
       return { success: true, user: authData.user, business: bizData };
     } catch (err) {
@@ -336,6 +565,7 @@ export const db = {
     if (supabase) await supabase.auth.signOut();
     localStorage.removeItem('gst_business_id');
     cachedBusinessId = '00000000-0000-0000-0000-000000000000';
+    clearArcaLegacyCache();
   },
 
   getUserProfile: async (userId) => {
@@ -377,6 +607,8 @@ export const db = {
         
         if (terms && terms.length > 0) {
           setTerminalId(terms[0].id);
+        } else {
+          setTerminalId(null);
         }
 
         return { user: session.user, profile };
@@ -385,7 +617,7 @@ export const db = {
     return null;
   },
 
-  // --- MODULE SETTINGS ---
+  // --- MODULE SETTINGS (por empresa) ---
   getModules: async () => {
     const defaultModules = {
       cierre: true,
@@ -401,143 +633,193 @@ export const db = {
       'pago-proveedores': true,
       'pago-impuestos': true
     };
-    const businessId = getBusinessId();
-    const terminalId = getTerminalId();
-    if (isSupabaseConfigured() && supabase && terminalId) {
+
+    const businessId = await ensureBusinessContext();
+    if (isSupabaseConfigured() && supabase && businessId) {
       try {
-        const { data, error } = await supabase
-          .from('gst_configs')
-          .select('config_value')
-          .eq('business_id', businessId)
-          .eq('terminal_id', terminalId)
-          .eq('config_key', 'enabled_modules')
-          .maybeSingle();
-        if (!error && data && data.config_value) {
-          return { ...defaultModules, ...data.config_value };
+        let config =
+          (await getBusinessConfig(BUSINESS_CONFIG.ENABLED_MODULES)) ||
+          (await migrateLegacyTerminalConfig(businessId, BUSINESS_CONFIG.ENABLED_MODULES));
+        if (config) {
+          return { ...defaultModules, ...config };
         }
       } catch (err) {
-        console.warn("Supabase getModules error:", err);
+        console.warn('Supabase getModules error:', err);
       }
     }
+
     const stored = localStorage.getItem('enabled_modules');
     return stored ? { ...defaultModules, ...JSON.parse(stored) } : defaultModules;
   },
 
   saveModules: async (modules) => {
-    const businessId = getBusinessId();
-    const terminalId = getTerminalId();
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        await supabase
-          .from('gst_configs')
-          .upsert({
-            business_id: businessId,
-            terminal_id: terminalId,
-            config_key: 'enabled_modules',
-            config_value: modules
-          }, { onConflict: 'terminal_id,config_key' });
-      } catch (err) {
-        console.warn("Supabase saveModules failed:", err);
-      }
-    }
+    const result = isSupabaseConfigured() && supabase
+      ? await saveBusinessConfig(BUSINESS_CONFIG.ENABLED_MODULES, modules)
+      : { ok: true };
+    if (!result.ok) return { success: false, error: result.error };
     localStorage.setItem('enabled_modules', JSON.stringify(modules));
     return { success: true };
   },
 
   getRolePermissions: async () => {
-    const businessId = getBusinessId();
-    const terminalId = getTerminalId();
-    if (isSupabaseConfigured() && supabase && terminalId) {
+    const businessId = await ensureBusinessContext();
+    if (isSupabaseConfigured() && supabase && businessId) {
       try {
-        const { data, error } = await supabase
-          .from('gst_configs')
-          .select('config_value')
-          .eq('business_id', businessId)
-          .eq('terminal_id', terminalId)
-          .eq('config_key', 'role_permissions')
-          .maybeSingle();
-        if (!error && data && data.config_value) {
-          return data.config_value;
-        }
+        let config =
+          (await getBusinessConfig(BUSINESS_CONFIG.ROLE_PERMISSIONS)) ||
+          (await migrateLegacyTerminalConfig(businessId, BUSINESS_CONFIG.ROLE_PERMISSIONS));
+        if (config) return config;
       } catch (err) {
-        console.warn("Supabase getRolePermissions error:", err);
+        console.warn('Supabase getRolePermissions error:', err);
       }
     }
+
     const stored = localStorage.getItem('role_permissions');
     return stored ? JSON.parse(stored) : null;
   },
 
   saveRolePermissions: async (perms) => {
-    const businessId = getBusinessId();
-    const terminalId = getTerminalId();
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        await supabase
-          .from('gst_configs')
-          .upsert({
-            business_id: businessId,
-            terminal_id: terminalId,
-            config_key: 'role_permissions',
-            config_value: perms
-          }, { onConflict: 'terminal_id,config_key' });
-      } catch (err) {
-        console.warn("Supabase saveRolePermissions failed:", err);
-      }
-    }
+    const result = isSupabaseConfigured() && supabase
+      ? await saveBusinessConfig(BUSINESS_CONFIG.ROLE_PERMISSIONS, perms)
+      : { ok: true };
+    if (!result.ok) return { success: false, error: result.error };
     localStorage.setItem('role_permissions', JSON.stringify(perms));
     return { success: true };
   },
 
-  // --- CIERRE CONFIGURATIONS (SHIFTS & CONCEPTS) ---
-  getCierreTurnos: async () => {
-    const defaultTurnos = ["Mañana", "Tarde", "Delivery", "Noche"];
+  // --- ARCA (por empresa / business_id) ---
+  getArcaConfig: async () => {
     const businessId = getBusinessId();
-    const terminalId = getTerminalId();
-    if (isSupabaseConfigured() && supabase) {
+    let config = null;
+
+    if (isSupabaseConfigured() && supabase && isValidBusinessId(businessId)) {
       try {
-        const { data, error } = await supabase
+        const { data: kvRow, error: kvError } = await supabase
           .from('gst_configs')
-          .select('config_value')
+          .select('value')
           .eq('business_id', businessId)
-          .eq('terminal_id', terminalId)
-          .eq('config_key', 'cierre_turnos')
+          .eq('key', ARCA_CONFIG_KEY)
           .maybeSingle();
-        if (!error && data) return data.config_value;
+
+        if (!kvError && kvRow?.value) {
+          config = normalizeArcaConfig(kvRow.value);
+        } else {
+          const { data: cfgRows, error: cfgError } = await supabase
+            .from('gst_configs')
+            .select('config_value')
+            .eq('business_id', businessId)
+            .eq('config_key', ARCA_CONFIG_KEY)
+            .order('updated_at', { ascending: false })
+            .limit(1);
+
+          if (!cfgError && cfgRows?.[0]?.config_value) {
+            config = normalizeArcaConfig(cfgRows[0].config_value);
+          }
+        }
       } catch (err) {
-        console.warn("Supabase getCierreTurnos failed:", err);
+        console.warn('Supabase getArcaConfig failed:', err);
       }
     }
+
+    if (!config || (!config.cuit && !config.cert && !config.private_key)) {
+      config = readArcaFromCache(businessId);
+      const legacy = readLegacyArcaFromLocalStorage();
+      if (!config.cuit && !config.cert && !config.private_key && (legacy.cuit || legacy.cert || legacy.private_key)) {
+        config = legacy;
+      }
+    }
+
+    applyArcaToCache(businessId, config || emptyArcaConfig());
+    return config || emptyArcaConfig();
+  },
+
+  saveArcaConfig: async (config) => {
+    const adminCheck = await requireBusinessAdmin();
+    const businessId = getBusinessId();
+    const terminalId = getTerminalId();
+    const normalized = normalizeArcaConfig(config);
+    applyArcaToCache(businessId, normalized);
+
+    if (!adminCheck.ok) {
+      return { success: false, stored: 'local', error: adminCheck.error };
+    }
+
+    if (!isSupabaseConfigured() || !supabase || !isValidBusinessId(businessId)) {
+      return { success: true, stored: 'local' };
+    }
+
+    try {
+      const { error: kvError } = await supabase
+        .from('gst_configs')
+        .upsert(
+          {
+            business_id: businessId,
+            key: ARCA_CONFIG_KEY,
+            value: normalized,
+          },
+          { onConflict: 'business_id,key' }
+        );
+
+      if (!kvError) {
+        return { success: true, stored: 'cloud' };
+      }
+
+      if (terminalId) {
+        const { error: cfgError } = await supabase
+          .from('gst_configs')
+          .upsert(
+            {
+              business_id: businessId,
+              terminal_id: terminalId,
+              config_key: ARCA_CONFIG_KEY,
+              config_value: normalized,
+            },
+            { onConflict: 'terminal_id,config_key' }
+          );
+
+        if (!cfgError) {
+          return { success: true, stored: 'cloud' };
+        }
+        throw cfgError;
+      }
+
+      throw kvError;
+    } catch (err) {
+      console.warn('Supabase saveArcaConfig failed:', err);
+      return { success: true, stored: 'local', warning: err.message };
+    }
+  },
+
+  // --- CIERRE CONFIGURATIONS (SHIFTS & CONCEPTS) ---
+  getCierreTurnos: async () => {
+    const defaultTurnos = ['Mañana', 'Tarde', 'Delivery', 'Noche'];
+    const businessId = await ensureBusinessContext();
+
+    if (isSupabaseConfigured() && supabase && businessId) {
+      try {
+        let turnos =
+          (await getBusinessConfig(BUSINESS_CONFIG.CIERRE_TURNOS)) ||
+          (await migrateLegacyTerminalConfig(businessId, BUSINESS_CONFIG.CIERRE_TURNOS));
+        if (turnos) return turnos;
+      } catch (err) {
+        console.warn('Supabase getCierreTurnos failed:', err);
+      }
+    }
+
     const stored = localStorage.getItem('cierre_turnos');
     return stored ? JSON.parse(stored) : defaultTurnos;
   },
 
   saveCierreTurnos: async (turnos) => {
-    const businessId = getBusinessId();
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        await supabase
-          .from('gst_configs')
-          .upsert({
-            business_id: businessId,
-            key: 'cierre_turnos',
-            value: turnos
-          }, { onConflict: 'business_id,key' });
-      } catch (err) {
-        console.warn("Supabase saveCierreTurnos failed:", err);
-      }
-    }
+    const result = isSupabaseConfigured() && supabase
+      ? await saveBusinessConfig(BUSINESS_CONFIG.CIERRE_TURNOS, turnos)
+      : { ok: true };
+    if (!result.ok) return { success: false, error: result.error };
     localStorage.setItem('cierre_turnos', JSON.stringify(turnos));
     return { success: true };
   },
 
   getCierreConceptos: async () => {
-    const defaultConcepts = [
-      { id: 'transferencia', label: 'Transferencia Bancaria', enabled: true },
-      { id: 'tarjeta', label: 'Tarjeta (Crédito/Débito)', enabled: true },
-      { id: 'qrPago', label: 'QR / Mercado Pago', enabled: true },
-      { id: 'linkPago', label: 'Link de Pago', enabled: true },
-      { id: 'ctaCte', label: 'Cuenta Corriente (Deuda)', enabled: true }
-    ];
     const businessId = getBusinessId();
     if (isSupabaseConfigured() && supabase) {
       try {
@@ -545,18 +827,38 @@ export const db = {
           .from('gst_configs')
           .select('value')
           .eq('business_id', businessId)
-          .eq('key', 'cierre_conceptos')
+          .eq('key', BUSINESS_CONFIG.CIERRE_CONCEPTOS)
           .maybeSingle();
-        if (!error && data) return data.value;
+        const { data: usedRow } = await supabase
+          .from('gst_configs')
+          .select('value')
+          .eq('business_id', businessId)
+          .eq('key', BUSINESS_CONFIG.CIERRE_MEDIOS_USED)
+          .maybeSingle();
+
+        if (!error && data) {
+          const normalized = normalizeCierreMedios(data.value);
+          return mergeCierreMediosUsed(normalized, usedRow?.value);
+        }
       } catch (err) {
         console.warn("Supabase getCierreConceptos failed:", err);
       }
     }
     const stored = localStorage.getItem('cierre_conceptos');
-    return stored ? JSON.parse(stored) : defaultConcepts;
+    const storedUsed = localStorage.getItem('cierre_medios_used');
+    const normalized = normalizeCierreMedios(stored ? JSON.parse(stored) : null);
+    return mergeCierreMediosUsed(
+      normalized,
+      storedUsed ? JSON.parse(storedUsed) : null
+    );
   },
 
   saveCierreConceptos: async (concepts) => {
+    const normalized = normalizeCierreMedios(concepts);
+    const adminCheck = await requireBusinessAdmin();
+    if (!adminCheck.ok) return { success: false, error: adminCheck.error };
+
+    const structure = stripCierreMediosUsed(normalized);
     const businessId = getBusinessId();
     if (isSupabaseConfigured() && supabase) {
       try {
@@ -564,14 +866,25 @@ export const db = {
           .from('gst_configs')
           .upsert({
             business_id: businessId,
-            key: 'cierre_conceptos',
-            value: concepts
+            key: BUSINESS_CONFIG.CIERRE_CONCEPTOS,
+            value: structure
           }, { onConflict: 'business_id,key' });
       } catch (err) {
         console.warn("Supabase saveCierreConceptos failed:", err);
+        return { success: false, error: err.message };
       }
     }
-    localStorage.setItem('cierre_conceptos', JSON.stringify(concepts));
+    localStorage.setItem('cierre_conceptos', JSON.stringify(structure));
+    return { success: true };
+  },
+
+  saveCierreMediosUsed: async (medios) => {
+    const usedMap = buildCierreMediosUsedMap(medios);
+    const result = isSupabaseConfigured() && supabase
+      ? await saveOperationalConfig(BUSINESS_CONFIG.CIERRE_MEDIOS_USED, usedMap)
+      : { ok: true };
+    if (!result.ok) return { success: false, error: result.error };
+    localStorage.setItem('cierre_medios_used', JSON.stringify(usedMap));
     return { success: true };
   },
 
@@ -602,10 +915,10 @@ export const db = {
     
     // Seed initial mock tasks if empty
     const initialTasks = [
-      { id: 1, tarea: "Limpiar freezer y reponer helado", caracter: "Mantenimiento 🛠️", usuario: "Empleado", estado: "Pendiente", fecha: "24/06" },
-      { id: 2, tarea: "Reponer stock de jugos exprimidos", caracter: "Normal", usuario: "Empleado", estado: "Pendiente", fecha: "24/06" },
-      { id: 3, tarea: "Llamar a distribuidora por faltante", caracter: "Urgente 🔴", usuario: "Administrador", estado: "Pendiente", fecha: "24/06" },
-      { id: 4, tarea: "Barrer y trapear salón antes del cierre", caracter: "Limpieza 🧹", usuario: "Empleado", estado: "Realizada", fecha: "23/06" }
+      { id: 1, tarea: "Limpiar freezer y reponer helado", caracter: "Mantenimiento 🛠️", usuario: "operario", estado: "Pendiente", fecha: "24/06" },
+      { id: 2, tarea: "Reponer stock de jugos exprimidos", caracter: "Normal", usuario: "cajero", estado: "Pendiente", fecha: "24/06" },
+      { id: 3, tarea: "Llamar a distribuidora por faltante", caracter: "Urgente 🔴", usuario: "admin", estado: "Pendiente", fecha: "24/06" },
+      { id: 4, tarea: "Barrer y trapear salón antes del cierre", caracter: "Limpieza 🧹", usuario: "operario", estado: "Realizada", fecha: "23/06" }
     ];
     localStorage.setItem('mock_tasks', JSON.stringify(initialTasks));
     return initialTasks;
@@ -621,7 +934,7 @@ export const db = {
             business_id: businessId,
             caracter: task.caracter,
             tarea: task.tarea,
-            usuario: task.usuario || 'Empleado',
+            usuario: task.rol || task.usuario || 'operario',
             estado: 'Pendiente'
           }])
           .select();
@@ -639,7 +952,7 @@ export const db = {
       id: Date.now(),
       tarea: task.tarea,
       caracter: task.caracter,
-      usuario: task.usuario || 'Empleado',
+      usuario: task.rol || task.usuario || 'operario',
       estado: 'Pendiente',
       fecha: new Date().toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' })
     };
@@ -1236,12 +1549,17 @@ export const db = {
   },
 
   updatePedidosStatus: async (ids, updates) => {
+    const businessId = await ensureBusinessContext();
     // updates: { estado, repartidor, medio_pago, con_envio }
     if (isSupabaseConfigured() && supabase) {
       try {
         for (const id of ids) {
-          // Fetch order first to do bookkeeping
-          const { data: order } = await supabase.from('gst_pedidos').select('*').eq('id', id).single();
+          const { data: order } = await supabase
+            .from('gst_pedidos')
+            .select('*')
+            .eq('id', id)
+            .eq('business_id', businessId)
+            .single();
           if (order) {
             await db.processFinancialTransactions(order, updates);
             
@@ -1265,7 +1583,7 @@ export const db = {
             if (updates.factura_tipo !== undefined) fieldsToUpdate.factura_tipo = updates.factura_tipo;
             if (updates.factura_error !== undefined) fieldsToUpdate.factura_error = updates.factura_error;
 
-            await supabase.from('gst_pedidos').update(fieldsToUpdate).eq('id', id);
+            await supabase.from('gst_pedidos').update(fieldsToUpdate).eq('id', id).eq('business_id', businessId);
           }
         }
         return { success: true };
@@ -1438,6 +1756,7 @@ export const db = {
 
   // Helper for Supabase financial sync
   processFinancialTransactions: async (order, updates) => {
+    const businessId = await ensureBusinessContext();
     const prevEstado = (order.estado || '').toLowerCase();
     const nextEstado = (updates.estado !== undefined ? updates.estado : order.estado || '').toLowerCase();
     
@@ -1452,9 +1771,9 @@ export const db = {
     // A. If Cancelling
     if (nextEstado === 'cancelado' && prevEstado !== 'cancelado') {
       // 1. Decrement balance
-      const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).single();
+      const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).eq('business_id', businessId).single();
       const newSaldo = parseFloat(client.saldo || 0) - parseFloat(order.total);
-      await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id);
+      await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id).eq('business_id', businessId);
 
       // 2. Add credit offset to ledger
       const cancellationConcept = updates.motivo_cancelacion 
@@ -1462,6 +1781,7 @@ export const db = {
         : `Cancelación Pedido #${String(order.id).substring(0,6)}`;
 
       await supabase.from('gst_cliente_movimientos').insert([{
+        business_id: businessId,
         cliente_id: order.cliente_id,
         concepto: cancellationConcept,
         debe: 0.00,
@@ -1472,13 +1792,12 @@ export const db = {
     // B. If completing/paying
     else if (isNextPaid && !isPrevPaid) {
       if (nextMedio !== 'Cta Cte') {
-        // 1. Decrement balance (paid off)
-        const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).single();
+        const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).eq('business_id', businessId).single();
         const newSaldo = parseFloat(client.saldo || 0) - parseFloat(order.total);
-        await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id);
+        await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id).eq('business_id', businessId);
 
-        // 2. Log payment in ledger
         await supabase.from('gst_cliente_movimientos').insert([{
+          business_id: businessId,
           cliente_id: order.cliente_id,
           concepto: `Cobro Pedido #${String(order.id).substring(0,6)} (${nextMedio})`,
           debe: 0.00,
@@ -1490,13 +1809,12 @@ export const db = {
     // C. If reverting from Paid to Unpaid (but NOT if next is cancelled)
     else if (!isNextPaid && isPrevPaid && nextEstado !== 'cancelado') {
       if (prevMedio !== 'Cta Cte') {
-        // 1. Increment balance (debt restored)
-        const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).single();
+        const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).eq('business_id', businessId).single();
         const newSaldo = parseFloat(client.saldo || 0) + parseFloat(order.total);
-        await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id);
+        await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id).eq('business_id', businessId);
 
-        // 2. Log debit restoration in ledger
         await supabase.from('gst_cliente_movimientos').insert([{
+          business_id: businessId,
           cliente_id: order.cliente_id,
           concepto: `Reversión Cobro Pedido #${String(order.id).substring(0,6)}`,
           debe: order.total,
@@ -1508,24 +1826,24 @@ export const db = {
     // D. If paid state payment method changed
     else if (isNextPaid && isPrevPaid && prevMedio !== nextMedio) {
       if (isPrevCtaCte && !isNextCtaCte) {
-        // Debt to cash: Decrement balance and log payment
-        const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).single();
+        const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).eq('business_id', businessId).single();
         const newSaldo = parseFloat(client.saldo || 0) - parseFloat(order.total);
-        await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id);
+        await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id).eq('business_id', businessId);
 
         await supabase.from('gst_cliente_movimientos').insert([{
+          business_id: businessId,
           cliente_id: order.cliente_id,
           concepto: `Cobro Pedido #${String(order.id).substring(0,6)} (${nextMedio})`,
           debe: 0.00,
           haber: order.total
         }]);
       } else if (!isPrevCtaCte && isNextCtaCte) {
-        // Cash to debt: Increment balance and log reversal
-        const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).single();
+        const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).eq('business_id', businessId).single();
         const newSaldo = parseFloat(client.saldo || 0) + parseFloat(order.total);
-        await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id);
+        await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id).eq('business_id', businessId);
 
         await supabase.from('gst_cliente_movimientos').insert([{
+          business_id: businessId,
           cliente_id: order.cliente_id,
           concepto: `Reversión Cobro Pedido #${String(order.id).substring(0,6)}`,
           debe: order.total,
@@ -2026,8 +2344,8 @@ export const db = {
     const stored = localStorage.getItem('mock_empleado_movimientos');
     if (!stored) {
       const initial = [
-        { id: "ad1", fecha: new Date().toISOString(), empleado: "Juan", concepto: "Adelanto $", monto: 5000, caja_cierre: null },
-        { id: "ad2", fecha: new Date().toISOString(), empleado: "María", concepto: "Adelanto Merc", monto: 3500, caja_cierre: null }
+        { id: "ad1", fecha: new Date().toISOString(), empleado: "Juan", concepto: "Adelanto Efectivo", monto: 5000, caja_cierre: null },
+        { id: "ad2", fecha: new Date().toISOString(), empleado: "María", concepto: "Adelanto Mercaderia", monto: 3500, caja_cierre: null }
       ];
       localStorage.setItem('mock_empleado_movimientos', JSON.stringify(initial));
       return initial;
@@ -2621,34 +2939,12 @@ export const db = {
 
   saveCierre: async (cierre, selectedGastoIds = [], selectedAdelantoIds = []) => {
     const businessId = getBusinessId();
-    const terminalId = getTerminalId();
-    const totalEfectivo = parseFloat(cierre.efectivo || 0);
-    const totalCierre = parseFloat(cierre.total || 0);
     const labelTurno = cierre.turno;
-    
-    // Map dynamic digitalValues to standard columns
-    const digitalValues = cierre.digitalValues || {};
-    const concepts = (await db.getCierreConceptos()).filter(c => c.enabled);
-    
-    const dbValues = {
-      transferencia: 0,
-      tarjeta: 0,
-      qr_pago: 0,
-      link_pago: 0,
-      cta_cte: 0
-    };
-    
-    const columnKeys = ['transferencia', 'tarjeta', 'qr_pago', 'link_pago', 'cta_cte'];
-    
-    concepts.forEach((concept, index) => {
-      const val = parseFloat(digitalValues[concept.id] || 0);
-      if (index < 5) {
-        dbValues[columnKeys[index]] = val;
-      } else {
-        // Sum any excess into the first slot
-        dbValues.transferencia += val;
-      }
-    });
+    const medioValues = cierre.medioValues || {};
+    const medios = await db.getCierreConceptos();
+    const slotRow = buildCierreSlotRow(medioValues);
+    const totalEfectivo = slotRow.medio_01;
+    const totalCierre = parseFloat(cierre.total || 0);
 
     let dateObj;
     if (cierre.fecha) {
@@ -2664,40 +2960,46 @@ export const db = {
     const shiftLetter = labelTurno && labelTurno.trim().length > 0 ? labelTurno.trim().charAt(0).toUpperCase() : "M";
     const labelCaja = `Caja ${day}/${month}/${year} ${shiftLetter}`;
 
+    const baseRow = {
+      business_id: businessId,
+      fecha: dateObj.toISOString(),
+      turno: labelTurno,
+      ...slotRow,
+      adelantos_efectivo: parseFloat(cierre.adelantos_efectivo || 0),
+      adelantos_merc: parseFloat(cierre.adelantos_merc || 0),
+      compras: parseFloat(cierre.compras || 0),
+      total: totalCierre,
+    };
+
     if (isSupabaseConfigured() && supabase) {
       try {
-        const { data: cierreRecord, error: errCierre } = await supabase
+        const safeTerminalId = await resolveTerminalIdForInsert(businessId);
+        const insertRow = {
+          ...baseRow,
+          ...(safeTerminalId ? { terminal_id: safeTerminalId } : {}),
+        };
+
+        const { error: errCierre } = await supabase
           .from('gst_cierres_caja')
-          .insert([{
-            business_id: businessId,
-            terminal_id: terminalId,
-            fecha: dateObj.toISOString(),
-            turno: labelTurno,
-            efectivo: totalEfectivo,
-            transferencia: dbValues.transferencia,
-            tarjeta: dbValues.tarjeta,
-            qr_pago: dbValues.qr_pago,
-            link_pago: dbValues.link_pago,
-            cta_cte: dbValues.cta_cte,
-            adelantos_efectivo: parseFloat(cierre.adelantos_efectivo || 0),
-            adelantos_merc: parseFloat(cierre.adelantos_merc || 0),
-            compras: parseFloat(cierre.compras || 0),
-            total: totalCierre
-          }])
+          .insert([insertRow])
           .select();
         
         if (errCierre) throw errCierre;
 
+        const updatedMedios = applyUsedMedioFlags(medios, medioValues);
+        await db.saveCierreMediosUsed(updatedMedios);
+
         if (totalCierre > 0) {
-          await supabase.from('gst_rendiciones').insert([{
+          const rendRow = {
             business_id: businessId,
-            terminal_id: terminalId,
             fecha: dateObj.toISOString(),
             concepto: `Cierre ${labelTurno}`,
             debe: totalEfectivo,
             haber: 0.00,
             categoria: "Ventas"
-          }]);
+          };
+          if (safeTerminalId) rendRow.terminal_id = safeTerminalId;
+          await supabase.from('gst_rendiciones').insert([rendRow]);
         }
 
         if (selectedGastoIds.length > 0) {
@@ -2718,27 +3020,17 @@ export const db = {
 
         return { success: true };
       } catch (err) {
-        console.warn("Supabase saveCierre failed, falling back to mock:", err);
+        console.warn("Supabase saveCierre failed:", err);
+        return { success: false, error: err.message || 'Error al guardar cierre en Supabase.' };
       }
     }
 
-    // Mock
+    // Mock (solo modo demo / sin Supabase)
     const storedCierres = localStorage.getItem('mock_cierres') || '[]';
     const cierres = JSON.parse(storedCierres);
     const newCierre = {
       id: "c_" + Date.now(),
-      fecha: dateObj.toISOString(),
-      turno: labelTurno,
-      efectivo: totalEfectivo,
-      transferencia: dbValues.transferencia,
-      tarjeta: dbValues.tarjeta,
-      qr_pago: dbValues.qr_pago,
-      link_pago: dbValues.link_pago,
-      cta_cte: dbValues.cta_cte,
-      adelantos_efectivo: parseFloat(cierre.adelantos_efectivo || 0),
-      adelantos_merc: parseFloat(cierre.adelantos_merc || 0),
-      compras: parseFloat(cierre.compras || 0),
-      total: totalCierre
+      ...baseRow,
     };
     cierres.push(newCierre);
     localStorage.setItem('mock_cierres', JSON.stringify(cierres));
@@ -2770,6 +3062,8 @@ export const db = {
       const updated = adelantos.map(ad => selectedAdelantoIds.includes(ad.id) ? { ...ad, caja_cierre: labelCaja } : ad);
       localStorage.setItem('mock_empleado_movimientos', JSON.stringify(updated));
     }
+
+    await db.saveCierreMediosUsed(applyUsedMedioFlags(medios, medioValues));
 
     return { success: true };
   },
@@ -2906,35 +3200,34 @@ export const db = {
   },
 
   clearAllPedidos: async () => {
-    const businessId = getBusinessId();
+    const adminCheck = await requireBusinessAdmin();
+    if (!adminCheck.ok) throw new Error(adminCheck.error);
+
+    const businessId = await ensureBusinessContext();
     if (isSupabaseConfigured() && supabase) {
       try {
-        // 1. Delete all order items for this business
         const { error: itemsErr } = await supabase
           .from('gst_pedido_items')
           .delete()
           .eq('business_id', businessId);
         if (itemsErr) throw itemsErr;
 
-        // 2. Delete all orders for this business
         const { error: ordersErr } = await supabase
           .from('gst_pedidos')
           .delete()
           .eq('business_id', businessId);
         if (ordersErr) throw ordersErr;
 
-        // 3. Delete all ledger movements
         const { error: movsErr } = await supabase
           .from('gst_cliente_movimientos')
           .delete()
-          .not('id', 'is', null);
+          .eq('business_id', businessId);
         if (movsErr) throw movsErr;
 
-        // 4. Reset balances for all clients to 0
         const { error: clientsErr } = await supabase
           .from('gst_clientes')
           .update({ saldo: 0 })
-          .not('id', 'is', null);
+          .eq('business_id', businessId);
         if (clientsErr) throw clientsErr;
 
         return { success: true };
@@ -2957,12 +3250,16 @@ export const db = {
   },
 
   clearAllCompras: async () => {
+    const adminCheck = await requireBusinessAdmin();
+    if (!adminCheck.ok) throw new Error(adminCheck.error);
+
+    const businessId = await ensureBusinessContext();
     if (isSupabaseConfigured() && supabase) {
       try {
         const { error } = await supabase
           .from('gst_compras')
           .delete()
-          .not('id', 'is', null);
+          .eq('business_id', businessId);
         if (error) throw error;
         return { success: true };
       } catch (err) {
@@ -2977,11 +3274,13 @@ export const db = {
   },
 
   clearClienteMovimientos: async (clienteId) => {
+    const businessId = await ensureBusinessContext();
     if (isSupabaseConfigured() && supabase) {
       try {
         const { error: movsErr } = await supabase
           .from('gst_cliente_movimientos')
           .delete()
+          .eq('business_id', businessId)
           .eq('cliente_id', clienteId);
         if (movsErr) throw movsErr;
 
@@ -2989,6 +3288,7 @@ export const db = {
           .from('gst_clientes')
           .update({ saldo: 0 })
           .eq('id', clienteId)
+          .eq('business_id', businessId)
           .select()
           .single();
         if (clientErr) throw clientErr;
@@ -3023,20 +3323,7 @@ export const db = {
 
   getComprasCategorias: async () => {
     const businessId = getBusinessId();
-    const defaultCats = [
-      { 
-        name: "Mercadería", 
-        details: [
-          { label: "NO CONSIDERAR 21%", iva: 21 },
-          { label: "NO CONSIDERAR 10,5%", iva: 10.5 }
-        ] 
-      },
-      { name: "Gasto", details: [] },
-      { name: "Mantenimiento", details: [] },
-      { name: "Inversión", details: [] },
-      { name: "Servicio", details: [] },
-      { name: "Impuesto", details: [] }
-    ];
+    const defaultCats = DEFAULT_COMPRAS_CATEGORIES;
     if (isSupabaseConfigured() && supabase) {
       try {
         const { data, error } = await supabase
@@ -3045,31 +3332,22 @@ export const db = {
           .eq('business_id', businessId)
           .eq('key', 'compras_categorias')
           .maybeSingle();
-        if (!error && data) return data.value;
+        if (!error && data?.value) return normalizeComprasCategories(data.value);
       } catch (err) {
         console.warn("Supabase getComprasCategorias failed:", err);
       }
     }
     const stored = localStorage.getItem('compras_categorias');
-    return stored ? JSON.parse(stored) : defaultCats;
+    return normalizeComprasCategories(stored ? JSON.parse(stored) : defaultCats);
   },
 
   saveComprasCategorias: async (list) => {
-    const businessId = getBusinessId();
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        await supabase
-          .from('gst_configs')
-          .upsert({
-            business_id: businessId,
-            key: 'compras_categorias',
-            value: list
-          }, { onConflict: 'business_id,key' });
-      } catch (err) {
-        console.warn("Supabase saveComprasCategorias failed:", err);
-      }
-    }
+    const result = isSupabaseConfigured() && supabase
+      ? await saveBusinessConfig('compras_categorias', list)
+      : { ok: true };
+    if (!result.ok) return { success: false, error: result.error };
     localStorage.setItem('compras_categorias', JSON.stringify(list));
+    return { success: true };
   },
 
   getComprasConceptos: async () => {
@@ -3104,21 +3382,12 @@ export const db = {
   },
 
   saveComprasConceptos: async (list) => {
-    const businessId = getBusinessId();
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        await supabase
-          .from('gst_configs')
-          .upsert({
-            business_id: businessId,
-            key: 'compras_conceptos',
-            value: list
-          }, { onConflict: 'business_id,key' });
-      } catch (err) {
-        console.warn("Supabase saveComprasConceptos failed:", err);
-      }
-    }
+    const result = isSupabaseConfigured() && supabase
+      ? await saveBusinessConfig('compras_conceptos', list)
+      : { ok: true };
+    if (!result.ok) return { success: false, error: result.error };
     localStorage.setItem('compras_conceptos', JSON.stringify(list));
+    return { success: true };
   },
 
   getComprasFormasPago: async () => {
@@ -3142,21 +3411,12 @@ export const db = {
   },
 
   saveComprasFormasPago: async (list) => {
-    const businessId = getBusinessId();
-    if (isSupabaseConfigured() && supabase) {
-      try {
-        await supabase
-          .from('gst_configs')
-          .upsert({
-            business_id: businessId,
-            key: 'compras_formas_pago',
-            value: list
-          }, { onConflict: 'business_id,key' });
-      } catch (err) {
-        console.warn("Supabase saveComprasFormasPago failed:", err);
-      }
-    }
+    const result = isSupabaseConfigured() && supabase
+      ? await saveBusinessConfig('compras_formas_pago', list)
+      : { ok: true };
+    if (!result.ok) return { success: false, error: result.error };
     localStorage.setItem('compras_formas_pago', JSON.stringify(list));
+    return { success: true };
   },
 
   // --- USER MANAGEMENT & PERMISSIONS ---
@@ -3178,13 +3438,22 @@ export const db = {
   },
 
   updateProfilePermissions: async (profileId, updates) => {
-    // updates can contain { role, permissions, assigned_cajas, employee_id }
+    const businessId = await ensureBusinessContext();
+    const adminCheck = await requireBusinessAdmin();
+    if (!adminCheck.ok) return { success: false, error: adminCheck.error };
+
+    if (updates?.role) {
+      const roleError = rejectAdminRoleAssignment(updates.role);
+      if (roleError) return { success: false, error: roleError };
+    }
+
     if (isSupabaseConfigured() && supabase) {
       try {
         const { error } = await supabase
           .from('gst_profiles')
           .update(updates)
-          .eq('id', profileId);
+          .eq('id', profileId)
+          .eq('business_id', businessId);
         if (error) throw error;
         return { success: true };
       } catch (err) {
@@ -3196,6 +3465,12 @@ export const db = {
   },
 
   createEmployeeUser: async (email, password, fullName, role, employeeId) => {
+    const adminCheck = await requireBusinessAdmin();
+    if (!adminCheck.ok) return { success: false, error: adminCheck.error };
+
+    const roleError = rejectAdminRoleAssignment(role);
+    if (roleError) return { success: false, error: roleError };
+
     const { url, key } = getCredentials();
     const businessId = getBusinessId();
     if (!url || !key) return { success: false, error: "Supabase not configured" };
@@ -3241,6 +3516,13 @@ export const db = {
 
 
   updateEmployeeAccess: async (employeeId, role, assignedCajas) => {
+    const businessId = await ensureBusinessContext();
+    const adminCheck = await requireBusinessAdmin();
+    if (!adminCheck.ok) return { success: false, error: adminCheck.error };
+
+    const roleError = rejectAdminRoleAssignment(role);
+    if (roleError) return { success: false, error: roleError };
+
     if (isSupabaseConfigured() && supabase) {
       try {
         const { error } = await supabase
@@ -3249,7 +3531,8 @@ export const db = {
             role: role,
             assigned_cajas: assignedCajas
           })
-          .eq('employee_id', employeeId);
+          .eq('employee_id', employeeId)
+          .eq('business_id', businessId);
         if (error) throw error;
         return { success: true };
       } catch (err) {
@@ -3474,28 +3757,108 @@ export const db = {
     }
   },
 
+  getBusinessFiscalConfig: async () => {
+    const stored = await getBusinessConfig(BUSINESS_FISCAL_CONFIG_KEY);
+    if (stored?.condicion) return stored;
+    return { condicion: 'responsable_inscripto' };
+  },
+
+  saveBusinessFiscalConfig: async (condicion) =>
+    saveBusinessConfig(BUSINESS_FISCAL_CONFIG_KEY, { condicion }),
+
+  seedDefaultPeriodicPayments: async ({ isMonotributo = false } = {}) => {
+    const businessId = await ensureBusinessContext();
+    if (!isSupabaseConfigured() || !supabase || !businessId || INVALID_BUSINESS_ID.includes(String(businessId))) {
+      return { success: false, error: 'Empresa no configurada' };
+    }
+
+    try {
+      let existing = await db.getPagosPeriodicos();
+      existing = (Array.isArray(existing) ? existing : []).map(normalizePeriodicPayment);
+
+      for (let i = 0; i < DEFAULT_PERIODIC_CONCEPTS.length; i++) {
+        const concept = DEFAULT_PERIODIC_CONCEPTS[i];
+        const fullSubgroup = buildFullSubgroup(concept.sg);
+        const payload = buildPeriodicPaymentFromConcept(concept, isMonotributo, i);
+        const found = findExistingPeriodicItem(existing, concept.sg, concept.nombre);
+
+        if (found) {
+          const needsRepair =
+            found.subgrupo !== fullSubgroup ||
+            found.activo === false ||
+            found.nombre !== concept.nombre ||
+            found.periodicidad !== payload.periodicidad ||
+            found.tipo_factura !== payload.tipo_factura;
+
+          if (needsRepair) {
+            const res = await db.savePagoPeriodico({
+              ...found,
+              ...payload,
+              id: found.id,
+              activo: true,
+            });
+            if (!res.success) {
+              console.error(`No se pudo reparar ${concept.nombre}:`, res.error);
+            }
+          }
+          continue;
+        }
+
+        const res = await db.savePagoPeriodico(payload);
+        if (!res.success) {
+          console.error(`No se pudo crear ${concept.nombre}:`, res.error);
+        } else if (res.data) {
+          existing.push(normalizePeriodicPayment(res.data));
+        }
+      }
+
+      return { success: true };
+    } catch (err) {
+      console.error('[Gestion360i] seedDefaultPeriodicPayments:', err);
+      return { success: false, error: err.message };
+    }
+  },
+
   // PAGOS PERIÓDICOS
   getPagosPeriodicos: async () => {
-    const businessId = getBusinessId();
+    let businessId = await ensureBusinessContext();
+    if (!businessId || INVALID_BUSINESS_ID.includes(String(businessId))) {
+      console.warn('[Gestion360i] getPagosPeriodicos: business_id no disponible');
+      return [];
+    }
+
+    businessId = await repairPagosPeriodicosBusinessId(businessId);
+
     if (isSupabaseConfigured() && supabase) {
       try {
         const { data, error } = await supabase
           .from('gst_pagos_periodicos')
           .select('*')
-          .eq('business_id', businessId)
-          .order('subgrupo', { ascending: true })
-          .order('orden', { ascending: true })
-          .order('nombre', { ascending: true });
-        if (!error) return data;
+          .eq('business_id', businessId);
+
+        if (error) {
+          console.error('[Gestion360i] getPagosPeriodicos:', error.message, { businessId });
+          return [];
+        }
+
+        return (data || [])
+          .filter((item) => item.activo !== false)
+          .sort((a, b) => {
+            const subgroupCompare = String(a.subgrupo || '').localeCompare(String(b.subgrupo || ''));
+            if (subgroupCompare !== 0) return subgroupCompare;
+            const orderCompare = (a.orden || 0) - (b.orden || 0);
+            if (orderCompare !== 0) return orderCompare;
+            return String(a.nombre || '').localeCompare(String(b.nombre || ''), 'es');
+          });
       } catch (err) {
-        console.warn("Supabase getPagosPeriodicos failed:", err);
+        console.warn('Supabase getPagosPeriodicos failed:', err);
       }
     }
     return [];
   },
 
   savePagoPeriodico: async (pago) => {
-    const businessId = getBusinessId();
+    const businessId = await ensureBusinessContext();
     if (isSupabaseConfigured() && supabase) {
       try {
         const { data, error } = await supabase
@@ -3513,12 +3876,14 @@ export const db = {
   },
 
   deletePagoPeriodico: async (id) => {
+    const businessId = await ensureBusinessContext();
     if (isSupabaseConfigured() && supabase) {
       try {
         const { error } = await supabase
           .from('gst_pagos_periodicos')
           .delete()
-          .eq('id', id);
+          .eq('id', id)
+          .eq('business_id', businessId);
         if (error) throw error;
         return { success: true };
       } catch (err) {
@@ -3530,12 +3895,14 @@ export const db = {
   },
 
   updatePagoPeriodicoStatus: async (id, updates) => {
+    const businessId = await ensureBusinessContext();
     if (isSupabaseConfigured() && supabase) {
       try {
         const { error } = await supabase
           .from('gst_pagos_periodicos')
           .update(updates)
-          .eq('id', id);
+          .eq('id', id)
+          .eq('business_id', businessId);
         if (error) throw error;
         return { success: true };
       } catch (err) {

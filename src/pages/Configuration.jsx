@@ -1,5 +1,24 @@
-import React, { useState, useEffect } from 'react'
-import { db, isSupabaseConfigured, testSupabaseConnection, forceHistoricalSync } from '../supabaseClient'
+import React, { useState, useEffect } from 'react';
+import { db, isSupabaseConfigured, testSupabaseConnection, forceHistoricalSync, hasEnvSupabaseCredentials } from '../supabaseClient'
+import {
+  normalizeRolePermissions,
+  toggleMatrixPermission,
+  updateRoleLabel,
+  getEnabledPermissionModules,
+  ROLE_KEYS,
+} from '../rolePermissions'
+import { MODULE_LABELS, MODULE_DESCRIPTIONS, getModuleLabel, DEFAULT_CAJA_FUERTE_NAME } from '../moduleLabels'
+import { buildArcaConfigFromForm } from '../arcaConfig'
+import { DEFAULT_COMPRAS_CATEGORIES, normalizeComprasCategories } from '../expenseTypes'
+import { ADELANTO_EFECTIVO, ADELANTO_MERCADERIA } from '../adelantoConcepts'
+import {
+  CIERRE_MEDIOS_SLOTS,
+  createDefaultCierreMedios,
+  getConfiguredMedios,
+  getNextEmptyMedioSlot,
+  canDeleteMedio,
+  canToggleMedio,
+} from '../cierreMedios'
 
 const formatCuit = (val) => {
   if (!val) return '';
@@ -77,8 +96,6 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
     'pago-impuestos': true
   });
   const [moduleColors, setModuleColors] = useState(DEFAULT_MODULE_COLORS);
-  const [dragOverModule, setDragOverModule] = useState(null);
-  const [selectedModuleForColor, setSelectedModuleForColor] = useState(null);
 
   // Supabase credentials state
   const [supabaseUrl, setSupabaseUrl] = useState('');
@@ -118,9 +135,10 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   const [expandedModule, setExpandedModule] = useState(null);
   const [configExpanded, setConfigExpanded] = useState(true);
   const [modulesExpanded, setModulesExpanded] = useState(true);
+  const [openColorPickerModule, setOpenColorPickerModule] = useState(null);
 
   // Rendiciones configuration settings
-  const [rendicionCajaNombre, setRendicionCajaNombre] = useState('Caja fuerte');
+  const [rendicionCajaNombre, setRendicionCajaNombre] = useState(DEFAULT_CAJA_FUERTE_NAME);
   const [rendicionAllowAdelantos, setRendicionAllowAdelantos] = useState(true);
   const [rendicionAllowCompras, setRendicionAllowCompras] = useState(true);
   const [rendicionAllowPagos, setRendicionAllowPagos] = useState(true);
@@ -143,23 +161,23 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   const [clearStatus, setClearStatus] = useState(''); // 'clearing', 'success', 'error', ''
   const [syncStatus, setSyncStatus] = useState('');
   const [syncMessage, setSyncMessage] = useState('');
+  const [supabaseFromEnv, setSupabaseFromEnv] = useState(false);
 
-  // Role-based extra permissions
-  const [cajeroCanCompras, setCajeroCanCompras] = useState(false);
-  const [operarioCanRetiros, setOperarioCanRetiros] = useState(false);
+  const [rolePermissionsConfig, setRolePermissionsConfig] = useState(() => normalizeRolePermissions(null, {}));
 
   // Load configuration on mount
   useEffect(() => {
     async function initConfig() {
       try {
-        const [m, t, c, cc, cco, cp, rp] = await Promise.all([
+        const [m, t, c, cc, cco, cp, rp, arca] = await Promise.all([
           db.getModules(),
           db.getCierreTurnos(),
           db.getCierreConceptos(),
           db.getComprasCategorias(),
           db.getComprasConceptos(),
           db.getComprasFormasPago(),
-          db.getRolePermissions()
+          db.getRolePermissions(),
+          db.getArcaConfig(),
         ]);
         
         setModules(m || {});
@@ -170,18 +188,16 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
           if (typeof cat === 'string') return { name: cat, details: [] };
           return cat;
         });
-        setComprasCategoriasList(formattedCats);
+        setComprasCategoriasList(normalizeComprasCategories(formattedCats));
         
         setComprasConceptosList(cco || []);
         setComprasFormasPagoList(cp || []);
         
         if (rp) {
-          setCajeroCanCompras(rp.cajero_can_compras === true);
-          setOperarioCanRetiros(rp.operario_can_retiros === true);
+          setRolePermissionsConfig(normalizeRolePermissions(rp, m || {}));
         } else {
           const lp = JSON.parse(localStorage.getItem('role_permissions') || '{}');
-          setCajeroCanCompras(lp.cajero_can_compras === true);
-          setOperarioCanRetiros(lp.operario_can_retiros === true);
+          setRolePermissionsConfig(normalizeRolePermissions(lp, m || {}));
         }
 
         // Normalize modules to be booleans and extract colors
@@ -207,26 +223,33 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
           setModuleColors(colors);
         }
 
+        if (arca) {
+          setArcaCuit(formatCuit(arca.cuit || ''));
+          setArcaRazonSocial(arca.razon_social || '');
+          setArcaNombreComercial(arca.nombre_comercial || '');
+          setArcaDireccion(arca.direccion || '');
+          setArcaPuntoVenta(arca.punto_venta || '0001');
+          setArcaAmbiente(arca.ambiente || 'homologacion');
+          setArcaCert(arca.cert || '');
+          setArcaKey(arca.private_key || '');
+          setArcaToken(arca.token || '');
+        }
+
       } catch (e) {
         console.error("Error loading config data:", e);
       }
 
-      setSupabaseUrl(localStorage.getItem('supabase_url') || '');
-      setSupabaseAnonKey(localStorage.getItem('supabase_anon_key') || '');
+      const envUrl = import.meta.env.VITE_SUPABASE_URL || '';
+      const envKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+      const fromEnv = hasEnvSupabaseCredentials();
+      setSupabaseFromEnv(fromEnv);
+      setSupabaseUrl(localStorage.getItem('supabase_url') || envUrl || '');
+      setSupabaseAnonKey(localStorage.getItem('supabase_anon_key') || envKey || '');
       setGeminiApiKey(localStorage.getItem('gemini_api_key') || '');
       setWhatsappTemplate(localStorage.getItem('whatsapp_template') || 'Hola! Estoy por llegar con su pedido 🛵 🍔. Gracias!!');
-      setArcaCuit(formatCuit(localStorage.getItem('arca_cuit') || ''));
-      setArcaRazonSocial(localStorage.getItem('arca_razon_social') || '');
-      setArcaNombreComercial(localStorage.getItem('arca_nombre_comercial') || '');
-      setArcaDireccion(localStorage.getItem('arca_direccion') || '');
-      setArcaPuntoVenta(localStorage.getItem('arca_punto_venta') || '0001');
-      setArcaAmbiente(localStorage.getItem('arca_ambiente') || 'homologacion');
-      setArcaCert(localStorage.getItem('arca_cert') || '');
-      setArcaKey(localStorage.getItem('arca_key') || '');
-      setArcaToken(localStorage.getItem('arca_token') || '');
 
-      const rConf = JSON.parse(localStorage.getItem('rendiciones_config') || '{"caja_nombre":"Caja fuerte","allow_adelantos":true,"allow_compras":true,"allow_pagos":true}');
-      setRendicionCajaNombre(rConf.caja_nombre || 'Caja fuerte');
+      const rConf = JSON.parse(localStorage.getItem('rendiciones_config') || `{"caja_nombre":"${DEFAULT_CAJA_FUERTE_NAME}","allow_adelantos":true,"allow_compras":true,"allow_pagos":true}`);
+      setRendicionCajaNombre(rConf.caja_nombre || DEFAULT_CAJA_FUERTE_NAME);
       setRendicionAllowAdelantos(rConf.allow_adelantos !== false);
       setRendicionAllowCompras(rConf.allow_compras !== false);
       setRendicionAllowPagos(rConf.allow_pagos !== false);
@@ -244,6 +267,41 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
 
     initConfig();
   }, []);
+
+  useEffect(() => {
+    if (!openColorPickerModule) return;
+    const handleClickOutside = (e) => {
+      if (!e.target.closest('.module-color-picker')) {
+        setOpenColorPickerModule(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [openColorPickerModule]);
+
+  const getModuleUsingColor = (color, excludeModuleKey) =>
+    Object.keys(moduleColors).find(
+      (k) =>
+        k !== excludeModuleKey &&
+        moduleColors[k] === color &&
+        modules[k] !== false
+    );
+
+  const handleModuleColorPick = (moduleKey, color) => {
+    const usedBy = getModuleUsingColor(color, moduleKey);
+    if (usedBy) {
+      const previousColor =
+        moduleColors[moduleKey] || DEFAULT_MODULE_COLORS[moduleKey] || PRESET_COLORS[0];
+      setModuleColors((prev) => ({
+        ...prev,
+        [moduleKey]: color,
+        [usedBy]: previousColor,
+      }));
+    } else {
+      setModuleColors((prev) => ({ ...prev, [moduleKey]: color }));
+    }
+    setOpenColorPickerModule(null);
+  };
 
   const handleToggleModule = (moduleKey) => {
     setModules(prev => {
@@ -280,22 +338,55 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   const handleAddConceptTag = (e) => {
     if (e) e.preventDefault();
     const val = newConceptInput.trim();
-    if (val) {
-      const existing = conceptsList.find(c => c.label.toLowerCase() === val.toLowerCase());
-      if (existing) {
-        if (!existing.enabled) {
-          setConceptsList(prev => prev.map(c => c.id === existing.id ? { ...c, enabled: true } : c));
-        }
-      } else {
-        const newId = `concept_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
-        setConceptsList(prev => [...prev, { id: newId, label: val, enabled: true }]);
+    if (!val) return;
+
+    const emptySlot = getNextEmptyMedioSlot(conceptsList);
+    if (!emptySlot) {
+      alert(`Ya configuraste los ${CIERRE_MEDIOS_SLOTS} medios de cobro disponibles.`);
+      return;
+    }
+
+    const duplicate = conceptsList.find(
+      (c) => c.label?.trim().toLowerCase() === val.toLowerCase()
+    );
+    if (duplicate) {
+      if (!duplicate.enabled) {
+        setConceptsList((prev) =>
+          prev.map((c) => (c.id === duplicate.id ? { ...c, enabled: true } : c))
+        );
       }
       setNewConceptInput('');
+      return;
     }
+
+    setConceptsList((prev) =>
+      prev.map((c) =>
+        c.id === emptySlot.id ? { ...c, label: val, enabled: true } : c
+      )
+    );
+    setNewConceptInput('');
   };
 
   const handleRemoveConceptTag = (id) => {
-    setConceptsList(prev => prev.map(c => c.id === id ? { ...c, enabled: false } : c));
+    const target = conceptsList.find((c) => c.id === id);
+    if (!target) return;
+    if (!canDeleteMedio(target)) {
+      alert('Este medio ya fue usado en un cierre. Podés deshabilitarlo, pero no eliminarlo.');
+      return;
+    }
+    setConceptsList((prev) =>
+      prev.map((c) =>
+        c.id === id ? { ...c, label: '', enabled: false, used: false } : c
+      )
+    );
+  };
+
+  const handleToggleConceptEnabled = (id) => {
+    const target = conceptsList.find((c) => c.id === id);
+    if (!target || !canToggleMedio(target)) return;
+    setConceptsList((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, enabled: !c.enabled } : c))
+    );
   };
 
   // Categorías de Compra Helpers
@@ -408,17 +499,33 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
         .filter(t => t.length > 0);
 
       // Save all database settings concurrently and await them
-      await Promise.all([
+      const saveResults = await Promise.all([
         db.saveModules(modulesWithColors),
         db.saveCierreTurnos(cleanTurnos.length > 0 ? cleanTurnos : ["Mañana", "Tarde", "Delivery", "Noche"]),
         db.saveCierreConceptos(conceptsList),
         db.saveComprasCategorias(comprasCategoriasList),
+        db.saveComprasConceptos(comprasConceptosList),
         db.saveComprasFormasPago(comprasFormasPagoList),
-        db.saveRolePermissions({
-          cajero_can_compras: cajeroCanCompras,
-          operario_can_retiros: operarioCanRetiros
-        })
+        db.saveRolePermissions(normalizeRolePermissions(rolePermissionsConfig, modules)),
+        db.saveArcaConfig(buildArcaConfigFromForm({
+          cuit: arcaCuit,
+          razonSocial: arcaRazonSocial,
+          nombreComercial: arcaNombreComercial,
+          direccion: arcaDireccion,
+          puntoVenta: arcaPuntoVenta,
+          ambiente: arcaAmbiente,
+          cert: arcaCert,
+          privateKey: arcaKey,
+          token: arcaToken,
+        })),
       ]);
+
+      const failedSave = saveResults.find(
+        (result) => result && (result.success === false || result.ok === false)
+      );
+      if (failedSave) {
+        throw new Error(failedSave.error || 'No se pudo guardar la configuración');
+      }
 
       // Save WhatsApp and Compras settings to localStorage
       localStorage.setItem('whatsapp_template', whatsappTemplate);
@@ -437,35 +544,25 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
 
       // Save Rendiciones configurations
       const rendicionesConfig = {
-        caja_nombre: rendicionCajaNombre.trim() || 'Caja fuerte',
+        caja_nombre: rendicionCajaNombre.trim() || DEFAULT_CAJA_FUERTE_NAME,
         allow_adelantos: rendicionAllowAdelantos,
         allow_compras: rendicionAllowCompras,
         allow_pagos: rendicionAllowPagos
       };
       localStorage.setItem('rendiciones_config', JSON.stringify(rendicionesConfig));
 
-      // Save credentials
-      if (supabaseUrl.trim() && supabaseAnonKey.trim()) {
-        localStorage.setItem('supabase_url', supabaseUrl.trim());
-        localStorage.setItem('supabase_anon_key', supabaseAnonKey.trim());
-      } else {
-        // If one is empty, clear both to fall back to demo mode safely
-        localStorage.removeItem('supabase_url');
-        localStorage.removeItem('supabase_anon_key');
+      // Credenciales Supabase: globales (env). localStorage solo como override en desarrollo.
+      if (!supabaseFromEnv) {
+        if (supabaseUrl.trim() && supabaseAnonKey.trim()) {
+          localStorage.setItem('supabase_url', supabaseUrl.trim());
+          localStorage.setItem('supabase_anon_key', supabaseAnonKey.trim());
+        } else {
+          localStorage.removeItem('supabase_url');
+          localStorage.removeItem('supabase_anon_key');
+        }
       }
 
       localStorage.setItem('gemini_api_key', geminiApiKey.trim());
-
-      // Save ARCA settings
-      localStorage.setItem('arca_cuit', arcaCuit.replace(/[^0-9]/g, ''));
-      localStorage.setItem('arca_razon_social', arcaRazonSocial);
-      localStorage.setItem('arca_nombre_comercial', arcaNombreComercial);
-      localStorage.setItem('arca_direccion', arcaDireccion);
-      localStorage.setItem('arca_punto_venta', arcaPuntoVenta);
-      localStorage.setItem('arca_ambiente', arcaAmbiente);
-      localStorage.setItem('arca_cert', arcaCert);
-      localStorage.setItem('arca_key', arcaKey);
-      localStorage.setItem('arca_token', arcaToken);
 
       setSaveStatus('success');
       refreshModules(); // Notify App.jsx about module updates
@@ -514,7 +611,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
     }
   };
 
-  const handleResetDemoMode = () => {
+  const handleResetDemoMode = async () => {
     if (window.confirm('¿Seguro que deseas limpiar las credenciales y volver al Modo Demo (con guardado local)?')) {
       localStorage.removeItem('supabase_url');
       localStorage.removeItem('supabase_anon_key');
@@ -525,8 +622,9 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       localStorage.removeItem('whatsapp_template');
       localStorage.removeItem('cierre_turnos');
       localStorage.removeItem('cierre_conceptos');
+      localStorage.removeItem('cierre_medios_used');
       localStorage.removeItem('rendiciones_config');
-      setRendicionCajaNombre('Caja fuerte');
+      setRendicionCajaNombre(DEFAULT_CAJA_FUERTE_NAME);
       setRendicionAllowAdelantos(true);
       setRendicionAllowCompras(true);
       setRendicionAllowPagos(true);
@@ -553,14 +651,8 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       setArcaKey('');
       setArcaToken('');
       setTurnosList(["Mañana", "Tarde", "Delivery", "Noche"]);
-      setConceptsList([
-        { id: 'transferencia', label: 'Transferencia Bancaria', enabled: true },
-        { id: 'tarjeta', label: 'Tarjeta (Crédito/Débito)', enabled: true },
-        { id: 'qrPago', label: 'QR / Mercado Pago', enabled: true },
-        { id: 'linkPago', label: 'Link de Pago', enabled: true },
-        { id: 'ctaCte', label: 'Cuenta Corriente (Deuda)', enabled: true }
-      ]);
-      setComprasCategoriasList(["Mercadería", "Gasto", "Mantenimiento", "Inversión", "Servicio", "Impuesto"]);
+      setConceptsList(createDefaultCierreMedios());
+      setComprasCategoriasList(DEFAULT_COMPRAS_CATEGORIES.map((cat) => ({ ...cat, details: [...(cat.details || [])] })));
       setComprasConceptosList([
         { id: 'c1', label: 'Alquiler', iva: 0 },
         { id: 'c2', label: 'Luz', iva: 21 },
@@ -590,7 +682,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
         resultados: true
       };
       setModules(defaultModules);
-      db.saveModules(defaultModules);
+      await db.saveModules(defaultModules);
       
       setSaveStatus('success');
       refreshModules();
@@ -640,45 +732,56 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
     }
   };
 
-  const ColorPicker = ({ moduleKey, showLabel = true }) => {
-    const currentColor = moduleColors[moduleKey] || '';
-    const usedColors = Object.values(moduleColors);
+  const renderModuleColorPicker = (moduleKey) => {
+    const currentColor =
+      moduleColors[moduleKey] || DEFAULT_MODULE_COLORS[moduleKey] || PRESET_COLORS[0];
+    const isOpen = openColorPickerModule === moduleKey;
 
     return (
-      <div className={showLabel ? "mt-3" : ""}>
-        {showLabel && <label className="form-label fw-bold small text-muted mb-2">Color del Módulo</label>}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(10, 1fr)', gap: '8px' }}>
-          {PRESET_COLORS.map(color => {
-            const isUsed = usedColors.includes(color) && currentColor !== color;
-            const isSelected = currentColor === color;
-            
-            return (
-              <div 
-                key={color}
-                onClick={() => !isUsed && setModuleColors(prev => ({ ...prev, [moduleKey]: color }))}
-                style={{
-                  width: '24px',
-                  height: '24px',
-                  borderRadius: '6px',
-                  backgroundColor: color,
-                  cursor: isUsed ? 'not-allowed' : 'pointer',
-                  border: isSelected ? '2px solid #1e293b' : '1px solid rgba(0,0,0,0.1)',
-                  boxShadow: isSelected ? '0 0 0 2px white, 0 0 0 4px #3b82f6' : 'none',
-                  opacity: isUsed ? 0.3 : 1,
-                  position: 'relative',
-                  transition: 'transform 0.1s ease',
-                  zIndex: isSelected ? 1 : 0
-                }}
-                className={!isUsed ? 'hover-scale' : ''}
-                title={isUsed ? 'Ya seleccionado en otro módulo' : ''}
-              >
-                {isSelected && (
-                  <i className="bi bi-check" style={{ color: 'white', fontSize: '14px', position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', fontWeight: 'bold' }}></i>
-                )}
-              </div>
-            );
-          })}
-        </div>
+      <div
+        className="module-color-picker"
+        onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          className="module-color-picker__trigger"
+          style={{ backgroundColor: currentColor }}
+          onClick={() => setOpenColorPickerModule(isOpen ? null : moduleKey)}
+          title="Elegir color"
+          aria-label={`Color de ${getModuleLabel(moduleKey)}`}
+          aria-expanded={isOpen}
+        />
+        {isOpen && (
+          <div className="module-color-picker__panel" role="listbox" aria-label="Colores disponibles">
+            {PRESET_COLORS.map((color) => {
+              const usedBy = getModuleUsingColor(color, moduleKey);
+              const isCurrent = color === currentColor;
+
+              return (
+                <button
+                  key={color}
+                  type="button"
+                  role="option"
+                  aria-selected={isCurrent}
+                  className={[
+                    'module-color-picker__swatch',
+                    usedBy ? 'is-used' : '',
+                    isCurrent ? 'is-selected' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  style={{ backgroundColor: color }}
+                  title={usedBy ? `En uso: ${getModuleLabel(usedBy)}` : undefined}
+                  onClick={() => handleModuleColorPick(moduleKey, color)}
+                >
+                  {usedBy && <span className="module-color-picker__used-mark" aria-hidden="true" />}
+                  {isCurrent && <i className="bi bi-check-lg module-color-picker__check" aria-hidden="true" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
     );
   };
@@ -722,51 +825,20 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
               <div className="toggle-desc">{desc}</div>
             </div>
           </div>
-          <label className="switch">
-            <input 
-              type="checkbox" 
-              checked={isEnabled}
-              onChange={() => handleToggleModule(moduleKey)}
-            />
-            <span className="slider"></span>
-          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+            {renderModuleColorPicker(moduleKey)}
+            <label className="switch">
+              <input 
+                type="checkbox" 
+                checked={isEnabled}
+                onChange={() => handleToggleModule(moduleKey)}
+              />
+              <span className="slider"></span>
+            </label>
+          </div>
         </div>
       </div>
     );
-  };
-
-  const getModuleIcon = (key) => {
-    switch (key) {
-      case 'cierre': return 'bi-currency-dollar';
-      case 'compras': return 'bi-cart-fill';
-      case 'adelantos': return 'bi-cash-stack';
-      case 'pago-proveedores': return 'bi-wallet2';
-      case 'pago-impuestos': return 'bi-receipt';
-      case 'rendiciones': return 'bi-clipboard-data';
-      case 'pagos-periodicos': return 'bi-calendar-check';
-      case 'clientes': return 'bi-journal-text';
-      case 'tareas': return 'bi-list-check';
-      case 'proveedores': return 'bi-truck';
-      case 'empleados': return 'bi-person-badge';
-      case 'resultados': return 'bi-graph-up';
-      default: return 'bi-grid';
-    }
-  };
-
-  const handleColorDrop = (targetModuleKey, color) => {
-    setModuleColors(prev => {
-      const nextColors = { ...prev };
-      const duplicateKey = Object.keys(nextColors).find(key => nextColors[key] === color && key !== targetModuleKey);
-      
-      if (duplicateKey) {
-        // Swap colors!
-        const oldColor = nextColors[targetModuleKey];
-        nextColors[duplicateKey] = oldColor;
-      }
-      
-      nextColors[targetModuleKey] = color;
-      return nextColors;
-    });
   };
 
   return (
@@ -774,6 +846,9 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       <h2 className="page-title text-dark">
         <i className="bi bi-gear-fill text-secondary"></i> Configuración del Sistema
       </h2>
+      <p className="text-muted small mb-3">
+        Solo el administrador de la empresa puede modificar esta configuración. Hay un único administrador por empresa.
+      </p>
 
       {/* Mode Info Alert */}
       <div className="alert-box" style={{ backgroundColor: '#f1f5f9', borderColor: '#cbd5e1', color: '#334155' }}>
@@ -845,7 +920,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                     <span className="toggle-icon bg-config"><i className="bi bi-database-fill"></i></span>
                     <div>
                       <div className="toggle-label">Base de Datos Supabase</div>
-                      <div className="toggle-desc">Configurar credenciales de conexión en la nube y probar enlace.</div>
+                      <div className="toggle-desc">Credenciales globales del sistema (iguales para todas las empresas).</div>
                     </div>
                   </div>
                 </div>
@@ -860,6 +935,15 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                     marginTop: '4px',
                     marginBottom: '5px'
                   }}>
+                    {supabaseFromEnv && (
+                      <div className="alert-box-success" style={{ marginBottom: '15px' }}>
+                        <i className="bi bi-cloud-check-fill"></i>
+                        <div>
+                          Las credenciales de Supabase están definidas en el servidor (Vercel / <code>.env</code>).
+                          Son compartidas por todas las empresas del sistema.
+                        </div>
+                      </div>
+                    )}
                     <div className="form-group">
                       <label className="form-label">Supabase Project URL</label>
                       <input 
@@ -868,6 +952,8 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                         placeholder="https://xxxxxx.supabase.co"
                         value={supabaseUrl}
                         onChange={(e) => setSupabaseUrl(e.target.value)}
+                        readOnly={supabaseFromEnv}
+                        style={supabaseFromEnv ? { backgroundColor: '#f1f5f9', cursor: 'not-allowed' } : undefined}
                       />
                     </div>
 
@@ -879,6 +965,8 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                         placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
                         value={supabaseAnonKey}
                         onChange={(e) => setSupabaseAnonKey(e.target.value)}
+                        readOnly={supabaseFromEnv}
+                        style={supabaseFromEnv ? { backgroundColor: '#f1f5f9', cursor: 'not-allowed' } : undefined}
                       />
                     </div>
 
@@ -995,7 +1083,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                     <span className="toggle-icon" style={{ background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)' }}><i className="bi bi-file-earmark-text-fill"></i></span>
                     <div>
                       <div className="toggle-label">Credenciales ARCA (Facturación Electrónica)</div>
-                      <div className="toggle-desc">Configurar CUIT, razón social, certificados y token para emitir facturas.</div>
+                      <div className="toggle-desc">Exclusivas de esta empresa. Se guardan en la nube por business_id.</div>
                     </div>
                   </div>
                 </div>
@@ -1010,6 +1098,11 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                     marginTop: '4px',
                     marginBottom: '5px'
                   }}>
+                    <div className="small text-muted mb-3" style={{ padding: '10px', backgroundColor: '#ecfdf5', borderRadius: '8px', border: '1px solid #bbf7d0' }}>
+                      <i className="bi bi-building me-1"></i>
+                      Estos datos son <strong>por empresa</strong> (CUIT, certificado y clave privada de facturación).
+                      Cada negocio cargado en el sistema tiene su propia configuración ARCA en <code>gst_configs</code>.
+                    </div>
                     <div style={{ display: 'flex', gap: '15px', flexWrap: 'wrap', marginBottom: '15px' }}>
                       <div className="form-group" style={{ flex: '1 1 200px', margin: 0 }}>
                         <label className="form-label" style={{ fontSize: '0.8rem' }}>CUIT del Emisor</label>
@@ -1250,6 +1343,133 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                 )}
               </div>
 
+              {/* Config: Permisos por Rol */}
+              <div style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--border-color)', paddingBottom: expandedModule === 'role_perms' ? '15px' : '0' }}>
+                <div className="toggle-item" style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: expandedModule === 'role_perms' ? '10px' : '15px' }}>
+                  <div 
+                    className="toggle-info" 
+                    onClick={() => setExpandedModule(expandedModule === 'role_perms' ? null : 'role_perms')} 
+                    style={{ cursor: 'pointer', flex: 1, display: 'flex', alignItems: 'center' }}
+                  >
+                    <i 
+                      className={`bi bi-chevron-${expandedModule === 'role_perms' ? 'down' : 'right'}`} 
+                      style={{ fontSize: '1.25rem', color: 'var(--text-dark)', marginRight: '12px', fontWeight: 'bold', WebkitTextStroke: '0.8px', width: '16px', textAlign: 'center' }}
+                    ></i>
+                    <span className="toggle-icon" style={{ backgroundColor: '#475569' }}><i className="bi bi-shield-lock-fill"></i></span>
+                    <div>
+                      <div className="toggle-label">Permisos por Rol</div>
+                      <div className="toggle-desc">Por empresa: qué módulos están activos y permisos por rol.</div>
+                    </div>
+                  </div>
+                </div>
+
+                {expandedModule === 'role_perms' && (
+                  <div style={{ padding: '5px 20px 15px 55px' }}>
+                    <p className="small text-muted mb-3">
+                      Solo se listan módulos activos. El rol Administrador siempre tiene acceso total.
+                    </p>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px', marginBottom: '16px' }}>
+                      {ROLE_KEYS.map((roleKey) => (
+                        <div key={roleKey}>
+                          <label className="form-label small fw-bold mb-1">
+                            {roleKey === 'admin' ? 'Rol fijo' : 'Nombre del rol'}
+                          </label>
+                          <input
+                            type="text"
+                            className="form-input"
+                            style={{ fontSize: '0.85rem', padding: '8px 10px' }}
+                            value={rolePermissionsConfig.roles[roleKey] || ''}
+                            disabled={roleKey === 'admin'}
+                            onChange={(e) => setRolePermissionsConfig(updateRoleLabel(rolePermissionsConfig, roleKey, e.target.value))}
+                          />
+                        </div>
+                      ))}
+                    </div>
+
+                    <div style={{ overflowX: 'auto', border: '1px solid var(--border-color)', borderRadius: '8px' }}>
+                      <table className="table table-sm mb-0" style={{ fontSize: '0.85rem' }}>
+                        <thead style={{ backgroundColor: 'var(--bg-light)' }}>
+                          <tr>
+                            <th style={{ minWidth: '160px', padding: '10px' }}>Módulo</th>
+                            {ROLE_KEYS.map((roleKey) => (
+                              <th key={roleKey} style={{ textAlign: 'center', padding: '10px', minWidth: '90px' }}>
+                                {rolePermissionsConfig.roles[roleKey]}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {getEnabledPermissionModules(modules).map((mod) => (
+                            <tr key={mod.id}>
+                              <td style={{ padding: '10px', fontWeight: 600 }}>{mod.label}</td>
+                              {ROLE_KEYS.map((roleKey) => {
+                                const checked = rolePermissionsConfig.matrix[roleKey]?.[mod.id] === true;
+                                const isAdmin = roleKey === 'admin';
+                                return (
+                                  <td key={roleKey} style={{ textAlign: 'center', padding: '10px' }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={isAdmin ? true : checked}
+                                      disabled={isAdmin}
+                                      onChange={(e) => {
+                                        setRolePermissionsConfig(
+                                          toggleMatrixPermission(rolePermissionsConfig, roleKey, mod.id, e.target.checked)
+                                        );
+                                      }}
+                                      style={{ width: '18px', height: '18px', cursor: isAdmin ? 'not-allowed' : 'pointer' }}
+                                    />
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Config: WhatsApp */}
+              <div style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--border-color)', paddingBottom: expandedModule === 'whatsapp' ? '15px' : '0' }}>
+                <div className="toggle-item" style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: expandedModule === 'whatsapp' ? '10px' : '15px' }}>
+                  <div 
+                    className="toggle-info" 
+                    onClick={() => setExpandedModule(expandedModule === 'whatsapp' ? null : 'whatsapp')} 
+                    style={{ cursor: 'pointer', flex: 1, display: 'flex', alignItems: 'center' }}
+                  >
+                    <i 
+                      className={`bi bi-chevron-${expandedModule === 'whatsapp' ? 'down' : 'right'}`} 
+                      style={{ fontSize: '1.25rem', color: 'var(--text-dark)', marginRight: '12px', fontWeight: 'bold', WebkitTextStroke: '0.8px', width: '16px', textAlign: 'center' }}
+                    ></i>
+                    <span className="toggle-icon bg-success"><i className="bi bi-whatsapp"></i></span>
+                    <div>
+                      <div className="toggle-label">WhatsApp</div>
+                      <div className="toggle-desc">Personalizar mensajes de envío de pedidos.</div>
+                    </div>
+                  </div>
+                </div>
+
+                {expandedModule === 'whatsapp' && (
+                  <div style={{ padding: '15px 20px 15px 55px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '15px', flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: '0.8rem', fontWeight: 'bold', color: 'var(--text-muted)', minWidth: '150px' }}>
+                        Mensaje WhatsApp:
+                      </span>
+                      <input
+                        type="text"
+                        className="form-input"
+                        placeholder="Mensaje de WhatsApp..."
+                        value={whatsappTemplate}
+                        onChange={(e) => setWhatsappTemplate(e.target.value)}
+                        style={{ fontSize: '0.85rem', padding: '6px 10px', flex: '1 1 250px', height: '34px', margin: 0 }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
             </div>
           )}
         </div>
@@ -1286,7 +1506,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
             }}>
               
               {/* Cierre */}
-              {renderModuleHeader('cierre', 'Cerrar Caja', 'Cierre de turnos y arqueo de efectivo.', 'bi-currency-dollar', 'bg-cierre')}
+              {renderModuleHeader('cierre', MODULE_LABELS.cierre, MODULE_DESCRIPTIONS.cierre, 'bi-currency-dollar', 'bg-cierre')}
               {modules.cierre && expandedModule === 'cierre' && (
                 <div style={{ padding: '5px 20px 10px 48px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
                   <div>
@@ -1304,47 +1524,90 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                     </div>
                   </div>
                   <div>
-                    <label className="form-label fw-bold small text-muted mb-2">Medios de Cobro Habilitados</label>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '10px', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '8px', backgroundColor: '#fff' }}>
-                      {conceptsList.filter(c => c.enabled).map((c) => (
-                        <span key={c.id} className="badge bg-light text-dark border d-flex align-items-center gap-2">
-                          {c.label} <i className="bi bi-x cursor-pointer" onClick={() => handleRemoveConceptTag(c.id)}></i>
-                        </span>
+                    <label className="form-label fw-bold small text-muted mb-2">
+                      Medios de Cobro ({getConfiguredMedios(conceptsList).length}/{CIERRE_MEDIOS_SLOTS})
+                    </label>
+                    <div className="small text-muted mb-2">
+                      El slot 1 es <strong>Efectivo</strong> (fijo). Los demás se asignan al crearlos. Si un medio ya se usó en un cierre, no se puede eliminar pero sí deshabilitar.
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '10px', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '8px', backgroundColor: '#fff' }}>
+                      {getConfiguredMedios(conceptsList).map((c) => (
+                        <div key={c.id} className="d-flex align-items-center justify-content-between gap-2 flex-wrap">
+                          <div className="d-flex align-items-center gap-2">
+                            <span className="badge bg-secondary">{c.slot}</span>
+                            <span className="fw-semibold">{c.label}</span>
+                            {c.locked && <span className="badge bg-light text-dark border">Fijo</span>}
+                            {c.used && <span className="badge bg-warning text-dark">Usado</span>}
+                          </div>
+                          <div className="d-flex align-items-center gap-3">
+                            {canToggleMedio(c) && (
+                              <label className="small d-flex align-items-center gap-1 mb-0 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={c.enabled !== false}
+                                  onChange={() => handleToggleConceptEnabled(c.id)}
+                                />
+                                Habilitado
+                              </label>
+                            )}
+                            {canDeleteMedio(c) ? (
+                              <button type="button" className="btn btn-sm btn-link text-danger p-0" onClick={() => handleRemoveConceptTag(c.id)}>
+                                Eliminar
+                              </button>
+                            ) : c.slot > 1 ? (
+                              <span className="small text-muted">No eliminable</span>
+                            ) : null}
+                          </div>
+                        </div>
                       ))}
                     </div>
                     <div className="d-flex gap-2">
-                      <input type="text" className="form-input" placeholder="Nuevo medio..." value={newConceptInput} onChange={e => setNewConceptInput(e.target.value)} />
-                      <button type="button" className="btn-new-task" onClick={handleAddConceptTag}><i className="bi bi-plus-lg"></i></button>
+                      <input
+                        type="text"
+                        className="form-input"
+                        placeholder="Nuevo medio de cobro..."
+                        value={newConceptInput}
+                        onChange={(e) => setNewConceptInput(e.target.value)}
+                        disabled={!getNextEmptyMedioSlot(conceptsList)}
+                      />
+                      <button
+                        type="button"
+                        className="btn-new-task"
+                        onClick={handleAddConceptTag}
+                        disabled={!getNextEmptyMedioSlot(conceptsList)}
+                      >
+                        <i className="bi bi-plus-lg"></i>
+                      </button>
                     </div>
                   </div>
                 </div>
               )}
 
               {/* Compras */}
-              {renderModuleHeader('compras', 'Compras', 'Registro de egresos y facturas de proveedores.', 'bi-cart-fill', 'bg-compras')}
+              {renderModuleHeader('compras', MODULE_LABELS.compras, MODULE_DESCRIPTIONS.compras, 'bi-cart-fill', 'bg-compras')}
               {modules.compras && expandedModule === 'compras' && (
                 <div style={{ padding: '5px 20px 10px 48px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
-                  <div style={{ backgroundColor: '#f8fafc', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-                    <div className="small text-muted">Las categorías y formas de pago de compras se configuran en sus respectivas secciones.</div>
+                  <div style={{ backgroundColor: '#fff', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                    <div className="small text-muted">Las categorías y formas de pago de compras se configuran en sus respectivas secciones del módulo.</div>
                   </div>
                 </div>
               )}
 
               {/* Adelantos */}
-              {renderModuleHeader('adelantos', 'Adelantos', 'Retiros de empleados (Dinero/Mercadería).', 'bi-cash-stack', 'bg-adelantos')}
+              {renderModuleHeader('adelantos', MODULE_LABELS.adelantos, MODULE_DESCRIPTIONS.adelantos, 'bi-cash-stack', 'bg-adelantos')}
               {modules.adelantos && expandedModule === 'adelantos' && (
                 <div style={{ padding: '5px 20px 10px 48px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                     <label className="d-flex align-items-center gap-2 small cursor-pointer">
-                      <input type="checkbox" checked={allowDinero} onChange={e => setAllowDinero(e.target.checked)} /> Permitir Efectivo
+                      <input type="checkbox" checked={allowDinero} onChange={e => setAllowDinero(e.target.checked)} /> {ADELANTO_EFECTIVO}
                     </label>
                     <label className="d-flex align-items-center gap-2 small cursor-pointer">
-                      <input type="checkbox" checked={allowMercaderia} onChange={e => setAllowMercaderia(e.target.checked)} /> Permitir Mercadería
+                      <input type="checkbox" checked={allowMercaderia} onChange={e => setAllowMercaderia(e.target.checked)} /> {ADELANTO_MERCADERIA}
                     </label>
                   </div>
                   {allowDinero && (
                     <div className="mt-2">
-                      <label className="form-label fw-bold small text-muted mb-2">Cajas habilitadas para dinero</label>
+                      <label className="form-label fw-bold small text-muted mb-2">Cajas habilitadas para {ADELANTO_EFECTIVO.toLowerCase()}</label>
                       <div className="d-flex flex-wrap gap-2">
                         <label className="small d-flex align-items-center gap-1 cursor-pointer">
                           <input type="checkbox" checked={rendicionAllowAdelantos} onChange={e => setRendicionAllowAdelantos(e.target.checked)} /> {rendicionCajaNombre}
@@ -1359,419 +1622,68 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                   )}
                 </div>
               )}
+
               {/* Rendiciones */}
-              {renderModuleHeader('rendiciones', 'Caja fuerte', 'Historial y saldos de caja fuerte (Rendiciones).', 'bi-clipboard-data', 'bg-rendiciones')}
-
-                {modules.rendiciones && expandedModule === 'rendiciones' && (
-                  <div style={{ padding: '5px 20px 10px 48px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
-                    
-                    {/* Caja Nombre input */}
-                    <div className="form-group" style={{ maxWidth: '280px', margin: 0 }}>
-                      <label className="form-label fw-bold small text-muted">Nombre de la Caja / Fondo</label>
-                      <input 
-                        type="text" 
-                        placeholder="Caja fuerte"
-                        className="form-input" 
-                        value={rendicionCajaNombre}
-                        onChange={(e) => setRendicionCajaNombre(e.target.value)}
-                        style={{ fontSize: '0.85rem', padding: '8px 10px', height: '36px', marginTop: '5px' }}
-                      />
-                      <small style={{ color: 'var(--text-muted)', fontSize: '0.75rem', display: 'block', marginTop: '4px' }}>
-                        Nombre a mostrar en los listados y formularios de registro (ej: Caja fuerte, Rendición, Caja Chica).
-                      </small>
-                    </div>
-
-                    {/* New: Operarios can withdraw money (Top and Right-aligned) */}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px dashed #e2e8f0', marginBottom: '10px' }}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: '0.9rem', fontWeight: 'bold', color: 'var(--text-dark)' }}>Operarios pueden retirar dinero</div>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Habilita el botón de retiro en Caja fuerte para usuarios con nivel Operario.</div>
-                      </div>
-                      <label className="switch" style={{ marginLeft: '15px' }}>
-                        <input 
-                          type="checkbox" 
-                          checked={operarioCanRetiros}
-                          onChange={(e) => setOperarioCanRetiros(e.target.checked)}
-                        />
-                        <span className="slider round"></span>
+              {renderModuleHeader('rendiciones', MODULE_LABELS.rendiciones, MODULE_DESCRIPTIONS.rendiciones, 'bi-clipboard-data', 'bg-rendiciones')}
+              {modules.rendiciones && expandedModule === 'rendiciones' && (
+                <div style={{ padding: '5px 20px 10px 48px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                  <div className="form-group" style={{ maxWidth: '280px', margin: 0 }}>
+                    <label className="form-label fw-bold small text-muted">Nombre de la Caja / Fondo</label>
+                    <input 
+                      type="text" 
+                      placeholder={DEFAULT_CAJA_FUERTE_NAME}
+                      className="form-input" 
+                      value={rendicionCajaNombre}
+                      onChange={(e) => setRendicionCajaNombre(e.target.value)}
+                      style={{ fontSize: '0.85rem', padding: '8px 10px', height: '36px', marginTop: '5px' }}
+                    />
+                    <small style={{ color: 'var(--text-muted)', fontSize: '0.75rem', display: 'block', marginTop: '4px' }}>
+                      Nombre a mostrar en los listados y formularios (ej: {DEFAULT_CAJA_FUERTE_NAME}, Rendición, Caja Chica).
+                    </small>
+                  </div>
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label className="form-label fw-bold small text-muted">Módulos habilitados para su uso</label>
+                    <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', marginTop: '5px' }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.9rem', color: 'var(--text-dark)' }}>
+                        <input type="checkbox" checked={rendicionAllowCompras} onChange={(e) => setRendicionAllowCompras(e.target.checked)} style={{ width: '16px', height: '16px', cursor: 'pointer' }} />
+                        {MODULE_LABELS.compras}
+                      </label>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.9rem', color: 'var(--text-dark)' }}>
+                        <input type="checkbox" checked={rendicionAllowPagos} onChange={(e) => setRendicionAllowPagos(e.target.checked)} style={{ width: '16px', height: '16px', cursor: 'pointer' }} />
+                        Pagos
+                      </label>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.9rem', color: 'var(--text-dark)' }}>
+                        <input type="checkbox" checked={rendicionAllowAdelantos} onChange={(e) => setRendicionAllowAdelantos(e.target.checked)} style={{ width: '16px', height: '16px', cursor: 'pointer' }} />
+                        {MODULE_LABELS.adelantos}
                       </label>
                     </div>
-
-                    {/* Permissions / Usage Checkboxes */}
-                    <div className="form-group" style={{ margin: 0 }}>
-                      <label className="form-label fw-bold small text-muted">MODULOS habilitados para su Uso</label>
-                      <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', marginTop: '5px' }}>
-                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.9rem', color: 'var(--text-dark)' }}>
-                          <input 
-                            type="checkbox" 
-                            checked={rendicionAllowCompras} 
-                            onChange={(e) => setRendicionAllowCompras(e.target.checked)} 
-                            style={{ width: '16px', height: '16px', cursor: 'pointer' }}
-                          />
-                          Compras
-                        </label>
-                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.9rem', color: 'var(--text-dark)' }}>
-                          <input 
-                            type="checkbox" 
-                            checked={rendicionAllowPagos} 
-                            onChange={(e) => setRendicionAllowPagos(e.target.checked)} 
-                            style={{ width: '16px', height: '16px', cursor: 'pointer' }}
-                          />
-                          Pagos
-                        </label>
-                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.9rem', color: 'var(--text-dark)' }}>
-                          <input 
-                            type="checkbox" 
-                            checked={rendicionAllowAdelantos} 
-                            onChange={(e) => setRendicionAllowAdelantos(e.target.checked)} 
-                            style={{ width: '16px', height: '16px', cursor: 'pointer' }}
-                          />
-                          Adelantos
-                        </label>
-                      </div>
-
-                    </div>
                   </div>
-                )}
+                </div>
+              )}
 
               {/* Clientes / Pedidos */}
-              {renderModuleHeader('clientes', 'Pedidos', 'Registro de pedidos, direcciones y saldos de clientes.', 'bi-journal-text', 'bg-clientes')}
+              {renderModuleHeader('clientes', MODULE_LABELS.clientes, MODULE_DESCRIPTIONS.clientes, 'bi-journal-text', 'bg-clientes')}
 
               {/* Pago Proveedores */}
-              {renderModuleHeader('pago-proveedores', 'Pago Proveedores', 'Gestión de pagos a proveedores y caja chica.', 'bi-wallet2', 'bg-success')}
+              {renderModuleHeader('pago-proveedores', MODULE_LABELS['pago-proveedores'], MODULE_DESCRIPTIONS['pago-proveedores'], 'bi-wallet2', 'bg-success')}
 
-              {/* Pago Impuestos/Servicios */}
-              {renderModuleHeader('pago-impuestos', 'Pago Impuestos/Servicios', 'Pago de servicios, tasas e impuestos periódicos sin factura.', 'bi-receipt', 'bg-success')}
+              {/* Pagos */}
+              {renderModuleHeader('pago-impuestos', MODULE_LABELS['pago-impuestos'], MODULE_DESCRIPTIONS['pago-impuestos'], 'bi-receipt', 'bg-success')}
 
               {/* Tareas */}
-              {renderModuleHeader('tareas', 'Tareas del Dashboard', 'Listado de tareas de mantenimiento/limpieza.', 'bi-list-check', 'bg-config')}
+              {renderModuleHeader('tareas', MODULE_LABELS.tareas, MODULE_DESCRIPTIONS.tareas, 'bi-list-check', 'bg-config')}
 
               {/* Proveedores */}
-              {renderModuleHeader('proveedores', 'Módulo Proveedores', 'Cuenta corriente y registro de pagos a proveedores.', 'bi-truck', 'bg-info')}
+              {renderModuleHeader('proveedores', MODULE_LABELS.proveedores, MODULE_DESCRIPTIONS.proveedores, 'bi-truck', 'bg-info')}
 
               {/* Empleados */}
-              {renderModuleHeader('empleados', 'Módulo Empleados', 'Gestión de personal y adelantos/sueldos.', 'bi-person-badge', 'bg-primary')}
+              {renderModuleHeader('empleados', MODULE_LABELS.empleados, MODULE_DESCRIPTIONS.empleados, 'bi-person-badge', 'bg-primary')}
 
               {/* Resultados */}
-              {renderModuleHeader('resultados', 'Módulo Resultados', 'Dashboard de estadísticas y utilidad.', 'bi-graph-up', 'bg-dark')}
+              {renderModuleHeader('resultados', MODULE_LABELS.resultados, MODULE_DESCRIPTIONS.resultados, 'bi-graph-up', 'bg-dark')}
 
               {/* Pagos Periódicos */}
-              {renderModuleHeader('pagos-periodicos', 'Módulo Pagos Periódicos', 'Gestión de gastos recurrentes y vencimientos.', 'bi-calendar-check', 'bg-secondary')}
-
-              {/* Permisos por Categoría (No es módulo, no lleva color picker) */}
-              <div style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--border-color)', paddingBottom: (expandedModule === 'role_perms') ? '15px' : '0' }}>
-                <div className="toggle-item" style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: (expandedModule === 'role_perms') ? '10px' : '15px' }}>
-                  <div 
-                    className="toggle-info" 
-                    onClick={() => setExpandedModule(expandedModule === 'role_perms' ? null : 'role_perms')} 
-                    style={{ 
-                      cursor: 'pointer', 
-                      flex: 1, 
-                      display: 'flex', 
-                      alignItems: 'center' 
-                    }}
-                  >
-                    <i 
-                      className={`bi bi-chevron-${expandedModule === 'role_perms' ? 'down' : 'right'}`} 
-                      style={{ 
-                        fontSize: '1.25rem', 
-                        color: 'var(--text-dark)', 
-                        marginRight: '12px',
-                        fontWeight: 'bold',
-                        WebkitTextStroke: '0.8px',
-                        cursor: 'pointer',
-                        display: 'inline-block',
-                        width: '16px',
-                        textAlign: 'center'
-                      }}
-                    ></i>
-                    <span className="toggle-icon" style={{ backgroundColor: '#475569' }}><i className="bi bi-shield-lock-fill"></i></span>
-                    <div>
-                      <div className="toggle-label">Permisos por Categoría</div>
-                      <div className="toggle-desc">Habilitar accesos extras para Operarios y Cajeros.</div>
-                    </div>
-                  </div>
-                </div>
-
-                {expandedModule === 'role_perms' && (
-                  <div style={{ padding: '5px 20px 10px 48px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div>
-                        <div style={{ fontSize: '0.9rem', fontWeight: 'bold' }}>Cajero puede ver Compras</div>
-                        <div className="small text-muted">Habilita el acceso al módulo de Compras para el nivel Cajero.</div>
-                      </div>
-                      <label className="switch">
-                        <input 
-                          type="checkbox" 
-                          checked={cajeroCanCompras}
-                          onChange={(e) => setCajeroCanCompras(e.target.checked)}
-                        />
-                        <span className="slider"></span>
-                      </label>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div>
-                        <div style={{ fontSize: '0.9rem', fontWeight: 'bold' }}>Operario puede ver Caja fuerte</div>
-                        <div className="small text-muted">Habilita el acceso al módulo de Rendiciones (Caja fuerte) para el nivel Operario.</div>
-                      </div>
-                      <label className="switch">
-                        <input 
-                          type="checkbox" 
-                          checked={operarioCanRetiros}
-                          onChange={(e) => setOperarioCanRetiros(e.target.checked)}
-                        />
-                        <span className="slider"></span>
-                      </label>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Configuración WhatsApp (No es módulo, no lleva color picker) */}
-              <div className="toggle-item" style={{ borderBottom: 'none', flexDirection: 'column', alignItems: 'stretch' }}>
-                <div className="toggle-info" onClick={() => setExpandedModule(expandedModule === 'whatsapp' ? null : 'whatsapp')} style={{ cursor: 'pointer' }}>
-                  <div style={{ width: '16px', marginRight: '12px' }}>
-                    <i className={`bi bi-chevron-${expandedModule === 'whatsapp' ? 'down' : 'right'}`} style={{ fontSize: '0.8rem' }}></i>
-                  </div>
-                  <span className="toggle-icon bg-success"><i className="bi bi-whatsapp"></i></span>
-                  <div>
-                    <div className="toggle-label">Configuración WhatsApp</div>
-                    <div className="toggle-desc">Personalizar mensajes de envío.</div>
-                  </div>
-                </div>
-
-                {expandedModule === 'whatsapp' && (
-                  <div style={{ 
-                    padding: '15px 15px 15px 45px', 
-                    backgroundColor: 'var(--bg-light)', 
-                    borderRadius: '8px',
-                    marginTop: '10px',
-                    marginBottom: '5px'
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '15px', flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: '0.8rem', fontWeight: 'bold', color: 'var(--text-muted)', minWidth: '150px' }}>
-                        Mensaje WhatsApp:
-                      </span>
-                      <input
-                        type="text"
-                        className="form-input"
-                        placeholder="Mensaje de WhatsApp..."
-                        value={whatsappTemplate}
-                        onChange={(e) => setWhatsappTemplate(e.target.value)}
-                        style={{ fontSize: '0.85rem', padding: '6px 10px', flex: '1 1 250px', height: '34px', margin: 0 }}
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Colores de Módulos (Consolidado y Drag & Drop) */}
-              <div style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--border-color)', paddingBottom: (expandedModule === 'colors') ? '15px' : '0' }}>
-                <div className="toggle-item" style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: (expandedModule === 'colors') ? '10px' : '15px' }}>
-                  <div 
-                    className="toggle-info" 
-                    onClick={() => setExpandedModule(expandedModule === 'colors' ? null : 'colors')} 
-                    style={{ 
-                      cursor: 'pointer', 
-                      flex: 1, 
-                      display: 'flex', 
-                      alignItems: 'center' 
-                    }}
-                  >
-                    <div style={{ width: '16px', marginRight: '12px' }}>
-                      <i className={`bi bi-chevron-${expandedModule === 'colors' ? 'down' : 'right'}`} style={{ fontSize: '0.8rem' }}></i>
-                    </div>
-                    <span className="toggle-icon" style={{ backgroundColor: '#f59e0b' }}><i className="bi bi-palette-fill"></i></span>
-                    <div>
-                      <div className="toggle-label">Colores de Módulos</div>
-                      <div className="toggle-desc">Personalizar colores arrastrándolos sobre cada módulo.</div>
-                    </div>
-                  </div>
-                </div>
-
-                {expandedModule === 'colors' && (
-                  <div style={{ padding: '10px 20px 10px 48px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                    <div className="small text-muted" style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: '10px' }}>
-                      <i className="bi bi-info-circle me-1 text-primary"></i>
-                      <strong>¿Cómo usar?</strong> Arrastra un color de la paleta y suéltalo sobre un módulo. También puedes hacer clic en un módulo para seleccionarlo y luego tocar un color en la paleta. Si arrastras un color ya asignado, se intercambiarán.
-                    </div>
-
-                    {/* La Paleta Única */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                      <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: 'var(--text-muted)' }}>Paleta de Colores</div>
-                      <div style={{ 
-                        display: 'flex', 
-                        flexWrap: 'wrap', 
-                        gap: '10px', 
-                        padding: '12px', 
-                        backgroundColor: '#f8fafc', 
-                        borderRadius: '10px', 
-                        border: '1px solid #e2e8f0',
-                        justifyContent: 'center'
-                      }}>
-                        {PRESET_COLORS.map(color => {
-                          const isUsed = Object.values(moduleColors).includes(color);
-                          const associatedModuleKey = Object.keys(moduleColors).find(k => moduleColors[k] === color && modules[k] !== false);
-                          
-                          const associatedLabel = associatedModuleKey === 'cierre' ? 'Cerrar Caja' :
-                                                   associatedModuleKey === 'compras' ? 'Compras' :
-                                                   associatedModuleKey === 'adelantos' ? 'Adelantos' :
-                                                   associatedModuleKey === 'pago-proveedores' ? 'Pago Proveedores' :
-                                                   associatedModuleKey === 'pago-impuestos' ? 'Pago Impuestos/Servicios' :
-                                                   associatedModuleKey === 'rendiciones' ? 'Caja fuerte' :
-                                                   associatedModuleKey === 'pagos-periodicos' ? 'Pagos Periódicos' :
-                                                   associatedModuleKey === 'clientes' ? 'Pedidos' :
-                                                   associatedModuleKey === 'tareas' ? 'Tareas del Dashboard' :
-                                                   associatedModuleKey === 'proveedores' ? 'Módulo Proveedores' :
-                                                   associatedModuleKey === 'empleados' ? 'Módulo Empleados' :
-                                                   associatedModuleKey === 'resultados' ? 'Módulo Resultados' : associatedModuleKey;
-
-                          const tooltip = associatedModuleKey 
-                            ? `En uso por: ${associatedLabel} (arrástralo para intercambiar)` 
-                            : 'Disponible';
-
-                          return (
-                            <div
-                              key={color}
-                              draggable
-                              onDragStart={(e) => {
-                                e.dataTransfer.setData("color", color);
-                                e.dataTransfer.effectAllowed = "move";
-                              }}
-                              onClick={() => {
-                                if (selectedModuleForColor) {
-                                  handleColorDrop(selectedModuleForColor, color);
-                                  setSelectedModuleForColor(null);
-                                }
-                              }}
-                              style={{
-                                width: '28px',
-                                height: '28px',
-                                borderRadius: '50%',
-                                backgroundColor: color,
-                                cursor: selectedModuleForColor ? 'pointer' : 'grab',
-                                border: '2px solid white',
-                                boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-                                opacity: isUsed ? 0.35 : 1,
-                                transform: selectedModuleForColor ? 'scale(1.15)' : 'scale(1)',
-                                transition: 'all 0.15s ease'
-                              }}
-                              className="hover-scale"
-                              title={tooltip}
-                            />
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    {/* Lista de Módulos Activos (Drop Targets) */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '10px' }}>
-                      <div style={{ fontSize: '0.8rem', fontWeight: 'bold', color: 'var(--text-muted)' }}>Módulos Habilitados (Suelta el color aquí)</div>
-                      {Object.keys(modules)
-                        .filter(k => modules[k] !== false)
-                        .map(k => {
-                          const label = k === 'cierre' ? 'Cerrar Caja' :
-                                        k === 'compras' ? 'Compras' :
-                                        k === 'adelantos' ? 'Adelantos' :
-                                        k === 'pago-proveedores' ? 'Pago Proveedores' :
-                                        k === 'pago-impuestos' ? 'Pago Impuestos/Servicios' :
-                                        k === 'rendiciones' ? 'Caja fuerte' :
-                                        k === 'pagos-periodicos' ? 'Módulo Pagos Periódicos' :
-                                        k === 'clientes' ? 'Pedidos' :
-                                        k === 'tareas' ? 'Tareas del Dashboard' :
-                                        k === 'proveedores' ? 'Módulo Proveedores' :
-                                        k === 'empleados' ? 'Módulo Empleados' :
-                                        k === 'resultados' ? 'Módulo Resultados' : k;
-
-                          const isDragOver = dragOverModule === k;
-                          const isSelected = selectedModuleForColor === k;
-
-                          return (
-                            <div
-                              key={k}
-                              onDragOver={(e) => e.preventDefault()}
-                              onDragEnter={() => setDragOverModule(k)}
-                              onDragLeave={() => setDragOverModule(null)}
-                              onDrop={(e) => {
-                                e.preventDefault();
-                                setDragOverModule(null);
-                                const droppedColor = e.dataTransfer.getData("color");
-                                if (droppedColor) {
-                                  handleColorDrop(k, droppedColor);
-                                }
-                              }}
-                              onClick={() => setSelectedModuleForColor(isSelected ? null : k)}
-                              style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'space-between',
-                                padding: '12px 15px',
-                                borderRadius: '8px',
-                                border: isDragOver 
-                                  ? '2px dashed #3b82f6' 
-                                  : isSelected 
-                                    ? '2px solid #3b82f6' 
-                                    : '1px solid #e2e8f0',
-                                backgroundColor: isDragOver 
-                                  ? '#eff6ff' 
-                                  : isSelected 
-                                    ? '#f0f9ff' 
-                                    : '#fff',
-                                boxShadow: isSelected ? '0 2px 4px rgba(59,130,246,0.1)' : 'none',
-                                transition: 'all 0.15s ease',
-                                cursor: 'pointer'
-                              }}
-                            >
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                <span 
-                                  className="toggle-icon" 
-                                  style={{ 
-                                    backgroundColor: moduleColors[k] || '#cbd5e1', 
-                                    width: '32px', 
-                                    height: '32px', 
-                                    display: 'inline-flex', 
-                                    alignItems: 'center', 
-                                    justifyContent: 'center', 
-                                    borderRadius: '8px',
-                                    color: '#fff',
-                                    fontSize: '1rem',
-                                    transition: 'background-color 0.2s ease'
-                                  }}
-                                >
-                                  <i className={`bi ${getModuleIcon(k)}`}></i>
-                                </span>
-                                <div>
-                                  <div style={{ fontWeight: 'bold', fontSize: '0.88rem', color: isSelected ? '#0369a1' : 'var(--text-dark)' }}>{label}</div>
-                                  {isSelected && <span style={{ fontSize: '0.7rem', color: '#0284c7' }}>Seleccionado. Elige un color de la paleta arriba.</span>}
-                                </div>
-                              </div>
-
-                              {/* Bubble Drop target / Current Color preview */}
-                              <div style={{
-                                width: '36px',
-                                height: '36px',
-                                borderRadius: '50%',
-                                backgroundColor: moduleColors[k] || '#cbd5e1',
-                                border: isDragOver ? '3px dashed #3b82f6' : isSelected ? '3px solid #3b82f6' : '3px solid #f1f5f9',
-                                boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-                                transform: isDragOver ? 'scale(1.15)' : 'scale(1)',
-                                transition: 'all 0.15s ease',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center'
-                              }}>
-                                {isDragOver && (
-                                  <i className="bi bi-download" style={{ color: 'white', fontSize: '1rem', textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}></i>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })}
-                    </div>
-                  </div>
-                )}
-              </div>
+              {renderModuleHeader('pagos-periodicos', MODULE_LABELS['pagos-periodicos'], MODULE_DESCRIPTIONS['pagos-periodicos'], 'bi-calendar-check', 'bg-secondary')}
 
             </div>
           )}

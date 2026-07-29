@@ -1,5 +1,14 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { db } from '../supabaseClient';
+import { MODULE_LABELS, DEFAULT_CAJA_FUERTE_NAME } from '../moduleLabels';
+import {
+  ADELANTO_EFECTIVO,
+  ADELANTO_MERCADERIA,
+  formatAdelantoConceptLabel,
+  getAdelantoConceptOptions,
+  isAdelantoMercaderiaConcept,
+  resolveAdelantoConceptSelection,
+} from '../adelantoConcepts';
 
 function Adelantos({ navigate, modules, accentColor }) {
   const isSameLocalDate = (isoString, localDateString) => {
@@ -22,14 +31,14 @@ function Adelantos({ navigate, modules, accentColor }) {
   });
 
   const [rendConfig, setRendConfig] = useState({
-    caja_nombre: 'Caja fuerte',
+    caja_nombre: DEFAULT_CAJA_FUERTE_NAME,
     allow_adelantos: true,
     allow_pagos: true
   });
 
   // Form states (Employees)
   const [empleado, setEmpleado] = useState('');
-  const [concepto, setConcepto] = useState('Adelanto $'); // 'Adelanto $' or 'Adelanto Merc'
+  const [concepto, setConcepto] = useState(ADELANTO_EFECTIVO);
   const [pagoOrigenEmp, setPagoOrigenEmp] = useState(''); // Shift name or 'Rendición'
   const [monto, setMonto] = useState('');
   const [observacion, setObservacion] = useState('');
@@ -51,6 +60,12 @@ function Adelantos({ navigate, modules, accentColor }) {
 
   // Refs
   const amountInputRef = useRef(null);
+
+  const conceptOptions = useMemo(() => getAdelantoConceptOptions(config), [config]);
+  const selectedConcepto = useMemo(
+    () => resolveAdelantoConceptSelection(concepto, config),
+    [concepto, config]
+  );
 
   // Load configuration and data on mount
   useEffect(() => {
@@ -74,15 +89,15 @@ function Adelantos({ navigate, modules, accentColor }) {
     }
 
     if (!loadedConfig.allow_dinero && loadedConfig.allow_mercaderia) {
-      setConcepto('Adelanto Merc');
+      setConcepto(ADELANTO_MERCADERIA);
     } else {
-      setConcepto('Adelanto $');
+      setConcepto(ADELANTO_EFECTIVO);
     }
 
     const setupShifts = async () => {
       const shifts = loadedConfig.cajas_posibles.length > 0 ? loadedConfig.cajas_posibles : await db.getCierreTurnos();
       setShiftsAvailableState(shifts || []);
-      const loadedRendConfig = JSON.parse(localStorage.getItem('rendiciones_config') || '{"caja_nombre":"Caja fuerte","allow_adelantos":true,"allow_compras":true,"allow_pagos":true}');
+      const loadedRendConfig = JSON.parse(localStorage.getItem('rendiciones_config') || `{"caja_nombre":"${DEFAULT_CAJA_FUERTE_NAME}","allow_adelantos":true,"allow_compras":true,"allow_pagos":true}`);
       setRendConfig(loadedRendConfig);
 
       if (shifts && shifts.length > 0) {
@@ -95,6 +110,10 @@ function Adelantos({ navigate, modules, accentColor }) {
     setupShifts();
     loadData();
   }, []);
+
+  useEffect(() => {
+    setConcepto((current) => resolveAdelantoConceptSelection(current, config));
+  }, [config.allow_dinero, config.allow_mercaderia]);
 
   const loadData = async () => {
     setLoading(true);
@@ -170,7 +189,7 @@ function Adelantos({ navigate, modules, accentColor }) {
       return;
     }
 
-    if (concepto === 'Adelanto Merc' && !observacion.trim()) {
+    if (selectedConcepto === ADELANTO_MERCADERIA && !observacion.trim()) {
       alert("Por favor ingrese el detalle de la mercadería retirada.");
       return;
     }
@@ -186,7 +205,7 @@ function Adelantos({ navigate, modules, accentColor }) {
     try {
       const formattedDate = new Date().toISOString();
       let finalObservation = observacion.trim();
-      let finalConcepto = concepto;
+      let finalConcepto = selectedConcepto;
 
       if (pagoOrigenEmp === 'Rendición') {
         finalConcepto = 'Adelanto Rendición';
@@ -254,25 +273,26 @@ function Adelantos({ navigate, modules, accentColor }) {
   };
 
   return (
-    <div className="container-fluid animate__animated animate__fadeIn" style={{ maxWidth: '1000px' }}>
-      <div className="page-header d-flex justify-content-between align-items-center mb-4">
-        <div>
-          <h2 className="page-title mb-0">Adelantos a Empleados</h2>
-          <p className="text-muted small mb-0">Registro de adelantos en efectivo o mercadería</p>
+    <div className="animate__animated animate__fadeIn">
+      <div className="page-card shadow-sm" style={{ borderLeft: '5px solid ' + (accentColor || '#ec4899') }}>
+        <div className="page-header d-flex justify-content-between align-items-center mb-4">
+          <div>
+            <h2 className="page-title mb-0">{MODULE_LABELS.adelantos}</h2>
+            <p className="text-muted small mb-0">Registro de {ADELANTO_EFECTIVO.toLowerCase()} o {ADELANTO_MERCADERIA.toLowerCase()}</p>
+          </div>
+          <div className="d-flex gap-2">
+            <button className="btn btn-outline-secondary btn-sm" onClick={() => navigate('employees')}>
+              <i className="bi bi-people me-1"></i> Ver Empleados
+            </button>
+          </div>
         </div>
-        <div className="d-flex gap-2">
-          <button className="btn btn-outline-secondary btn-sm" onClick={() => navigate('employees')}>
-            <i className="bi bi-people me-1"></i> Ver Empleados
-          </button>
-        </div>
-      </div>
 
-      <div className="row g-4">
-        {/* Form Column */}
-        <div className="col-12 col-lg-5">
-          <div className="page-card shadow-sm h-100" style={{ borderLeft: '5px solid ' + (accentColor || '#ec4899') }}>
-            <h5 className="section-title mb-3">Nuevo Adelanto</h5>
-            <form onSubmit={handleSaveAdelanto}>
+        <div className="row g-4">
+          {/* Form Column */}
+          <div className="col-12 col-lg-5 border-lg-end">
+            <div className="h-100 pe-lg-3">
+              <h5 className="section-title mb-3">Nuevo Adelanto</h5>
+            <form onSubmit={handleSaveAdelanto} autoComplete="off">
               <div className="mb-3 position-relative">
                 <label className="form-label small fw-bold">Empleado</label>
                 <div className="input-group">
@@ -316,11 +336,16 @@ function Adelantos({ navigate, modules, accentColor }) {
                   <label className="form-label small fw-bold">Concepto</label>
                   <select
                     className="form-select"
-                    value={concepto}
+                    name="adelanto-concepto"
+                    autoComplete="off"
+                    value={selectedConcepto}
                     onChange={(e) => setConcepto(e.target.value)}
                   >
-                    {config.allow_dinero && <option value="Adelanto $">Adelanto $</option>}
-                    {config.allow_mercaderia && <option value="Adelanto Merc">Adelanto Merc</option>}
+                    {conceptOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div className="col-6">
@@ -361,10 +386,10 @@ function Adelantos({ navigate, modules, accentColor }) {
                 <textarea
                   className="form-control"
                   rows="2"
-                  placeholder={concepto === 'Adelanto Merc' ? "Ej: 2 Hamburguesas, 1 Gaseosa..." : "Notas opcionales..."}
+                  placeholder={selectedConcepto === ADELANTO_MERCADERIA ? "Ej: 2 Hamburguesas, 1 Gaseosa..." : "Notas opcionales..."}
                   value={observacion}
                   onChange={(e) => setObservacion(e.target.value)}
-                  required={concepto === 'Adelanto Merc'}
+                  required={selectedConcepto === ADELANTO_MERCADERIA}
                 ></textarea>
               </div>
 
@@ -391,13 +416,13 @@ function Adelantos({ navigate, modules, accentColor }) {
                 </div>
               )}
             </form>
+            </div>
           </div>
-        </div>
 
-        {/* Table Column */}
-        <div className="col-12 col-lg-7">
-          <div className="page-card shadow-sm h-100" style={{ borderLeft: '5px solid ' + (accentColor || '#ec4899') }}>
-            <div className="d-flex justify-content-between align-items-center mb-3">
+          {/* Table Column */}
+          <div className="col-12 col-lg-7">
+            <div className="h-100 ps-lg-3">
+              <div className="d-flex justify-content-between align-items-center mb-3">
               <h5 className="section-title mb-0">Registros de Hoy</h5>
               <span className="badge bg-light text-dark border">{todayAdvances.length} movimientos</span>
             </div>
@@ -430,8 +455,8 @@ function Adelantos({ navigate, modules, accentColor }) {
                         <td className="fw-bold">{mov.empleado}</td>
                         <td>
                           <div className="d-flex flex-column">
-                            <span className={`badge ${mov.concepto?.includes('Merc') ? 'bg-info-subtle text-info' : 'bg-success-subtle text-success'} align-self-start`} style={{ fontSize: '0.65rem' }}>
-                              {mov.concepto}
+                            <span className={`badge ${isAdelantoMercaderiaConcept(mov.concepto) ? 'bg-info-subtle text-info' : 'bg-success-subtle text-success'} align-self-start`} style={{ fontSize: '0.65rem' }}>
+                              {formatAdelantoConceptLabel(mov.concepto)}
                             </span>
                             {mov.observacion && <small className="text-muted mt-1 text-truncate" style={{ maxWidth: '150px' }} title={mov.observacion}>{mov.observacion}</small>}
                           </div>
@@ -442,6 +467,7 @@ function Adelantos({ navigate, modules, accentColor }) {
                   )}
                 </tbody>
               </table>
+            </div>
             </div>
           </div>
         </div>

@@ -1,5 +1,20 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef, useLayoutEffect, useMemo } from 'react'
 import { db, isSupabaseConfigured } from '../supabaseClient'
+import {
+  normalizeRolePermissions,
+  hasModulePermission,
+  getEnabledPermissionModules,
+  getTaskRoleLabel,
+  getTaskRoleOptions,
+  taskVisibleForRole,
+  normalizeRoleKey,
+} from '../rolePermissions'
+import { MODULE_LABELS, DEFAULT_CAJA_FUERTE_NAME } from '../moduleLabels'
+import ModuleCardLabel, { REFERENCE_MODULE_LABEL } from '../components/ModuleCardLabel'
+
+/** Ícono central: ~42% del alto del tile (entre 25% chico y ~58% grande). */
+const MODULE_ICON_HEIGHT_RATIO = 0.42;
+const MODULE_ICON_HEIGHT_RATIO_MOBILE = 0.36;
 
 const DEFAULT_MODULE_COLORS = {
   cierre: '#f59e0b',
@@ -21,50 +36,40 @@ function Dashboard({ navigate, modules, moduleColors, refreshModules, profile })
   const [modalOpen, setModalOpen] = useState(false);
   const [newTaskText, setNewTaskText] = useState('');
   const [newTaskCaracter, setNewTaskCaracter] = useState('Normal');
+  const [newTaskRole, setNewTaskRole] = useState('operario');
   const [dbMode, setDbMode] = useState('demo');
 
   const [rendConfig, setRendConfig] = useState({
-    caja_nombre: 'Caja fuerte'
+    caja_nombre: DEFAULT_CAJA_FUERTE_NAME
   });
 
-  // Helper to check permissions
-  const hasPermission = (moduleId) => {
-    if (!profile) return false;
-    if (profile.role === 'admin') return true;
+  const [rolePermissions, setRolePermissions] = useState(null);
+  const menuGridRef = useRef(null);
+  const labelProbeRef = useRef(null);
+  const [uniformLabelPx, setUniformLabelPx] = useState(null);
+  const [moduleIconPx, setModuleIconPx] = useState(null);
 
-    // Load custom role permissions from DB/Local
-    const rolePerms = JSON.parse(localStorage.getItem('role_permissions') || '{"cajero_can_compras":false,"operario_can_retiros":false}');
-    
-    const role = profile.role; // 'admin', 'operario', 'cajero'
+  const hasPermission = (moduleId) =>
+    hasModulePermission(rolePermissions, profile, moduleId, modules);
 
-    // Basic Cajero permissions
-    const cajeroAllowed = ['cierre', 'clientes', 'pagos-periodicos'];
-    if (rolePerms.cajero_can_compras) cajeroAllowed.push('compras');
-
-    // Operario inherits Cajero + specific ones
-    const operarioAllowed = [...cajeroAllowed, 'adelantos', 'pago-proveedores', 'pago-impuestos'];
-    if (rolePerms.operario_can_retiros) operarioAllowed.push('rendiciones');
-
-    if (role === 'cajero') {
-      return cajeroAllowed.includes(moduleId);
-    }
-    if (role === 'operario') {
-      return operarioAllowed.includes(moduleId);
-    }
-
-    return false;
-  };
+  const roleLabels = normalizeRolePermissions(rolePermissions).roles;
+  const taskRoleOptions = getTaskRoleOptions(rolePermissions);
+  const visibleTasks = tasks.filter((task) =>
+    taskVisibleForRole(task.usuario, profile?.role)
+  );
 
   // Load tasks on component mount
   useEffect(() => {
     loadTasks();
     setDbMode(isSupabaseConfigured() ? 'supabase' : 'demo');
-    const loadedRendConfig = JSON.parse(localStorage.getItem('rendiciones_config') || '{"caja_nombre":"Caja fuerte"}');
+    const loadedRendConfig = JSON.parse(localStorage.getItem('rendiciones_config') || `{"caja_nombre":"${DEFAULT_CAJA_FUERTE_NAME}"}`);
     setRendConfig(loadedRendConfig);
 
-    // Also fetch role permissions to sync with localStorage
-    db.getRolePermissions().then(perms => {
-      if (perms) localStorage.setItem('role_permissions', JSON.stringify(perms));
+    db.getRolePermissions().then((perms) => {
+      if (perms) {
+        localStorage.setItem('role_permissions', JSON.stringify(perms));
+        setRolePermissions(perms);
+      }
     });
   }, []);
 
@@ -99,10 +104,11 @@ function Dashboard({ navigate, modules, moduleColors, refreshModules, profile })
       await db.saveTask({
         tarea: newTaskText,
         caracter: newTaskCaracter,
-        usuario: profile?.full_name || 'Usuario'
+        rol: newTaskRole,
       });
       setNewTaskText('');
       setNewTaskCaracter('Normal');
+      setNewTaskRole(normalizeRoleKey(profile?.role) || 'operario');
       setModalOpen(false);
       loadTasks();
     } catch (e) {
@@ -112,17 +118,17 @@ function Dashboard({ navigate, modules, moduleColors, refreshModules, profile })
 
   // Grid of visible modules based on config AND permissions
   const visibleModules = [
-    { id: 'cierre', label: 'Cerrar Caja', icon: 'bi-currency-dollar', watermark: 'bi-shop', color: 'bg-cierre' },
-    { id: 'compras', label: 'Compras', icon: 'bi-cart-fill', watermark: 'bi-cart-x', color: 'bg-compras' },
-    { id: 'adelantos', label: 'Adelantos', icon: 'bi-cash-stack', watermark: 'bi-people', color: 'bg-adelantos' },
-    { id: 'pago-proveedores', label: 'Pago Proveedores', icon: 'bi-wallet2', watermark: 'bi-cash', color: 'bg-success' },
-    { id: 'pago-impuestos', label: 'Pago Impuestos/Servicios', icon: 'bi-receipt', watermark: 'bi-cash-coin', color: 'bg-success' },
-    { id: 'rendiciones', label: 'Caja fuerte', icon: 'bi-clipboard-data', watermark: 'bi-safe', color: 'bg-rendiciones' },
-    { id: 'pagos-periodicos', label: 'Pagos Periódicos', icon: 'bi-calendar-check', watermark: 'bi-calendar2-week', color: 'bg-secondary' },
-    { id: 'clientes', label: 'Pedidos', icon: 'bi-journal-text', watermark: 'bi-journal-text', color: 'bg-clientes' },
-    { id: 'providers', label: 'Proveedores', icon: 'bi-truck', watermark: 'bi-truck', color: 'bg-info' },
-    { id: 'employees', label: 'Empleados', icon: 'bi-person-badge', watermark: 'bi-people', color: 'bg-employees' },
-    { id: 'results', label: 'Resultados', icon: 'bi-graph-up', watermark: 'bi-bar-chart', color: 'bg-dark' }
+    { id: 'cierre', label: MODULE_LABELS.cierre, icon: 'bi-currency-dollar', watermark: 'bi-shop', color: 'bg-cierre' },
+    { id: 'compras', label: MODULE_LABELS.compras, icon: 'bi-cart-fill', watermark: 'bi-cart-x', color: 'bg-compras' },
+    { id: 'adelantos', label: MODULE_LABELS.adelantos, icon: 'bi-cash-stack', watermark: 'bi-people', color: 'bg-adelantos' },
+    { id: 'pago-proveedores', label: MODULE_LABELS['pago-proveedores'], icon: 'bi-wallet2', watermark: 'bi-cash', color: 'bg-success' },
+    { id: 'pago-impuestos', label: MODULE_LABELS['pago-impuestos'], icon: 'bi-receipt', watermark: 'bi-cash-coin', color: 'bg-success' },
+    { id: 'rendiciones', label: MODULE_LABELS.rendiciones, icon: 'bi-clipboard-data', watermark: 'bi-safe', color: 'bg-rendiciones' },
+    { id: 'pagos-periodicos', label: MODULE_LABELS['pagos-periodicos'], icon: 'bi-calendar-check', watermark: 'bi-calendar2-week', color: 'bg-secondary' },
+    { id: 'clientes', label: MODULE_LABELS.clientes, icon: 'bi-journal-text', watermark: 'bi-journal-text', color: 'bg-clientes' },
+    { id: 'providers', label: MODULE_LABELS.proveedores, icon: 'bi-truck', watermark: 'bi-truck', color: 'bg-info' },
+    { id: 'employees', label: MODULE_LABELS.empleados, icon: 'bi-person-badge', watermark: 'bi-people', color: 'bg-employees' },
+    { id: 'results', label: MODULE_LABELS.resultados, icon: 'bi-graph-up', watermark: 'bi-bar-chart', color: 'bg-dark' }
   ].filter(m => {
     // Map providers/employees/results to their config keys if needed
     const permId = m.id === 'providers' ? 'proveedores' : 
@@ -135,6 +141,69 @@ function Dashboard({ navigate, modules, moduleColors, refreshModules, profile })
     // 2. Check if user has permission for this module
     return hasPermission(permId);
   });
+
+  const longestModuleLabel = useMemo(() => {
+    if (!visibleModules.length) return REFERENCE_MODULE_LABEL;
+    return visibleModules.reduce((longest, module) =>
+      module.label.length > longest.length ? module.label : longest,
+    visibleModules[0].label);
+  }, [visibleModules]);
+
+  // Mismo tamaño de texto en todos los tiles (según el módulo más largo)
+  useLayoutEffect(() => {
+    const grid = menuGridRef.current;
+    const probe = labelProbeRef.current;
+    if (!grid || !probe) return;
+
+    const wrap = probe.querySelector('.module-card-label-wrap');
+    const text = probe.querySelector('.module-card-label');
+    if (!wrap || !text) return;
+
+    const fitUniform = () => {
+      const style = getComputedStyle(grid);
+      const colTracks = style.gridTemplateColumns.split(' ').filter(Boolean);
+      const cols = colTracks.length || 3;
+      const gap = parseFloat(style.columnGap) || 16;
+      const cellWidth = (grid.clientWidth - gap * (cols - 1)) / cols;
+      const isMobile = grid.clientWidth <= 480;
+      const isTablet = grid.clientWidth <= 768;
+      const iconRatio = isMobile ? MODULE_ICON_HEIGHT_RATIO_MOBILE : MODULE_ICON_HEIGHT_RATIO;
+
+      const sampleCard = grid.querySelector('.module-card');
+      if (sampleCard?.clientHeight > 0) {
+        const iconPx = Math.round(sampleCard.clientHeight * iconRatio);
+        setModuleIconPx((prev) => (prev === iconPx ? prev : iconPx));
+      }
+
+      const sampleWrap = grid.querySelector('.module-card .module-card-label-wrap');
+      if (sampleWrap?.clientHeight > 0) {
+        wrap.style.width = `${sampleWrap.clientWidth}px`;
+        wrap.style.height = `${sampleWrap.clientHeight}px`;
+      } else {
+        const cardHeight = cellWidth * (isMobile ? 1 : 0.95);
+        const iconSize = cardHeight * iconRatio;
+        const textZoneHeight = cardHeight - iconSize - 30;
+        wrap.style.width = `${Math.max(cellWidth - 16, 60)}px`;
+        wrap.style.height = `${Math.max(textZoneHeight, 24)}px`;
+      }
+
+      let size = 12;
+      const maxSize = isMobile ? 17 : isTablet ? 19 : 36;
+      text.textContent = longestModuleLabel;
+      text.style.fontSize = `${size}px`;
+      while (size < maxSize && text.scrollHeight <= wrap.clientHeight + 1) {
+        size += 1;
+        text.style.fontSize = `${size}px`;
+      }
+      size = Math.max(11, size - 1);
+      setUniformLabelPx(size);
+    };
+
+    fitUniform();
+    const ro = new ResizeObserver(fitUniform);
+    ro.observe(grid);
+    return () => ro.disconnect();
+  }, [visibleModules, longestModuleLabel]);
 
   return (
     <div className="animate__animated animate__fadeIn">
@@ -160,7 +229,17 @@ function Dashboard({ navigate, modules, moduleColors, refreshModules, profile })
 
       {/* Grid of Modules */}
       {visibleModules.length > 0 ? (
-        <div className="menu-grid">
+        <>
+          <div
+            ref={labelProbeRef}
+            aria-hidden="true"
+            className="module-card-label-probe"
+          >
+            <div className="module-card-label-wrap">
+              <span className="module-card-label">{longestModuleLabel}</span>
+            </div>
+          </div>
+          <div className="menu-grid" ref={menuGridRef}>
           {visibleModules.map(m => {
             const configId = m.id === 'providers' ? 'proveedores' : 
                              m.id === 'employees' ? 'empleados' : 
@@ -172,12 +251,18 @@ function Dashboard({ navigate, modules, moduleColors, refreshModules, profile })
                 style={{ backgroundColor: (moduleColors && moduleColors[configId]) || DEFAULT_MODULE_COLORS[configId] || 'var(--card-bg)' }}
               >
                 <i className={`bi ${m.watermark} watermark-icon`}></i>
-                <div className="card-icon"><i className={`bi ${m.icon}`}></i></div>
-                <h3 className="card-title">{m.label}</h3>
+                <div
+                  className="card-icon"
+                  style={moduleIconPx != null ? { fontSize: `${moduleIconPx}px`, lineHeight: 1 } : undefined}
+                >
+                  <i className={`bi ${m.icon}`}></i>
+                </div>
+                <ModuleCardLabel label={m.label} fontSize={uniformLabelPx} />
               </div>
             );
           })}
-        </div>
+          </div>
+        </>
       ) : (
         <div className="page-card text-center" style={{ padding: '40px 20px', borderRadius: '15px' }}>
           <i className="bi bi-shield-lock" style={{ fontSize: '3.5rem', color: '#dee2e6' }}></i>
@@ -187,7 +272,7 @@ function Dashboard({ navigate, modules, moduleColors, refreshModules, profile })
       )}
 
       {/* Task Checklist Panel */}
-      {(profile?.role === 'admin' || hasPermission('tareas')) && (
+      {(profile?.role === 'admin' || hasPermission('tareas')) && modules.tareas !== false && (
         <div style={{ marginTop: '30px' }}>
           <div className="section-header d-flex justify-content-between align-items-center mb-3">
             <h5 className="section-title m-0 fw-bold">
@@ -204,8 +289,8 @@ function Dashboard({ navigate, modules, moduleColors, refreshModules, profile })
                 <div className="spinner"></div>
                 <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Cargando tareas...</span>
               </div>
-            ) : tasks.length > 0 ? (
-              tasks.map(task => {
+            ) : visibleTasks.length > 0 ? (
+              visibleTasks.map(task => {
                 const isDone = task.estado === 'Realizada';
                 const charLower = String(task.caracter || '').toLowerCase();
                 let charClass = '';
@@ -227,7 +312,19 @@ function Dashboard({ navigate, modules, moduleColors, refreshModules, profile })
                       <div className="task-text">{task.tarea}</div>
                       <div className="task-meta">
                         <span className="badge-tag">{task.caracter}</span>
+                        {getTaskRoleLabel(task.usuario, roleLabels) && (
+                          <span className="badge-tag">
+                            <i className="bi bi-person-badge me-1"></i>
+                            {getTaskRoleLabel(task.usuario, roleLabels)}
+                          </span>
+                        )}
                         {task.fecha && <span><i className="bi bi-calendar-event me-1"></i>{task.fecha}</span>}
+                        {!task.fecha && task.created_at && (
+                          <span>
+                            <i className="bi bi-calendar-event me-1"></i>
+                            {new Date(task.created_at).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' })}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -257,8 +354,24 @@ function Dashboard({ navigate, modules, moduleColors, refreshModules, profile })
 
               <form onSubmit={handleCreateTask}>
                 <div className="form-group">
-                  <label className="form-label">Carácter / Categoría</label>
-                  <select 
+                  <label className="form-label" htmlFor="task-role">Rol destinatario</label>
+                  <select
+                    id="task-role"
+                    name="task-role"
+                    className="form-select"
+                    value={newTaskRole}
+                    onChange={(e) => setNewTaskRole(e.target.value)}
+                  >
+                    {taskRoleOptions.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label" htmlFor="task-caracter">Carácter / Categoría</label>
+                  <select
+                    id="task-caracter"
+                    name="task-caracter"
                     className="form-select"
                     value={newTaskCaracter}
                     onChange={(e) => setNewTaskCaracter(e.target.value)}
@@ -270,8 +383,10 @@ function Dashboard({ navigate, modules, moduleColors, refreshModules, profile })
                   </select>
                 </div>
                 <div className="form-group">
-                  <label className="form-label">Descripción</label>
-                  <textarea 
+                  <label className="form-label" htmlFor="task-description">Descripción</label>
+                  <textarea
+                    id="task-description"
+                    name="task-description"
                     className="form-textarea"
                     rows="3"
                     required

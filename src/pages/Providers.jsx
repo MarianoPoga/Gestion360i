@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../supabaseClient';
+import { MODULE_LABELS } from '../moduleLabels';
 
 function Providers() {
   const [view, setView] = useState('saldos'); // 'saldos' or 'detalle'
@@ -75,7 +76,7 @@ function Providers() {
         <div className="animate__animated animate__fadeIn">
           <div className="d-flex justify-content-between align-items-center mb-4">
             <h2 className="page-title m-0">
-              <i className="bi bi-truck text-success me-2"></i> Cta Cte Proveedores
+              <i className="bi bi-truck text-success me-2"></i> {MODULE_LABELS.proveedores}
             </h2>
           </div>
 

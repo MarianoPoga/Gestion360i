@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../supabaseClient';
+import { hasModulePermission, normalizeRoleKey } from '../rolePermissions';
+import { DEFAULT_CAJA_FUERTE_NAME } from '../moduleLabels';
 
 function Rendiciones({ navigate, profile, accentColor }) {
   const [rendiciones, setRendiciones] = useState([]);
@@ -14,22 +16,24 @@ function Rendiciones({ navigate, profile, accentColor }) {
   const [saving, setSaving] = useState(false);
 
   const [rendConfig, setRendConfig] = useState({
-    caja_nombre: 'Caja fuerte'
+    caja_nombre: DEFAULT_CAJA_FUERTE_NAME
   });
+
+  const [rolePermissions, setRolePermissions] = useState(null);
 
   const canWithdraw = useMemo(() => {
     if (!profile) return false;
-    if (profile.role === 'admin') return true;
-    if (profile.role === 'operario') {
-      const rolePerms = JSON.parse(localStorage.getItem('role_permissions') || '{}');
-      return rolePerms.operario_can_retiros === true;
-    }
-    return false;
-  }, [profile]);
+    if (normalizeRoleKey(profile.role) === 'admin') return true;
+    const modules = JSON.parse(localStorage.getItem('enabled_modules') || '{}');
+    return hasModulePermission(rolePermissions, profile, 'rendiciones', modules);
+  }, [profile, rolePermissions]);
 
   useEffect(() => {
-    const loadedRendConfig = JSON.parse(localStorage.getItem('rendiciones_config') || '{"caja_nombre":"Caja fuerte"}');
+    const loadedRendConfig = JSON.parse(localStorage.getItem('rendiciones_config') || `{"caja_nombre":"${DEFAULT_CAJA_FUERTE_NAME}"}`);
     setRendConfig(loadedRendConfig);
+    db.getRolePermissions().then((perms) => {
+      if (perms) setRolePermissions(perms);
+    });
     loadData();
   }, []);
 

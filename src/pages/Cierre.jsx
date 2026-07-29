@@ -1,5 +1,16 @@
 import React, { useState, useEffect } from 'react'
 import { db } from '../supabaseClient'
+import { getActiveMedios, getMedioIcon, MEDIO_EFECTIVO_ID, getEfectivoFromCierre } from '../cierreMedios'
+import { clampDateToToday, getTodayLocalDateString } from '../dateUtils'
+import {
+  ADELANTO_EFECTIVO,
+  ADELANTO_MERCADERIA,
+  extractAdelantoEfectivoDetail,
+  extractAdelantoMercaderiaDetail,
+  formatAdelantoConceptLabel,
+  isAdelantoEfectivoConcept,
+  isAdelantoMercaderiaConcept,
+} from '../adelantoConcepts'
 
 function Cierre({ navigate, accentColor }) {
   const isSameLocalDate = (isoString, localDateString) => {
@@ -39,9 +50,8 @@ function Cierre({ navigate, accentColor }) {
   });
   const [turno, setTurno] = useState('Mañana');
   
-  // Sales concepts (manual inputs)
-  const [efectivo, setEfectivo] = useState(0);
-  const [digitalValues, setDigitalValues] = useState({});
+  // Sales concepts (manual inputs) — 15 slots, medio_01 = Efectivo
+  const [medioValues, setMedioValues] = useState({});
   
   // Pending lists loaded from backend
   const [pendingCompras, setPendingCompras] = useState([]);
@@ -107,11 +117,11 @@ function Cierre({ navigate, accentColor }) {
       setCierreConceptos(activeConcepts);
       setFormasPago(activeFormas || []);
       
-      const initialDigital = {};
-      activeConcepts.forEach(c => {
-        if (c.enabled) initialDigital[c.id] = 0;
+      const initialMedios = {};
+      getActiveMedios(activeConcepts).forEach((medio) => {
+        initialMedios[medio.id] = 0;
       });
-      setDigitalValues(initialDigital);
+      setMedioValues(initialMedios);
     };
 
     loadConfig();
@@ -122,22 +132,12 @@ function Cierre({ navigate, accentColor }) {
     loadData();
   }, []);
 
-  const conceptIcons = {
-    transferencia: 'bi-bank2',
-    tarjeta: 'bi-credit-card-2-front-fill',
-    qrPago: 'bi-qr-code',
-    linkPago: 'bi-link-45deg',
-    ctaCte: 'bi-journal-text'
-  };
+  const getMedioValue = (id) => medioValues[id] || 0;
 
-  const getConceptValue = (id) => {
-    return digitalValues[id] || 0;
-  };
-
-  const setConceptValue = (id, val) => {
-    setDigitalValues(prev => ({
+  const setMedioValue = (id, val) => {
+    setMedioValues((prev) => ({
       ...prev,
-      [id]: val
+      [id]: val,
     }));
   };
 
@@ -193,7 +193,7 @@ function Cierre({ navigate, accentColor }) {
       } else if (cierreSortField === 'turno') {
         comparison = String(a.turno || '').localeCompare(String(b.turno || ''));
       } else if (cierreSortField === 'efectivo') {
-        comparison = (parseFloat(a.efectivo) || 0) - (parseFloat(b.efectivo) || 0);
+        comparison = getEfectivoFromCierre(a) - getEfectivoFromCierre(b);
       } else if (cierreSortField === 'total') {
         comparison = (parseFloat(a.total) || 0) - (parseFloat(b.total) || 0);
       }
@@ -229,17 +229,19 @@ function Cierre({ navigate, accentColor }) {
   const loadData = async () => {
     setLoadingLists(true);
     try {
-      const [compras, adelantos, emps, cierres] = await Promise.all([
+      const [compras, adelantos, emps, cierres, concepts] = await Promise.all([
         db.getPendingCompras(),
         db.getPendingAdelantos(),
         db.getEmpleados(),
-        db.getUltimosCierres()
+        db.getUltimosCierres(),
+        db.getCierreConceptos(),
       ]);
       setPendingCompras(compras);
       setPendingAdelantos(adelantos);
       const empNames = (emps || []).map(e => e.nombre);
       setEmpleados(empNames);
       setUltimosCierres(cierres);
+      setCierreConceptos(concepts);
       if (empNames.length > 0) {
         setNewMercEmpleado(empNames[0]);
         setNewEfecEmpleado(empNames[0]);
@@ -272,17 +274,16 @@ function Cierre({ navigate, accentColor }) {
     .reduce((acc, curr) => acc + parseFloat(curr.total || 0), 0);
 
   const adelantosEfectivoSum = adelantosFiltered
-    .filter(ad => ad.concepto.startsWith('Adelanto $'))
+    .filter((ad) => isAdelantoEfectivoConcept(ad.concepto))
     .reduce((acc, curr) => acc + parseFloat(curr.monto || 0), 0);
 
   const adelantosMercSum = adelantosFiltered
-    .filter(ad => ad.concepto.startsWith('Adelanto Merc'))
+    .filter((ad) => isAdelantoMercaderiaConcept(ad.concepto))
     .reduce((acc, curr) => acc + parseFloat(curr.monto || 0), 0);
 
   // Final total shift sales revenue
   const totalSum = 
-    parseFloat(efectivo || 0) + 
-    Object.values(digitalValues).reduce((acc, curr) => acc + parseFloat(curr || 0), 0) + 
+    Object.values(medioValues).reduce((acc, curr) => acc + parseFloat(curr || 0), 0) + 
     comprasSum + 
     adelantosEfectivoSum + 
     adelantosMercSum;
@@ -293,7 +294,7 @@ function Cierre({ navigate, accentColor }) {
     billDenominations.forEach(den => {
       sum += (billCounts[den] || 0) * den;
     });
-    setEfectivo(sum);
+    setMedioValue(MEDIO_EFECTIVO_ID, sum);
     setShowBilletes(false);
   };
 
@@ -303,7 +304,7 @@ function Cierre({ navigate, accentColor }) {
     setCalcInput('');
     
     // Sum from current value if saved value > 0
-    const currentVal = getConceptValue(targetName);
+    const currentVal = getMedioValue(targetName);
 
     setCalcItems(currentVal > 0 ? [currentVal] : []);
     setShowCalculator(true);
@@ -320,7 +321,7 @@ function Cierre({ navigate, accentColor }) {
 
   const handleConfirmCalculator = () => {
     const sum = calcItems.reduce((a, b) => a + b, 0);
-    setConceptValue(calcTarget, sum);
+    setMedioValue(calcTarget, sum);
     setShowCalculator(false);
   };
 
@@ -342,7 +343,7 @@ function Cierre({ navigate, accentColor }) {
       const finalObs = `[Caja: ${turno}]${newMercObs.trim() ? ' ' + newMercObs.trim() : ''}`;
       const res = await db.saveAdelanto({
         empleado: newMercEmpleado,
-        concepto: 'Adelanto Merc',
+        concepto: ADELANTO_MERCADERIA,
         monto: val,
         observacion: finalObs
       });
@@ -379,7 +380,7 @@ function Cierre({ navigate, accentColor }) {
       const finalObs = `[Caja: ${turno}]${newEfecObs.trim() ? ' ' + newEfecObs.trim() : ''}`;
       const res = await db.saveAdelanto({
         empleado: newEfecEmpleado,
-        concepto: 'Adelanto $',
+        concepto: ADELANTO_EFECTIVO,
         monto: val,
         observacion: finalObs
       });
@@ -403,18 +404,14 @@ function Cierre({ navigate, accentColor }) {
     e.preventDefault();
 
     // Prevent closing shifts for future dates
-    const today = new Date();
-    const year = today.getFullYear();
-    const month = String(today.getMonth() + 1).padStart(2, '0');
-    const day = String(today.getDate()).padStart(2, '0');
-    const todayStr = `${year}-${month}-${day}`;
+    const todayStr = getTodayLocalDateString();
 
     if (fecha > todayStr) {
       alert("No se pueden registrar cierres de caja para fechas futuras.");
       return;
     }
 
-    if (efectivo === 0 && totalSum === 0) {
+    if (getMedioValue(MEDIO_EFECTIVO_ID) === 0 && totalSum === 0) {
       if (!window.confirm("¿Deseas guardar un cierre con todos los valores en $0?")) {
         return;
       }
@@ -426,8 +423,7 @@ function Cierre({ navigate, accentColor }) {
       const res = await db.saveCierre({
         fecha,
         turno,
-        efectivo,
-        digitalValues,
+        medioValues,
         adelantos_efectivo: adelantosEfectivoSum,
         adelantos_merc: adelantosMercSum,
         compras: comprasSum,
@@ -436,20 +432,18 @@ function Cierre({ navigate, accentColor }) {
 
       if (res.success) {
         setSaveStatus('success');
-        // Clear inputs
-        setEfectivo(0);
         const resetVals = {};
-        cierreConceptos.forEach(c => {
-          resetVals[c.id] = 0;
+        getActiveMedios(cierreConceptos).forEach((medio) => {
+          resetVals[medio.id] = 0;
         });
-        setDigitalValues(resetVals);
+        setMedioValues(resetVals);
         
         setTimeout(() => {
           setSaveStatus('');
           loadData();
         }, 1500);
       } else {
-        throw new Error("No se pudo registrar el cierre.");
+        throw new Error(res.error || "No se pudo registrar el cierre.");
       }
     } catch (err) {
       setSaveStatus('error');
@@ -488,9 +482,12 @@ function Cierre({ navigate, accentColor }) {
                 type="date" 
                 className="form-input" 
                 value={fecha}
-                onChange={(e) => setFecha(e.target.value)}
+                max={getTodayLocalDateString()}
+                onChange={(e) => setFecha(clampDateToToday(e.target.value))}
+                onInput={(e) => setFecha(clampDateToToday(e.target.value))}
                 required
               />
+              <small className="text-muted" style={{ fontSize: '0.75rem' }}>No se permiten fechas futuras</small>
             </div>
             <div className="form-group" style={{ flex: '1 1 200px', margin: 0 }}>
               <label className="form-label fw-bold">Turno / Caja</label>
@@ -524,66 +521,46 @@ function Cierre({ navigate, accentColor }) {
           {/* Grid of Concept Inputs */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '20px' }}>
             
-            {/* EFECTIVO */}
-            <div className="form-group" style={{ margin: 0 }}>
-              <label className="form-label fw-bold small text-dark">Efectivo en Caja</label>
-              <div style={{ display: 'flex', gap: '6px' }}>
-                <div style={{ display: 'flex', flex: 1, border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden' }}>
-                  <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '42px', backgroundColor: '#e2e8f0', color: '#475569' }}>
-                    <i className="bi bi-cash-coin" style={{ fontSize: '1.2rem' }}></i>
-                  </span>
-                  <input 
-                    type="number" 
-                    step="1" 
-                    className="form-input" 
-                    placeholder="0"
-                    value={efectivo || ''}
-                    onChange={(e) => setEfectivo(parseFloat(e.target.value) || 0)}
-                    onKeyDown={handleNumericKeyDown}
-                    style={{ border: 'none', margin: 0, borderTopLeftRadius: 0, borderBottomLeftRadius: 0 }}
-                    required
-                  />
-                </div>
-                <button 
-                  type="button" 
-                  className="btn-new-task" 
-                  style={{ backgroundColor: '#10b981', color: 'white', padding: '0 15px', border: 'none' }}
-                  onClick={() => setShowBilletes(true)}
-                  title="Contador de billetes físico"
-                >
-                  <i className="bi bi-calculator-fill me-1"></i> Billetes
-                </button>
-              </div>
-            </div>
-
-            {/* Dynamic concepts that are enabled */}
-            {cierreConceptos.filter(c => c.enabled).map(concept => (
-              <div key={concept.id} className="form-group" style={{ margin: 0 }}>
-                <label className="form-label fw-bold small text-dark">{concept.label}</label>
+            {getActiveMedios(cierreConceptos).map((medio) => (
+              <div key={medio.id} className="form-group" style={{ margin: 0 }}>
+                <label className="form-label fw-bold small text-dark">{medio.label}</label>
                 <div style={{ display: 'flex', gap: '6px' }}>
                   <div style={{ display: 'flex', flex: 1, border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden' }}>
                     <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '42px', backgroundColor: '#e2e8f0', color: '#475569' }}>
-                      <i className={`bi ${conceptIcons[concept.id] || 'bi-currency-dollar'}`} style={{ fontSize: '1.1rem' }}></i>
+                      <i className={`bi ${getMedioIcon(medio.id)}`} style={{ fontSize: medio.id === MEDIO_EFECTIVO_ID ? '1.2rem' : '1.1rem' }}></i>
                     </span>
                     <input 
                       type="number" 
                       step="1" 
                       className="form-input" 
                       placeholder="0"
-                      value={getConceptValue(concept.id) || ''}
-                      onChange={(e) => setConceptValue(concept.id, parseFloat(e.target.value) || 0)}
+                      value={getMedioValue(medio.id) || ''}
+                      onChange={(e) => setMedioValue(medio.id, parseFloat(e.target.value) || 0)}
                       onKeyDown={handleNumericKeyDown}
                       style={{ border: 'none', margin: 0, borderTopLeftRadius: 0, borderBottomLeftRadius: 0 }}
+                      required={medio.id === MEDIO_EFECTIVO_ID}
                     />
                   </div>
-                  <button 
-                    type="button" 
-                    className="btn-new-task" 
-                    style={{ backgroundColor: '#3b82f6', color: 'white', padding: '0 12px', border: 'none' }}
-                    onClick={() => handleOpenCalculator(concept.id)}
-                  >
-                    <i className="bi bi-plus-lg"></i>
-                  </button>
+                  {medio.id === MEDIO_EFECTIVO_ID ? (
+                    <button 
+                      type="button" 
+                      className="btn-new-task" 
+                      style={{ backgroundColor: '#10b981', color: 'white', padding: '0 15px', border: 'none' }}
+                      onClick={() => setShowBilletes(true)}
+                      title="Contador de billetes físico"
+                    >
+                      <i className="bi bi-calculator-fill me-1"></i> Billetes
+                    </button>
+                  ) : (
+                    <button 
+                      type="button" 
+                      className="btn-new-task" 
+                      style={{ backgroundColor: '#3b82f6', color: 'white', padding: '0 12px', border: 'none' }}
+                      onClick={() => handleOpenCalculator(medio.id)}
+                    >
+                      <i className="bi bi-plus-lg"></i>
+                    </button>
+                  )}
                 </div>
               </div>
             ))}
@@ -635,7 +612,7 @@ function Cierre({ navigate, accentColor }) {
             {/* 2. ADELANTOS EFECTIVO ($) */}
             {config.allow_adelantos !== false && config.allow_dinero && (
               <div className="form-group" style={{ margin: 0 }}>
-                <label className="form-label fw-bold small text-dark">Adelantos en efectivo</label>
+                <label className="form-label fw-bold small text-dark">{ADELANTO_EFECTIVO}</label>
                 <div style={{ display: 'flex', gap: '6px' }}>
                   <div style={{ display: 'flex', flex: 1, border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden', backgroundColor: '#eff6ff' }}>
                     <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '42px', backgroundColor: '#dbeafe', color: '#1e40af' }}>
@@ -654,9 +631,9 @@ function Cierre({ navigate, accentColor }) {
                     className="btn-new-task" 
                     style={{ backgroundColor: '#3b82f6', color: 'white', padding: '0 15px', border: 'none' }}
                     onClick={handleOpenEfecModal}
-                    title="Cargar nuevo adelanto en efectivo"
+                    title={`Cargar ${ADELANTO_EFECTIVO.toLowerCase()}`}
                   >
-                    <i className="bi bi-plus-lg me-1"></i> Cargar Efec.
+                    <i className="bi bi-plus-lg me-1"></i> {ADELANTO_EFECTIVO}
                   </button>
                 </div>
 
@@ -664,12 +641,12 @@ function Cierre({ navigate, accentColor }) {
                 <div style={{ marginTop: '8px', padding: '10px', backgroundColor: '#f0f7ff', border: '1px solid #bfdbfe', borderRadius: '8px', maxHeight: '180px', overflowY: 'auto' }}>
                   {loadingLists ? (
                     <div className="small text-muted italic">Cargando...</div>
-                  ) : adelantosFiltered.filter(ad => ad.concepto.startsWith('Adelanto $')).length > 0 ? (
-                    adelantosFiltered.filter(ad => ad.concepto.startsWith('Adelanto $')).map(ad => (
+                  ) : adelantosFiltered.filter((ad) => isAdelantoEfectivoConcept(ad.concepto)).length > 0 ? (
+                    adelantosFiltered.filter((ad) => isAdelantoEfectivoConcept(ad.concepto)).map(ad => (
                       <div key={ad.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '4px 0', margin: 0, fontSize: '0.85rem' }}>
                         <span style={{ flex: 1 }}>
-                          <strong>{ad.empleado}</strong> - Adelanto en Efectivo {(() => {
-                            const obs = ad.concepto.substring('Adelanto $'.length).replace(/^ - /, '').trim();
+                          <strong>{ad.empleado}</strong> - {formatAdelantoConceptLabel(ad.concepto)} {(() => {
+                            const obs = extractAdelantoEfectivoDetail(ad.concepto);
                             return obs ? `(${obs})` : '';
                           })()}
                         </span>
@@ -677,7 +654,7 @@ function Cierre({ navigate, accentColor }) {
                       </div>
                     ))
                   ) : (
-                    <div className="small text-muted italic">No hay adelantos en efectivo entregados por esta caja.</div>
+                    <div className="small text-muted italic">No hay {ADELANTO_EFECTIVO.toLowerCase()} entregados por esta caja.</div>
                   )}
                 </div>
               </div>
@@ -686,7 +663,7 @@ function Cierre({ navigate, accentColor }) {
             {/* 3. ADELANTOS MERCADERÍA (MERC) */}
             {config.allow_adelantos !== false && config.allow_mercaderia && (
               <div className="form-group" style={{ margin: 0 }}>
-                <label className="form-label fw-bold small text-dark">Adelantos en mercaderia</label>
+                <label className="form-label fw-bold small text-dark">{ADELANTO_MERCADERIA}</label>
                 <div style={{ display: 'flex', gap: '6px' }}>
                   <div style={{ display: 'flex', flex: 1, border: '1px solid var(--border-color)', borderRadius: '8px', overflow: 'hidden', backgroundColor: '#eff6ff' }}>
                     <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '42px', backgroundColor: '#dbeafe', color: '#1e40af' }}>
@@ -705,9 +682,9 @@ function Cierre({ navigate, accentColor }) {
                     className="btn-new-task" 
                     style={{ backgroundColor: '#3b82f6', color: 'white', padding: '0 15px', border: 'none' }}
                     onClick={handleOpenMercModal}
-                    title="Cargar nuevo retiro de mercadería"
+                    title={`Cargar ${ADELANTO_MERCADERIA.toLowerCase()}`}
                   >
-                    <i className="bi bi-plus-lg me-1"></i> Cargar Merc.
+                    <i className="bi bi-plus-lg me-1"></i> {ADELANTO_MERCADERIA}
                   </button>
                 </div>
 
@@ -715,12 +692,12 @@ function Cierre({ navigate, accentColor }) {
                 <div style={{ marginTop: '8px', padding: '10px', backgroundColor: '#f0f7ff', border: '1px solid #bfdbfe', borderRadius: '8px', maxHeight: '180px', overflowY: 'auto' }}>
                   {loadingLists ? (
                     <div className="small text-muted italic">Cargando...</div>
-                  ) : adelantosFiltered.filter(ad => ad.concepto.startsWith('Adelanto Merc')).length > 0 ? (
-                    adelantosFiltered.filter(ad => ad.concepto.startsWith('Adelanto Merc')).map(ad => (
+                  ) : adelantosFiltered.filter((ad) => isAdelantoMercaderiaConcept(ad.concepto)).length > 0 ? (
+                    adelantosFiltered.filter((ad) => isAdelantoMercaderiaConcept(ad.concepto)).map(ad => (
                       <div key={ad.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '4px 0', margin: 0, fontSize: '0.85rem' }}>
                         <span style={{ flex: 1 }}>
-                          <strong>{ad.empleado}</strong> - Retiro Mercadería {(() => {
-                            const obs = ad.concepto.substring('Adelanto Merc'.length).replace(/^ - /, '').trim();
+                          <strong>{ad.empleado}</strong> - {formatAdelantoConceptLabel(ad.concepto)} {(() => {
+                            const obs = extractAdelantoMercaderiaDetail(ad.concepto);
                             return obs ? `(${obs})` : '';
                           })()}
                         </span>
@@ -728,7 +705,7 @@ function Cierre({ navigate, accentColor }) {
                       </div>
                     ))
                   ) : (
-                    <div className="small text-muted italic">No hay retiros de mercadería entregados por esta caja.</div>
+                    <div className="small text-muted italic">No hay {ADELANTO_MERCADERIA.toLowerCase()} entregados por esta caja.</div>
                   )}
                 </div>
               </div>
@@ -845,7 +822,7 @@ function Cierre({ navigate, accentColor }) {
                       </span>
                     </td>
                     <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: '500', color: '#10b981' }}>
-                      $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(c.efectivo)}
+                      $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(getEfectivoFromCierre(c))}
                     </td>
                     <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 'bold' }}>
                       $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(c.total)}
@@ -1039,7 +1016,7 @@ function Cierre({ navigate, accentColor }) {
         <div className="modal-overlay">
           <div className="modal-content-card" style={{ maxWidth: '400px' }}>
             <div className="modal-header" style={{ backgroundColor: '#eab308' }}>
-              <h5 className="modal-title" style={{ color: 'white' }}><i className="bi bi-bag-plus me-2"></i>Retiro de Mercadería</h5>
+              <h5 className="modal-title" style={{ color: 'white' }}><i className="bi bi-bag-plus me-2"></i>{ADELANTO_MERCADERIA}</h5>
               <button type="button" className="modal-close-btn" onClick={() => setShowAddMerc(false)}>
                 <i className="bi bi-x-lg"></i>
               </button>
@@ -1103,7 +1080,7 @@ function Cierre({ navigate, accentColor }) {
                     style={{ backgroundColor: '#eab308', flex: 1, padding: '10px', margin: 0 }}
                     disabled={savingMerc}
                   >
-                    {savingMerc ? 'Cargando...' : 'Registrar Retiro'}
+                    {savingMerc ? 'Cargando...' : `Registrar ${ADELANTO_MERCADERIA}`}
                   </button>
                 </div>
 
@@ -1118,7 +1095,7 @@ function Cierre({ navigate, accentColor }) {
         <div className="modal-overlay">
           <div className="modal-content-card" style={{ maxWidth: '400px' }}>
             <div className="modal-header" style={{ backgroundColor: '#eab308' }}>
-              <h5 className="modal-title" style={{ color: 'white' }}><i className="bi bi-person-plus me-2"></i>Adelanto en Efectivo</h5>
+              <h5 className="modal-title" style={{ color: 'white' }}><i className="bi bi-person-plus me-2"></i>{ADELANTO_EFECTIVO}</h5>
               <button type="button" className="modal-close-btn" onClick={() => setShowAddEfec(false)}>
                 <i className="bi bi-x-lg"></i>
               </button>
@@ -1182,7 +1159,7 @@ function Cierre({ navigate, accentColor }) {
                     style={{ backgroundColor: '#eab308', flex: 1, padding: '10px', margin: 0 }}
                     disabled={savingEfec}
                   >
-                    {savingEfec ? 'Cargando...' : 'Registrar Adelanto'}
+                    {savingEfec ? 'Cargando...' : `Registrar ${ADELANTO_EFECTIVO}`}
                   </button>
                 </div>
 

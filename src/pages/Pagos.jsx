@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { db } from '../supabaseClient';
+import { MODULE_LABELS, DEFAULT_CAJA_FUERTE_NAME } from '../moduleLabels';
 
 function Pagos({ navigate, modules, accentColor }) {
   const isSameLocalDate = (isoString, localDateString) => {
@@ -19,7 +20,7 @@ function Pagos({ navigate, modules, accentColor }) {
   });
 
   const [rendConfig, setRendConfig] = useState({
-    caja_nombre: 'Caja fuerte',
+    caja_nombre: DEFAULT_CAJA_FUERTE_NAME,
     allow_pagos: true
   });
 
@@ -68,7 +69,7 @@ function Pagos({ navigate, modules, accentColor }) {
     const setupShifts = async () => {
       const shifts = loadedConfig.cajas_posibles.length > 0 ? loadedConfig.cajas_posibles : await db.getCierreTurnos();
       setShiftsAvailableState(shifts || []);
-      const loadedRendConfig = JSON.parse(localStorage.getItem('rendiciones_config') || '{"caja_nombre":"Caja fuerte","allow_pagos":true}');
+      const loadedRendConfig = JSON.parse(localStorage.getItem('rendiciones_config') || `{"caja_nombre":"${DEFAULT_CAJA_FUERTE_NAME}","allow_pagos":true}`);
       setRendConfig(loadedRendConfig);
 
       if (shifts && shifts.length > 0) {
@@ -228,12 +229,12 @@ function Pagos({ navigate, modules, accentColor }) {
     <div className="container-fluid animate__animated animate__fadeIn" style={{ maxWidth: '1000px' }}>
       <div className="page-header d-flex justify-content-between align-items-center mb-4">
         <div>
-          <h2 className="page-title mb-0">Pagos a Proveedores</h2>
+          <h2 className="page-title mb-0">{MODULE_LABELS['pago-proveedores']}</h2>
           <p className="text-muted small mb-0">Registro de pagos realizados a proveedores</p>
         </div>
         <div className="d-flex gap-2">
           <button className="btn btn-outline-secondary btn-sm" onClick={() => navigate('providers')}>
-            <i className="bi bi-truck me-1"></i> Ver Proveedores
+            <i className="bi bi-truck me-1"></i> Ver {MODULE_LABELS.proveedores}
           </button>
         </div>
       </div>

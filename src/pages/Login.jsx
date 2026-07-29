@@ -19,6 +19,7 @@ function Login({ onLoginSuccess }) {
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
   const [businessName, setBusinessName] = useState('');
+  const [isMonotributo, setIsMonotributo] = useState(false);
 
   const handleSaveDbConfig = async (e) => {
     e.preventDefault();
@@ -55,7 +56,7 @@ function Login({ onLoginSuccess }) {
 
     try {
       if (isSignUp) {
-        const res = await db.signUp(email, password, businessName, fullName);
+        const res = await db.signUp(email, password, businessName, fullName, { isMonotributo });
         if (res.error) {
           setError(res.error);
         } else {
@@ -160,6 +161,17 @@ function Login({ onLoginSuccess }) {
                   onChange={(e) => setBusinessName(e.target.value)}
                   required 
                 />
+              </div>
+              <div className="input-group">
+                <i className="bi bi-receipt"></i>
+                <select
+                  value={isMonotributo ? 'monotributo' : 'responsable_inscripto'}
+                  onChange={(e) => setIsMonotributo(e.target.value === 'monotributo')}
+                  required
+                >
+                  <option value="monotributo">Monotributo (facturas B por defecto)</option>
+                  <option value="responsable_inscripto">Responsable Inscripto (facturas A por defecto)</option>
+                </select>
               </div>
             </>
           )}

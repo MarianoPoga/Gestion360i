@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../supabaseClient';
+import { MODULE_LABELS } from '../moduleLabels';
 
 function Results() {
   const [loading, setLoading] = useState(true);
@@ -23,7 +24,7 @@ function Results() {
   return (
     <div className="page-container p-4">
       <h2 className="page-title mb-4">
-        <i className="bi bi-graph-up text-primary me-2"></i> Reportes y Resultados
+        <i className="bi bi-graph-up text-primary me-2"></i> {MODULE_LABELS.resultados}
       </h2>
 
       <div className="row mb-4">
