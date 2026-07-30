@@ -162,6 +162,8 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   const [testError, setTestError] = useState('');
   const [clearStatus, setClearStatus] = useState(''); // 'clearing', 'success', 'error', ''
   const [resetSaldosStatus, setResetSaldosStatus] = useState('');
+  const [syncCCStatus, setSyncCCStatus] = useState('');
+  const [syncCCMessage, setSyncCCMessage] = useState('');
   const [syncStatus, setSyncStatus] = useState('');
   const [syncMessage, setSyncMessage] = useState('');
   const [supabaseFromEnv, setSupabaseFromEnv] = useState(false);
@@ -723,6 +725,33 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
           setResetSaldosStatus('');
         }, 3000);
       }
+    }
+  };
+
+  const handleSyncCuentaCorriente = async () => {
+    if (!window.confirm('¿Sincronizar cuenta corriente con pedidos finalizados?\n\nSe crearán los movimientos faltantes y se recalcularán los saldos de todos los clientes.')) {
+      return;
+    }
+
+    setSyncCCStatus('clearing');
+    setSyncCCMessage('');
+    try {
+      const result = await db.syncCuentaCorrienteFromFinalizedOrders();
+      setSyncCCStatus('success');
+      setSyncCCMessage(
+        `Procesados: ${result.processed}. Corregidos: ${result.fixed}. Ya estaban OK: ${result.alreadyOk}. Clientes recalculados: ${result.updatedClients}.`
+      );
+      setTimeout(() => {
+        setSyncCCStatus('');
+      }, 6000);
+    } catch (err) {
+      console.error(err);
+      setSyncCCStatus('error');
+      setSyncCCMessage(err.message || 'Error al sincronizar cuenta corriente.');
+      setTimeout(() => {
+        setSyncCCStatus('');
+        setSyncCCMessage('');
+      }, 6000);
     }
   };
 
@@ -1330,6 +1359,40 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                         <div className="alert-box" style={{ marginTop: '10px', backgroundColor: '#fee2e2', borderColor: '#fecaca', color: '#991b1b' }}>
                           <i className="bi bi-exclamation-triangle-fill"></i>
                           <div>Error al restablecer los saldos de clientes.</div>
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        className="btn-nav-back"
+                        style={{
+                          padding: '10px 16px',
+                          fontSize: '0.85rem',
+                          color: '#ffffff',
+                          backgroundColor: '#059669',
+                          border: 'none',
+                          alignSelf: 'flex-start',
+                          cursor: 'pointer',
+                          borderRadius: '6px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                        }}
+                        onClick={handleSyncCuentaCorriente}
+                        disabled={syncCCStatus === 'clearing'}
+                      >
+                        <i className="bi bi-arrow-repeat"></i>
+                        {syncCCStatus === 'clearing' ? 'Sincronizando...' : 'Sincronizar CC con pedidos finalizados'}
+                      </button>
+                      {syncCCStatus === 'success' && (
+                        <div className="alert-box-success" style={{ marginTop: '10px' }}>
+                          <i className="bi bi-check-circle-fill"></i>
+                          <div>{syncCCMessage || 'Cuenta corriente sincronizada correctamente.'}</div>
+                        </div>
+                      )}
+                      {syncCCStatus === 'error' && (
+                        <div className="alert-box" style={{ marginTop: '10px', backgroundColor: '#fee2e2', borderColor: '#fecaca', color: '#991b1b' }}>
+                          <i className="bi bi-exclamation-triangle-fill"></i>
+                          <div>{syncCCMessage || 'Error al sincronizar cuenta corriente.'}</div>
                         </div>
                       )}
                       <button 

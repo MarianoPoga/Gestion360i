@@ -74,6 +74,75 @@ export const testSupabaseConnection = async (url, key) => {
   }
 };
 
+const hasPaymentMedio = (medio) => !!medio && String(medio).trim() !== '';
+
+const isMedioCtaCte = (medio) => {
+  const normalized = String(medio || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized === 'cta cte'
+    || normalized === 'cuenta corriente (deuda)'
+    || normalized === 'cuenta corriente';
+};
+
+const getOrderMovementRef = (orderId) => String(orderId).substring(0, 6);
+
+const isFinalizadoEstadoValue = (estado) => {
+  const est = (estado || '').toLowerCase();
+  return est === 'finalizado' || est === 'cobrado';
+};
+
+const isCancelledEstadoValue = (estado) => {
+  const est = (estado || '').toLowerCase();
+  return est === 'cancelado' || est === 'cancelada' || est === 'cancelled';
+};
+
+const getOrderRelatedMovements = (movements, orderRef) =>
+  (movements || []).filter((m) => m.concepto && m.concepto.includes(`#${orderRef}`));
+
+const isFinalizedOrderCCComplete = (order, relatedMovements) => {
+  const orderRef = getOrderMovementRef(order.id);
+  const medio = order.medio_pago || '';
+  const hasMedio = hasPaymentMedio(medio);
+  const isCtaCte = isMedioCtaCte(medio);
+
+  const hasPedido = relatedMovements.some((m) => /^Pedido #/.test(m.concepto));
+  const hasAnticipo = relatedMovements.some((m) => m.concepto.includes(`Anticipo Pedido #${orderRef}`));
+  const hasAplicacion = relatedMovements.some((m) => m.concepto.includes(`Aplicación anticipo Pedido #${orderRef}`));
+  const hasCobro = relatedMovements.some((m) => m.concepto.includes(`Cobro Pedido #${orderRef}`));
+
+  if (!hasPedido) return false;
+  if (hasAnticipo) return hasAplicacion;
+  if (isCtaCte || !hasMedio) return true;
+  return hasCobro;
+};
+
+const buildMissingFinalizeMovements = (order, relatedMovements) => {
+  const orderRef = getOrderMovementRef(order.id);
+  const total = parseFloat(order.total || 0);
+  const medio = order.medio_pago || '';
+  const hasMedio = hasPaymentMedio(medio);
+  const isCtaCte = isMedioCtaCte(medio);
+  const fecha = order.updated_at || order.created_at || new Date().toISOString();
+
+  const hasPedido = relatedMovements.some((m) => /^Pedido #/.test(m.concepto));
+  const hasAnticipo = relatedMovements.some((m) => m.concepto.includes(`Anticipo Pedido #${orderRef}`));
+  const hasAplicacion = relatedMovements.some((m) => m.concepto.includes(`Aplicación anticipo Pedido #${orderRef}`));
+  const hasCobro = relatedMovements.some((m) => m.concepto.includes(`Cobro Pedido #${orderRef}`));
+
+  const inserts = [];
+
+  if (!hasPedido) {
+    inserts.push({ concepto: `Pedido #${orderRef}`, debe: total, haber: 0, fecha });
+  }
+  if (hasAnticipo && !hasAplicacion) {
+    inserts.push({ concepto: `Aplicación anticipo Pedido #${orderRef}`, debe: 0, haber: total, fecha });
+  } else if (!hasAnticipo && hasMedio && !isCtaCte && !hasCobro) {
+    inserts.push({ concepto: `Cobro Pedido #${orderRef} (${medio})`, debe: 0, haber: total, fecha });
+  }
+
+  return inserts;
+};
+
 // --- IDENTITY HELPERS (For Multi-tenancy) ---
 let cachedBusinessId = localStorage.getItem('gst_business_id') || localStorage.getItem('gst_business_id') || '00000000-0000-0000-0000-000000000000';
 let cachedTerminalId = localStorage.getItem('gst_terminal_id') || null;
@@ -2045,19 +2114,17 @@ export const db = {
         const nextEstado = (effectiveUpdates.estado !== undefined ? effectiveUpdates.estado : order.estado || '').toLowerCase();
         const prevConEnvio = order.con_envio;
         
-        const hasPaymentMedio = (medio) => !!medio && String(medio).trim() !== '';
-        const isFinalizadoEstado = (estado) => estado === 'finalizado' || estado === 'cobrado';
-        const hasAnticipo = (estado, medio) => !isFinalizadoEstado(estado) && hasPaymentMedio(medio) && medio !== 'Cta Cte';
+        const hasAnticipo = (estado, medio) => !isFinalizadoEstadoValue(estado) && hasPaymentMedio(medio) && !isMedioCtaCte(medio);
 
         const prevMedio = order.medio_pago || '';
         const nextMedio = effectiveUpdates.medio_pago !== undefined ? effectiveUpdates.medio_pago : prevMedio;
-        const isPrevCtaCte = prevMedio === 'Cta Cte';
-        const isNextCtaCte = nextMedio === 'Cta Cte';
+        const isPrevCtaCte = isMedioCtaCte(prevMedio);
+        const isNextCtaCte = isMedioCtaCte(nextMedio);
 
         const prevHadAnticipo = hasAnticipo(prevEstado, prevMedio);
         const nextHadAnticipo = hasAnticipo(nextEstado, nextMedio);
-        const prevFinalized = isFinalizadoEstado(prevEstado);
-        const nextFinalized = isFinalizadoEstado(nextEstado);
+        const prevFinalized = isFinalizadoEstadoValue(prevEstado);
+        const nextFinalized = isFinalizadoEstadoValue(nextEstado);
 
         const orderRef = String(order.id).split('_')[1] || order.id;
         const total = parseFloat(order.total);
@@ -2089,7 +2156,7 @@ export const db = {
             adjustMockSaldo(total);
             pushMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
           } else if (prevFinalized) {
-            if (prevMedio !== 'Cta Cte') {
+            if (!isMedioCtaCte(prevMedio)) {
               adjustMockSaldo(total);
               pushMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
             }
@@ -2121,7 +2188,7 @@ export const db = {
           if (prevHadAnticipo) {
             adjustMockSaldo(-total);
             pushMovement(`Aplicación anticipo Pedido #${orderRef}`, 0, total);
-          } else if (hasPaymentMedio(nextMedio) && nextMedio !== 'Cta Cte') {
+          } else if (hasPaymentMedio(nextMedio) && !isMedioCtaCte(nextMedio)) {
             adjustMockSaldo(-total);
             pushMovement(`Cobro Pedido #${orderRef} (${nextMedio})`, 0, total);
           }
@@ -2132,7 +2199,7 @@ export const db = {
           adjustMockSaldo(-total);
           pushMovement(`Reversión Pedido #${orderRef}`, 0, total);
 
-          if (prevMedio !== 'Cta Cte' && hasPaymentMedio(prevMedio)) {
+          if (!isMedioCtaCte(prevMedio) && hasPaymentMedio(prevMedio)) {
             if (nextHadAnticipo) {
               adjustMockSaldo(-total);
               pushMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
@@ -2265,21 +2332,19 @@ export const db = {
     const prevEstado = (order.estado || '').toLowerCase();
     const nextEstado = (updates.estado !== undefined ? updates.estado : order.estado || '').toLowerCase();
     const total = parseFloat(order.total || 0);
-    const orderRef = String(order.id).substring(0, 6);
+    const orderRef = getOrderMovementRef(order.id);
 
-    const hasPaymentMedio = (medio) => !!medio && String(medio).trim() !== '';
-    const isFinalizadoEstado = (estado) => estado === 'finalizado' || estado === 'cobrado';
-    const hasAnticipo = (estado, medio) => !isFinalizadoEstado(estado) && hasPaymentMedio(medio) && medio !== 'Cta Cte';
+    const hasAnticipo = (estado, medio) => !isFinalizadoEstadoValue(estado) && hasPaymentMedio(medio) && !isMedioCtaCte(medio);
 
     const prevMedio = order.medio_pago || '';
     const nextMedio = updates.medio_pago !== undefined ? updates.medio_pago : prevMedio;
-    const isPrevCtaCte = prevMedio === 'Cta Cte';
-    const isNextCtaCte = nextMedio === 'Cta Cte';
+    const isPrevCtaCte = isMedioCtaCte(prevMedio);
+    const isNextCtaCte = isMedioCtaCte(nextMedio);
 
     const prevHadAnticipo = hasAnticipo(prevEstado, prevMedio);
     const nextHadAnticipo = hasAnticipo(nextEstado, nextMedio);
-    const prevFinalized = isFinalizadoEstado(prevEstado);
-    const nextFinalized = isFinalizadoEstado(nextEstado);
+    const prevFinalized = isFinalizadoEstadoValue(prevEstado);
+    const nextFinalized = isFinalizadoEstadoValue(nextEstado);
 
     const adjustClientSaldo = async (delta) => {
       const { data: client } = await supabase
@@ -2313,7 +2378,7 @@ export const db = {
         await adjustClientSaldo(total);
         await insertMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
       } else if (prevFinalized) {
-        if (prevMedio !== 'Cta Cte') {
+        if (!isMedioCtaCte(prevMedio)) {
           await adjustClientSaldo(total);
           await insertMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
         }
@@ -2346,7 +2411,7 @@ export const db = {
       if (prevHadAnticipo) {
         await adjustClientSaldo(-total);
         await insertMovement(`Aplicación anticipo Pedido #${orderRef}`, 0, total);
-      } else if (hasPaymentMedio(nextMedio) && nextMedio !== 'Cta Cte') {
+      } else if (hasPaymentMedio(nextMedio) && !isMedioCtaCte(nextMedio)) {
         await adjustClientSaldo(-total);
         await insertMovement(`Cobro Pedido #${orderRef} (${nextMedio})`, 0, total);
       }
@@ -2357,7 +2422,7 @@ export const db = {
       await adjustClientSaldo(-total);
       await insertMovement(`Reversión Pedido #${orderRef}`, 0, total);
 
-      if (prevMedio !== 'Cta Cte' && hasPaymentMedio(prevMedio)) {
+      if (!isMedioCtaCte(prevMedio) && hasPaymentMedio(prevMedio)) {
         if (nextHadAnticipo) {
           await adjustClientSaldo(-total);
           await insertMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
@@ -3718,6 +3783,195 @@ export const db = {
       localStorage.setItem('mock_productos', JSON.stringify(products));
     }
     return { success: true };
+  },
+
+  recalculateClientSaldosFromMovements: async () => {
+    const businessId = await ensureBusinessContext();
+
+    if (isSupabaseConfigured() && supabase) {
+      const { data: clientes, error: clientsErr } = await supabase
+        .from('gst_clientes')
+        .select('id')
+        .eq('business_id', businessId);
+      if (clientsErr) throw clientsErr;
+
+      let updated = 0;
+      for (const cliente of clientes || []) {
+        const { data: movs, error: movsErr } = await supabase
+          .from('gst_cliente_movimientos')
+          .select('debe, haber, fecha')
+          .eq('business_id', businessId)
+          .eq('cliente_id', cliente.id)
+          .order('fecha', { ascending: true });
+        if (movsErr) throw movsErr;
+
+        const saldo = (movs || []).reduce(
+          (sum, m) => sum + parseFloat(m.debe || 0) - parseFloat(m.haber || 0),
+          0
+        );
+        const roundedSaldo = Math.round((saldo + Number.EPSILON) * 100) / 100;
+
+        const { error: updateErr } = await supabase
+          .from('gst_clientes')
+          .update({ saldo: roundedSaldo })
+          .eq('id', cliente.id)
+          .eq('business_id', businessId);
+        if (updateErr) throw updateErr;
+        updated += 1;
+      }
+
+      return { success: true, updatedClients: updated };
+    }
+
+    const storedClientes = localStorage.getItem('mock_clientes');
+    const storedMovs = localStorage.getItem('mock_movimientos');
+    let clientes = storedClientes ? JSON.parse(storedClientes) : [];
+    const movements = storedMovs ? JSON.parse(storedMovs) : [];
+
+    clientes = clientes.map((cliente) => {
+      const clientMovs = movements
+        .filter((m) => m.cliente_id === cliente.id)
+        .sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
+      const saldo = clientMovs.reduce(
+        (sum, m) => sum + parseFloat(m.debe || 0) - parseFloat(m.haber || 0),
+        0
+      );
+      return {
+        ...cliente,
+        saldo: Math.round((saldo + Number.EPSILON) * 100) / 100,
+      };
+    });
+
+    localStorage.setItem('mock_clientes', JSON.stringify(clientes));
+    return { success: true, updatedClients: clientes.length };
+  },
+
+  syncCuentaCorrienteFromFinalizedOrders: async () => {
+    const adminCheck = await requireBusinessAdmin();
+    if (!adminCheck.ok) throw new Error(adminCheck.error);
+
+    const businessId = await ensureBusinessContext();
+    let processed = 0;
+    let fixed = 0;
+    let alreadyOk = 0;
+
+    if (isSupabaseConfigured() && supabase) {
+      const { data: orders, error: ordersErr } = await supabase
+        .from('gst_pedidos')
+        .select('*')
+        .eq('business_id', businessId);
+      if (ordersErr) throw ordersErr;
+
+      const finalizedOrders = (orders || []).filter(
+        (order) => isFinalizadoEstadoValue(order.estado) && !isCancelledEstadoValue(order.estado)
+      );
+
+      const { data: allMovements, error: movsErr } = await supabase
+        .from('gst_cliente_movimientos')
+        .select('*')
+        .eq('business_id', businessId);
+      if (movsErr) throw movsErr;
+
+      const movementsByClient = {};
+      for (const mov of allMovements || []) {
+        if (!movementsByClient[mov.cliente_id]) movementsByClient[mov.cliente_id] = [];
+        movementsByClient[mov.cliente_id].push(mov);
+      }
+
+      for (const order of finalizedOrders) {
+        processed += 1;
+        const orderRef = getOrderMovementRef(order.id);
+        const clientMovements = movementsByClient[order.cliente_id] || [];
+        const relatedMovements = getOrderRelatedMovements(clientMovements, orderRef);
+
+        if (isFinalizedOrderCCComplete(order, relatedMovements)) {
+          alreadyOk += 1;
+          continue;
+        }
+
+        const inserts = buildMissingFinalizeMovements(order, relatedMovements);
+        if (!inserts.length) {
+          alreadyOk += 1;
+          continue;
+        }
+
+        for (const mov of inserts) {
+          const { error: insertErr } = await supabase.from('gst_cliente_movimientos').insert([{
+            business_id: businessId,
+            cliente_id: order.cliente_id,
+            concepto: mov.concepto,
+            debe: mov.debe,
+            haber: mov.haber,
+            fecha: mov.fecha,
+          }]);
+          if (insertErr) throw insertErr;
+
+          if (!movementsByClient[order.cliente_id]) movementsByClient[order.cliente_id] = [];
+          movementsByClient[order.cliente_id].push(mov);
+        }
+
+        fixed += 1;
+      }
+
+      const recalc = await db.recalculateClientSaldosFromMovements();
+      return {
+        success: true,
+        processed,
+        fixed,
+        alreadyOk,
+        updatedClients: recalc.updatedClients || 0,
+      };
+    }
+
+    const storedOrders = localStorage.getItem('mock_pedidos');
+    const storedMovs = localStorage.getItem('mock_movimientos');
+    let orders = storedOrders ? JSON.parse(storedOrders) : [];
+    let movements = storedMovs ? JSON.parse(storedMovs) : [];
+
+    const finalizedOrders = orders.filter(
+      (order) => isFinalizadoEstadoValue(order.estado) && !isCancelledEstadoValue(order.estado)
+    );
+
+    for (const order of finalizedOrders) {
+      processed += 1;
+      const orderRef = getOrderMovementRef(order.id);
+      const clientMovements = movements.filter((m) => m.cliente_id === order.cliente_id);
+      const relatedMovements = getOrderRelatedMovements(clientMovements, orderRef);
+
+      if (isFinalizedOrderCCComplete(order, relatedMovements)) {
+        alreadyOk += 1;
+        continue;
+      }
+
+      const inserts = buildMissingFinalizeMovements(order, relatedMovements);
+      if (!inserts.length) {
+        alreadyOk += 1;
+        continue;
+      }
+
+      for (const mov of inserts) {
+        movements.push({
+          id: `m_sync_${Date.now()}_${Math.random()}`,
+          cliente_id: order.cliente_id,
+          fecha: mov.fecha,
+          concepto: mov.concepto,
+          debe: mov.debe,
+          haber: mov.haber,
+        });
+      }
+      fixed += 1;
+    }
+
+    localStorage.setItem('mock_movimientos', JSON.stringify(movements));
+    const recalc = await db.recalculateClientSaldosFromMovements();
+
+    return {
+      success: true,
+      processed,
+      fixed,
+      alreadyOk,
+      updatedClients: recalc.updatedClients || 0,
+    };
   },
 
   clearAllPedidos: async () => {
