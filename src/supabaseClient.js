@@ -945,9 +945,6 @@ export const db = {
       .map((name) => String(name || '').trim())
       .filter((name) => name.length > 0);
 
-    const adminCheck = await requireBusinessAdmin();
-    if (!adminCheck.ok) return { success: false, error: adminCheck.error };
-
     const result = isSupabaseConfigured() && supabase
       ? await saveBusinessConfig(BUSINESS_CONFIG.REPARTIDORES, cleanList)
       : { ok: true };

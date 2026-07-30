@@ -194,6 +194,9 @@ function Clientes({ navigate, profile, accentColor }) {
   // Orders View states
   const [orders, setOrders] = useState([]);
   const [repartidores, setRepartidores] = useState([]);
+  const [newRepartidorInput, setNewRepartidorInput] = useState('');
+  const [repartidoresSaving, setRepartidoresSaving] = useState(false);
+  const [quickRepartidorInput, setQuickRepartidorInput] = useState('');
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [selectedOrderIds, setSelectedOrderIds] = useState([]);
   const [selectedOrderForInvoice, setSelectedOrderForInvoice] = useState(null);
@@ -880,6 +883,12 @@ function Clientes({ navigate, profile, accentColor }) {
   }, [viewMode]);
 
   useEffect(() => {
+    if (viewMode === 'repartidores') {
+      loadRepartidores();
+    }
+  }, [viewMode]);
+
+  useEffect(() => {
     const fee = resolveDeliveryFee(products);
     setDeliveryFee(fee);
     setOrderItems((prev) => {
@@ -1035,6 +1044,52 @@ function Clientes({ navigate, profile, accentColor }) {
     } finally {
       setLoadingOrders(false);
     }
+  };
+
+  const loadRepartidores = async () => {
+    try {
+      const reps = await db.getRepartidores();
+      setRepartidores(reps || []);
+    } catch (e) {
+      console.error('Error loading repartidores:', e);
+    }
+  };
+
+  const persistRepartidores = async (list) => {
+    setRepartidoresSaving(true);
+    try {
+      const res = await db.saveRepartidores(list);
+      if (!res.success) {
+        alert(res.error || 'No se pudo guardar el listado de repartidores.');
+        return false;
+      }
+      setRepartidores(list);
+      return true;
+    } catch (err) {
+      alert(err.message || 'Error al guardar repartidores.');
+      return false;
+    } finally {
+      setRepartidoresSaving(false);
+    }
+  };
+
+  const handleAddRepartidor = async (e, nameOverride) => {
+    if (e) e.preventDefault();
+    const val = (nameOverride ?? newRepartidorInput).trim();
+    if (!val || repartidores.includes(val)) return;
+    await persistRepartidores([...repartidores, val]);
+    setNewRepartidorInput('');
+    setQuickRepartidorInput('');
+    setBulkRepartidorName(val);
+  };
+
+  const handleRemoveRepartidor = async (index) => {
+    const next = repartidores.filter((_, i) => i !== index);
+    await persistRepartidores(next);
+  };
+
+  const handleQuickAddRepartidor = async (e) => {
+    await handleAddRepartidor(e, quickRepartidorInput);
   };
 
   const getOrderClientSaldo = (order) => {
@@ -2545,7 +2600,7 @@ function Clientes({ navigate, profile, accentColor }) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1.5px solid var(--border-color)', paddingBottom: '12px', marginBottom: '24px' }}>
         <h2 style={{ fontSize: '1.5rem', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
           <i className="bi bi-journal-text" style={{ color: accentColor || '#8b5cf6' }}></i>
-          {viewMode === 'register' ? 'Cargar Pedido' : viewMode === 'orders' ? 'Listado de Pedidos' : viewMode === 'products' ? 'Inventario de Productos' : 'Gestión de Clientes'}
+          {viewMode === 'register' ? 'Cargar Pedido' : viewMode === 'orders' ? 'Listado de Pedidos' : viewMode === 'repartidores' ? 'Repartidores' : viewMode === 'products' ? 'Inventario de Productos' : 'Gestión de Clientes'}
         </h2>
         
         <div className="flex-row-group">
@@ -2596,6 +2651,18 @@ function Clientes({ navigate, profile, accentColor }) {
             onClick={() => setViewMode('clients')}
           >
             <i className="bi bi-people me-1"></i> Clientes
+          </button>
+          <button 
+            type="button" 
+            className="btn-new-task"
+            style={{ 
+              backgroundColor: viewMode === 'repartidores' ? '#2563eb' : 'transparent',
+              color: viewMode === 'repartidores' ? '#ffffff' : '#2563eb',
+              border: '1px solid #2563eb'
+            }}
+            onClick={() => setViewMode('repartidores')}
+          >
+            <i className="bi bi-truck me-1"></i> Repartidores ({repartidores.length})
           </button>
         </div>
       </div>
@@ -4355,24 +4422,46 @@ function Clientes({ navigate, profile, accentColor }) {
                 <div className="form-group">
                   <label className="form-label">Repartidor</label>
                   {repartidores.length > 0 ? (
-                    <select
-                      className="form-select"
-                      required
-                      value={bulkRepartidorName}
-                      onChange={(e) => setBulkRepartidorName(e.target.value)}
-                      autoFocus
-                    >
-                      <option value="">Seleccionar repartidor...</option>
-                      {repartidores.map((name) => (
-                        <option key={name} value={name}>{name}</option>
-                      ))}
-                    </select>
+                    <>
+                      <select
+                        className="form-select"
+                        required
+                        value={bulkRepartidorName}
+                        onChange={(e) => setBulkRepartidorName(e.target.value)}
+                        autoFocus
+                      >
+                        <option value="">Seleccionar repartidor...</option>
+                        {repartidores.map((name) => (
+                          <option key={name} value={name}>{name}</option>
+                        ))}
+                      </select>
+                      <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={{ margin: 0, fontSize: '0.85rem' }}
+                          placeholder="Agregar repartidor nuevo..."
+                          value={quickRepartidorInput}
+                          onChange={(e) => setQuickRepartidorInput(e.target.value)}
+                          disabled={repartidoresSaving}
+                        />
+                        <button
+                          type="button"
+                          className="btn-new-task"
+                          style={{ backgroundColor: '#2563eb', color: '#fff', margin: 0, whiteSpace: 'nowrap' }}
+                          onClick={handleQuickAddRepartidor}
+                          disabled={repartidoresSaving || !quickRepartidorInput.trim()}
+                        >
+                          <i className="bi bi-plus-lg"></i>
+                        </button>
+                      </div>
+                    </>
                   ) : (
                     <>
                       <div className="alert-box" style={{ backgroundColor: '#fffbeb', borderColor: '#fde68a', color: '#92400e', fontSize: '0.82rem', marginBottom: '10px' }}>
                         <i className="bi bi-info-circle-fill"></i>
                         <div>
-                          No hay repartidores cargados. Configuralos en <strong>Configuración → Módulos → Clientes</strong>.
+                          No hay repartidores cargados. Agregá uno acá abajo o en la pestaña <strong>Repartidores</strong>.
                         </div>
                       </div>
                       <input 
@@ -4384,6 +4473,15 @@ function Clientes({ navigate, profile, accentColor }) {
                         onChange={(e) => setBulkRepartidorName(e.target.value)}
                         autoFocus
                       />
+                      <button
+                        type="button"
+                        className="btn-new-task"
+                        style={{ backgroundColor: '#2563eb', color: '#fff', marginTop: '10px', width: '100%' }}
+                        onClick={(e) => handleAddRepartidor(e, bulkRepartidorName)}
+                        disabled={repartidoresSaving || !bulkRepartidorName.trim()}
+                      >
+                        {repartidoresSaving ? 'Guardando...' : 'Guardar y usar repartidor'}
+                      </button>
                     </>
                   )}
                 </div>
@@ -5465,6 +5563,76 @@ function Clientes({ navigate, profile, accentColor }) {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* VIEW: REPARTIDORES                                             */}
+      {/* ============================================================== */}
+      {viewMode === 'repartidores' && (
+        <div>
+          <div style={{ marginBottom: '16px', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+            Cargá acá los repartidores para asignarlos rápido al enviar pedidos a reparto.
+          </div>
+
+          <form onSubmit={handleAddRepartidor} style={{ display: 'flex', gap: '10px', marginBottom: '20px', flexWrap: 'wrap' }}>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="Nombre del repartidor..."
+              value={newRepartidorInput}
+              onChange={(e) => setNewRepartidorInput(e.target.value)}
+              style={{ flex: '1 1 240px', margin: 0 }}
+              disabled={repartidoresSaving}
+            />
+            <button
+              type="submit"
+              className="btn-new-task"
+              style={{ backgroundColor: '#2563eb', color: '#fff' }}
+              disabled={repartidoresSaving || !newRepartidorInput.trim()}
+            >
+              <i className="bi bi-plus-lg me-1"></i>
+              {repartidoresSaving ? 'Guardando...' : 'Agregar'}
+            </button>
+          </form>
+
+          {repartidores.length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {repartidores.map((name, index) => (
+                <div
+                  key={name}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    padding: '12px 14px',
+                    border: '1px solid var(--border-color)',
+                    borderRadius: '10px',
+                    backgroundColor: '#f8fafc',
+                  }}
+                >
+                  <span style={{ fontWeight: '600' }}>
+                    <i className="bi bi-person-badge me-2" style={{ color: '#2563eb' }}></i>
+                    {name}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-nav-back"
+                    style={{ padding: '4px 10px', color: '#ef4444', border: '1px solid #fecaca' }}
+                    onClick={() => handleRemoveRepartidor(index)}
+                    disabled={repartidoresSaving}
+                    title="Quitar repartidor"
+                  >
+                    <i className="bi bi-trash-fill"></i>
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center text-muted p-4 small" style={{ border: '1px dashed var(--border-color)', borderRadius: '10px', backgroundColor: '#f8fafc' }}>
+              Todavía no hay repartidores cargados.
+            </div>
+          )}
         </div>
       )}
 
