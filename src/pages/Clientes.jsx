@@ -86,16 +86,41 @@ const isOrderCancelled = (order) => {
 
 const hasPaymentMedio = (medio) => !!medio && String(medio).trim() !== '';
 
-const isOrderPaid = (order) => {
-  if (!order || isOrderCancelled(order)) return false;
-  const estLower = (order.estado || '').toLowerCase();
-  return estLower === 'finalizado' || estLower === 'cobrado' || hasPaymentMedio(order.medio_pago);
+const normalizeOrderEstado = (order) => (order?.estado || '').toLowerCase().trim();
+
+const getOrderShippingEstado = (order) => {
+  const est = normalizeOrderEstado(order);
+  // Legacy: el cobro se guardó como estado "Pagado"
+  if (est === 'pagado') {
+    if (!order?.con_envio) return 'Pendiente';
+    return order.repartidor ? 'Entregado' : 'Pendiente';
+  }
+  if (est === 'cobrado') return 'Finalizado';
+  return order?.estado || 'Pendiente';
 };
+
+const getOrderShippingEstadoLower = (order) => getOrderShippingEstado(order).toLowerCase();
+
+const isOrderPagado = (order) => {
+  if (!order || isOrderCancelled(order)) return false;
+  return hasPaymentMedio(order.medio_pago);
+};
+
+const isOrderCobroPendiente = (order) => {
+  if (!order || isOrderCancelled(order) || isOrderFinalizado(order)) return false;
+  return !hasPaymentMedio(order.medio_pago);
+};
+
+const isOrderFinalizado = (order) => {
+  const est = normalizeOrderEstado(order);
+  return est === 'finalizado' || est === 'cobrado';
+};
+
+const isOrderPaid = (order) => isOrderPagado(order) || isOrderFinalizado(order);
 
 const canCobrarOrder = (order) => {
   if (!order || isOrderCancelled(order)) return false;
-  const estLower = (order.estado || '').toLowerCase();
-  return estLower !== 'finalizado' && estLower !== 'cobrado';
+  return !isOrderFinalizado(order);
 };
 
 function Clientes({ navigate, profile, accentColor }) {
@@ -2329,7 +2354,7 @@ function Clientes({ navigate, profile, accentColor }) {
     if (typeFilter === 'delivery' && !o.con_envio) return false;
     if (typeFilter === 'local' && o.con_envio) return false;
 
-    const estLower = (o.estado || '').toLowerCase();
+    const estLower = getOrderShippingEstadoLower(o);
     const cancelled = isOrderCancelled(o);
 
     if (statusFilter === 'cancelados') {
@@ -2340,15 +2365,8 @@ function Clientes({ navigate, profile, accentColor }) {
     // Apply status filter
     if (statusFilter === 'pendiente' && estLower !== 'pendiente') return false;
     if (statusFilter === 'en_reparto' && estLower !== 'en reparto' && estLower !== 'en viaje' && estLower !== 'repartiendo') return false;
-    if (statusFilter === 'entregado') {
-      if (typeFilter === 'delivery' && (estLower !== 'entregado' || o.medio_pago)) return false;
-      if (typeFilter === 'local' && estLower !== 'cobrado' && estLower !== 'entregado') return false;
-      if (!typeFilter && estLower !== 'entregado' && estLower !== 'cobrado') return false;
-    }
-    if (statusFilter === 'finalizado') {
-      const isFinished = estLower === 'finalizado' || estLower === 'cobrado' || (estLower === 'entregado' && o.medio_pago);
-      if (!isFinished) return false;
-    }
+    if (statusFilter === 'entregado' && estLower !== 'entregado') return false;
+    if (statusFilter === 'finalizado' && !isOrderFinalizado(o)) return false;
     return true;
   }).sort((a, b) => {
     let comparison = 0;
@@ -2361,11 +2379,7 @@ function Clientes({ navigate, profile, accentColor }) {
       const bTipo = b.con_envio ? 'Delivery' : 'Local';
       comparison = aTipo.localeCompare(bTipo);
     } else if (orderSortField === 'estado') {
-      const aFinished = (a.estado || '').toLowerCase() === 'finalizado' || (a.estado || '').toLowerCase() === 'cobrado' || ((a.estado || '').toLowerCase() === 'entregado' && a.medio_pago);
-      const bFinished = (b.estado || '').toLowerCase() === 'finalizado' || (b.estado || '').toLowerCase() === 'cobrado' || ((b.estado || '').toLowerCase() === 'entregado' && b.medio_pago);
-      const aStatusStr = aFinished ? 'finalizado' : (a.estado || '').toLowerCase();
-      const bStatusStr = bFinished ? 'finalizado' : (b.estado || '').toLowerCase();
-      comparison = aStatusStr.localeCompare(bStatusStr);
+      comparison = getOrderShippingEstadoLower(a).localeCompare(getOrderShippingEstadoLower(b));
     } else if (orderSortField === 'detalles') {
       const aDet = (a.direccion_envio || '') + (a.repartidor || '') + (a.medio_pago || '');
       const bDet = (b.direccion_envio || '') + (b.repartidor || '') + (b.medio_pago || '');
@@ -2444,10 +2458,14 @@ function Clientes({ navigate, profile, accentColor }) {
     
     try {
       for (const id of selectedOrderIds) {
+        const order = orders.find(o => o.id === id);
         const orderPaymentMethod = bulkOrdersPayments[id] || 'Efectivo';
-        await db.updatePedidosStatus([id], {
-          medio_pago: orderPaymentMethod
-        });
+        const updates = { medio_pago: orderPaymentMethod };
+        // Preservar estado de envío; corregir registros legacy con estado "Pagado"
+        if (order && normalizeOrderEstado(order) === 'pagado') {
+          updates.estado = getOrderShippingEstado(order);
+        }
+        await db.updatePedidosStatus([id], updates);
       }
       
       setSelectedOrderIds([]);
@@ -2536,11 +2554,8 @@ function Clientes({ navigate, profile, accentColor }) {
 
   reportOrders.forEach(o => {
     const total = parseFloat(o.total || 0);
-    const estLower = (o.estado || '').toLowerCase();
 
-    const isOrderFinalized = estLower === 'finalizado' || estLower === 'cobrado' || (estLower === 'entregado' && o.medio_pago);
-
-    if (isOrderFinalized) {
+    if (isOrderFinalizado(o) || isOrderPagado(o)) {
       const method = resolveMedioPagoKey(o.medio_pago);
       if (salesByMethod[method] !== undefined) {
         salesByMethod[method] += total;
@@ -3330,7 +3345,7 @@ function Clientes({ navigate, profile, accentColor }) {
 
             {/* Filter Row 2: Estado */}
             <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-              <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: 'var(--text-muted)', marginRight: '10px' }}>Estado:</span>
+              <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: 'var(--text-muted)', marginRight: '10px' }}>Envío:</span>
               {typeFilter === null ? (
                 <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
                   Selecciona Delivery o Local para ver filtros de estado y habilitar selección múltiple.
@@ -3369,7 +3384,7 @@ function Clientes({ navigate, profile, accentColor }) {
                       setSelectedOrderIds([]);
                     }}
                   >
-                    <i className="bi bi-clock me-1"></i> Pendientes ({dateFilteredOrders.filter(o => o.con_envio && !isOrderCancelled(o) && (o.estado || '').toLowerCase() === 'pendiente').length})
+                    <i className="bi bi-clock me-1"></i> Pendientes ({dateFilteredOrders.filter(o => o.con_envio && !isOrderCancelled(o) && getOrderShippingEstadoLower(o) === 'pendiente').length})
                   </button>
                   <button 
                     type="button" 
@@ -3386,7 +3401,7 @@ function Clientes({ navigate, profile, accentColor }) {
                       setSelectedOrderIds([]);
                     }}
                   >
-                    <i className="bi bi-compass me-1"></i> En reparto ({dateFilteredOrders.filter(o => o.con_envio && ['en reparto', 'en viaje', 'repartiendo'].includes((o.estado || '').toLowerCase())).length})
+                    <i className="bi bi-compass me-1"></i> En reparto ({dateFilteredOrders.filter(o => o.con_envio && ['en reparto', 'en viaje', 'repartiendo'].includes(getOrderShippingEstadoLower(o))).length})
                   </button>
                   <button 
                     type="button" 
@@ -3403,7 +3418,7 @@ function Clientes({ navigate, profile, accentColor }) {
                       setSelectedOrderIds([]);
                     }}
                   >
-                    <i className="bi bi-check-circle me-1"></i> Entregados ({dateFilteredOrders.filter(o => o.con_envio && (o.estado || '').toLowerCase() === 'entregado' && !o.medio_pago).length})
+                    <i className="bi bi-check-circle me-1"></i> Entregados ({dateFilteredOrders.filter(o => o.con_envio && getOrderShippingEstadoLower(o) === 'entregado').length})
                   </button>
                   <button 
                     type="button" 
@@ -3420,7 +3435,7 @@ function Clientes({ navigate, profile, accentColor }) {
                       setSelectedOrderIds([]);
                     }}
                   >
-                    <i className="bi bi-check-circle-fill me-1"></i> Finalizados ({dateFilteredOrders.filter(o => o.con_envio && !isOrderCancelled(o) && ((o.estado || '').toLowerCase() === 'finalizado' || (o.estado || '').toLowerCase() === 'cobrado' || ((o.estado || '').toLowerCase() === 'entregado' && o.medio_pago))).length})
+                    <i className="bi bi-check-circle-fill me-1"></i> Finalizados ({dateFilteredOrders.filter(o => o.con_envio && !isOrderCancelled(o) && isOrderFinalizado(o)).length})
                   </button>
                   <button 
                     type="button" 
@@ -3474,7 +3489,7 @@ function Clientes({ navigate, profile, accentColor }) {
                       setSelectedOrderIds([]);
                     }}
                   >
-                    <i className="bi bi-clock me-1"></i> Pendientes ({dateFilteredOrders.filter(o => !o.con_envio && !isOrderCancelled(o) && (o.estado || '').toLowerCase() === 'pendiente').length})
+                    <i className="bi bi-clock me-1"></i> Pendientes ({dateFilteredOrders.filter(o => !o.con_envio && !isOrderCancelled(o) && getOrderShippingEstadoLower(o) === 'pendiente').length})
                   </button>
                   <button 
                     type="button" 
@@ -3491,7 +3506,7 @@ function Clientes({ navigate, profile, accentColor }) {
                       setSelectedOrderIds([]);
                     }}
                   >
-                    <i className="bi bi-check-circle-fill me-1"></i> Finalizados ({dateFilteredOrders.filter(o => !o.con_envio && !isOrderCancelled(o) && ((o.estado || '').toLowerCase() === 'finalizado' || ['cobrado', 'entregado'].includes((o.estado || '').toLowerCase()))).length})
+                    <i className="bi bi-check-circle-fill me-1"></i> Finalizados ({dateFilteredOrders.filter(o => !o.con_envio && !isOrderCancelled(o) && isOrderFinalizado(o)).length})
                   </button>
                   <button 
                     type="button" 
@@ -3605,6 +3620,15 @@ function Clientes({ navigate, profile, accentColor }) {
                     <button 
                       type="button" 
                       className="btn-new-task" 
+                      style={{ backgroundColor: '#047857' }}
+                      onClick={() => applyBulkStatus({ estado: 'Finalizado' })}
+                    >
+                      <i className="bi bi-check-circle-fill me-1"></i> Finalizar Pedidos
+                    </button>
+
+                    <button 
+                      type="button" 
+                      className="btn-new-task" 
                       style={{ backgroundColor: '#64748b' }}
                       onClick={() => applyBulkStatus({ estado: 'Pendiente', repartidor: null, medio_pago: null })}
                     >
@@ -3655,6 +3679,15 @@ function Clientes({ navigate, profile, accentColor }) {
                       onClick={triggerBulkCobrarRendir}
                     >
                       <i className="bi bi-cash-coin me-1"></i> Cobrar Pedidos
+                    </button>
+
+                    <button 
+                      type="button" 
+                      className="btn-new-task" 
+                      style={{ backgroundColor: '#047857' }}
+                      onClick={() => applyBulkStatus({ estado: 'Finalizado' })}
+                    >
+                      <i className="bi bi-check-circle-fill me-1"></i> Finalizar Pedidos
                     </button>
 
                     <button 
@@ -3757,7 +3790,10 @@ function Clientes({ navigate, profile, accentColor }) {
                       style={{ padding: '12px', textAlign: 'center', cursor: 'pointer', userSelect: 'none' }}
                       onClick={() => handleSortOrders('estado')}
                     >
-                      Estado {orderSortField === 'estado' && (orderSortAsc ? '▴' : '▾')}
+                      Envío {orderSortField === 'estado' && (orderSortAsc ? '▴' : '▾')}
+                    </th>
+                    <th style={{ padding: '12px', textAlign: 'center' }}>
+                      Cobro
                     </th>
                     <th 
                       style={{ padding: '12px', cursor: 'pointer', userSelect: 'none' }}
@@ -3778,20 +3814,21 @@ function Clientes({ navigate, profile, accentColor }) {
                   {filteredOrders.map(order => {
                     const isSelected = selectedOrderIds.includes(order.id);
                     const isCancelled = isOrderCancelled(order);
-                    const isFinished = (order.estado || '').toLowerCase() === 'finalizado' || (order.estado || '').toLowerCase() === 'cobrado' || ((order.estado || '').toLowerCase() === 'entregado' && order.medio_pago);
+                    const isFinished = isOrderFinalizado(order);
                     const dateFmt = new Date(order.fecha).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
                     const clientSaldo = getOrderClientSaldo(order);
-                    const estLower = (order.estado || '').toLowerCase();
+                    const shippingEstado = getOrderShippingEstado(order);
+                    const estLower = getOrderShippingEstadoLower(order);
                     let badgeBg = '#cbd5e1'; // grey
                     let badgeText = '#334155';
                     if (estLower === 'pendiente') {
                       badgeBg = '#dbeafe'; badgeText = '#1e40af'; // blue
                     } else if (estLower === 'en reparto' || estLower === 'en viaje' || estLower === 'repartiendo') {
                       badgeBg = '#ffedd5'; badgeText = '#9a3412'; // orange
-                    } else if (estLower === 'entregado' && !order.medio_pago) {
-                      badgeBg = '#d1fae5'; badgeText = '#065f46'; // light green (delivered but unpaid)
-                    } else if (estLower === 'finalizado' || estLower === 'cobrado' || (estLower === 'entregado' && order.medio_pago)) {
-                      badgeBg = '#a7f3d0'; badgeText = '#047857'; // dark emerald (paid/finalized)
+                    } else if (estLower === 'entregado') {
+                      badgeBg = '#d1fae5'; badgeText = '#065f46'; // light green
+                    } else if (isFinished) {
+                      badgeBg = '#a7f3d0'; badgeText = '#047857'; // dark emerald
                     } else if (isCancelled) {
                       badgeBg = '#fee2e2'; badgeText = '#991b1b'; // red
                     }
@@ -3861,8 +3898,44 @@ function Clientes({ navigate, profile, accentColor }) {
                               textTransform: 'uppercase'
                             }}
                           >
-                            {(estLower === 'entregado' && order.medio_pago) ? 'FINALIZADO' : order.estado}
+                            {shippingEstado}
                           </span>
+                        </td>
+                        <td style={{ padding: '12px', textAlign: 'center' }}>
+                          {isOrderCancelled(order) ? (
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>—</span>
+                          ) : isOrderPagado(order) || isFinished ? (
+                            <span 
+                              style={{ 
+                                display: 'inline-block',
+                                padding: '2px 8px', 
+                                borderRadius: '12px', 
+                                fontSize: '0.75rem', 
+                                fontWeight: '700', 
+                                backgroundColor: '#ccfbf1', 
+                                color: '#0f766e',
+                                textTransform: 'uppercase'
+                              }}
+                              title={order.medio_pago || ''}
+                            >
+                              Pagado
+                            </span>
+                          ) : (
+                            <span 
+                              style={{ 
+                                display: 'inline-block',
+                                padding: '2px 8px', 
+                                borderRadius: '12px', 
+                                fontSize: '0.75rem', 
+                                fontWeight: '700', 
+                                backgroundColor: '#fee2e2', 
+                                color: '#b91c1c',
+                                textTransform: 'uppercase'
+                              }}
+                            >
+                              Pendiente
+                            </span>
+                          )}
                         </td>
                         <td style={{ padding: '12px', fontSize: '0.8rem' }}>
                           {order.con_envio && order.direccion_envio && (
@@ -3960,7 +4033,7 @@ function Clientes({ navigate, profile, accentColor }) {
                                   margin: 0
                                 }}
                                 onClick={() => handleOpenCobrarOrder(order)}
-                                title={order.con_envio ? 'Rendir / cobrar pedido' : 'Cobrar pedido'}
+                                title={isOrderPagado(order) ? 'Cambiar medio de pago' : (order.con_envio ? 'Rendir / cobrar pedido' : 'Cobrar pedido')}
                               >
                                 <i className="bi bi-cash-coin"></i>
                               </button>
@@ -4005,7 +4078,7 @@ function Clientes({ navigate, profile, accentColor }) {
                 {typeFilter === 'local' && !statusFilter && "No hay pedidos de retiro en local actualmente."}
                 {typeFilter === 'delivery' && statusFilter === 'pendiente' && "No hay pedidos delivery pendientes actualmente."}
                 {typeFilter === 'delivery' && statusFilter === 'en_reparto' && "No hay pedidos delivery en reparto actualmente."}
-                {typeFilter === 'delivery' && statusFilter === 'entregado' && "No hay pedidos delivery entregados (sin cobrar) actualmente."}
+                {typeFilter === 'delivery' && statusFilter === 'entregado' && "No hay pedidos delivery entregados actualmente."}
                 {typeFilter === 'delivery' && statusFilter === 'finalizado' && "No hay pedidos delivery finalizados actualmente."}
                 {typeFilter === 'local' && statusFilter === 'pendiente' && "No hay pedidos locales pendientes actualmente."}
                 {typeFilter === 'local' && statusFilter === 'finalizado' && "No hay pedidos locales finalizados actualmente."}
@@ -5195,6 +5268,9 @@ function Clientes({ navigate, profile, accentColor }) {
                       text = text.replace(/Cobro Pedido #/g, 'Cobro Compra #');
                       text = text.replace(/Cancelación Pedido #/g, 'Cancelación Compra #');
                       text = text.replace(/Reversión Cobro Pedido #/g, 'Reversión Cobro Compra #');
+                      text = text.replace(/Anticipo Pedido #/g, 'Anticipo Compra #');
+                      text = text.replace(/Aplicación anticipo Pedido #/g, 'Aplicación anticipo Compra #');
+                      text = text.replace(/Reversión anticipo Pedido #/g, 'Reversión anticipo Compra #');
                       
                       // Strip product details (everything after the first ' - ')
                       if (text.includes(' - ')) {

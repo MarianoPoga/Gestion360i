@@ -28,6 +28,16 @@ import {
   findExistingPeriodicItem,
   normalizePeriodicPayment,
 } from './periodicPaymentsDefaults'
+
+const resolveLegacyShippingEstadoUpdate = (order, updates) => {
+  if (updates.estado !== undefined || updates.medio_pago === undefined) return updates;
+  const est = (order.estado || '').toLowerCase();
+  if (est !== 'pagado') return updates;
+  const shippingEstado = !order.con_envio
+    ? 'Pendiente'
+    : (order.repartidor ? 'Entregado' : 'Pendiente');
+  return { ...updates, estado: shippingEstado };
+};
 import { mapCsvRowsToClientes, parseCsvText, analyzeCsvImport } from './clientesImport'
 
 // Credentials: localStorage first, then Vite env vars (for local dev)
@@ -1943,8 +1953,10 @@ export const db = {
           continue;
         }
 
+        const effectiveUpdates = resolveLegacyShippingEstadoUpdate(order, updates);
+
         const prevEstado = (order.estado || '').toLowerCase();
-        const nextEstado = (updates.estado !== undefined ? updates.estado : order.estado || '').toLowerCase();
+        const nextEstado = (effectiveUpdates.estado !== undefined ? effectiveUpdates.estado : order.estado || '').toLowerCase();
 
         if (nextEstado === 'cancelado' && prevEstado !== 'cancelado') {
           try {
@@ -1960,29 +1972,29 @@ export const db = {
         }
 
         try {
-          await db.processFinancialTransactions(order, updates);
+          await db.processFinancialTransactions(order, effectiveUpdates);
         } catch (finErr) {
           console.warn('processFinancialTransactions failed, continuing with status update:', finErr);
         }
 
         const fieldsToUpdate = {};
-        if (updates.estado !== undefined) fieldsToUpdate.estado = updates.estado;
-        if (updates.repartidor !== undefined) fieldsToUpdate.repartidor = updates.repartidor;
-        if (updates.medio_pago !== undefined) fieldsToUpdate.medio_pago = updates.medio_pago;
-        if (updates.motivo_cancelacion !== undefined) fieldsToUpdate.motivo_cancelacion = updates.motivo_cancelacion;
-        if (updates.con_envio !== undefined) {
-          fieldsToUpdate.con_envio = updates.con_envio;
-          if (updates.con_envio === false) {
+        if (effectiveUpdates.estado !== undefined) fieldsToUpdate.estado = effectiveUpdates.estado;
+        if (effectiveUpdates.repartidor !== undefined) fieldsToUpdate.repartidor = effectiveUpdates.repartidor;
+        if (effectiveUpdates.medio_pago !== undefined) fieldsToUpdate.medio_pago = effectiveUpdates.medio_pago;
+        if (effectiveUpdates.motivo_cancelacion !== undefined) fieldsToUpdate.motivo_cancelacion = effectiveUpdates.motivo_cancelacion;
+        if (effectiveUpdates.con_envio !== undefined) {
+          fieldsToUpdate.con_envio = effectiveUpdates.con_envio;
+          if (effectiveUpdates.con_envio === false) {
             fieldsToUpdate.direccion_envio = null;
             fieldsToUpdate.repartidor = null;
           }
         }
-        if (updates.cae !== undefined) fieldsToUpdate.cae = updates.cae;
-        if (updates.cae_vencimiento !== undefined) fieldsToUpdate.cae_vencimiento = updates.cae_vencimiento;
-        if (updates.factura_nro !== undefined) fieldsToUpdate.factura_nro = updates.factura_nro;
-        if (updates.factura_fecha !== undefined) fieldsToUpdate.factura_fecha = updates.factura_fecha;
-        if (updates.factura_tipo !== undefined) fieldsToUpdate.factura_tipo = updates.factura_tipo;
-        if (updates.factura_error !== undefined) fieldsToUpdate.factura_error = updates.factura_error;
+        if (effectiveUpdates.cae !== undefined) fieldsToUpdate.cae = effectiveUpdates.cae;
+        if (effectiveUpdates.cae_vencimiento !== undefined) fieldsToUpdate.cae_vencimiento = effectiveUpdates.cae_vencimiento;
+        if (effectiveUpdates.factura_nro !== undefined) fieldsToUpdate.factura_nro = effectiveUpdates.factura_nro;
+        if (effectiveUpdates.factura_fecha !== undefined) fieldsToUpdate.factura_fecha = effectiveUpdates.factura_fecha;
+        if (effectiveUpdates.factura_tipo !== undefined) fieldsToUpdate.factura_tipo = effectiveUpdates.factura_tipo;
+        if (effectiveUpdates.factura_error !== undefined) fieldsToUpdate.factura_error = effectiveUpdates.factura_error;
 
         let { error: updateErr } = await supabase
           .from('gst_pedidos')
@@ -2026,25 +2038,24 @@ export const db = {
 
     orders = orders.map(order => {
       if (ids.includes(order.id)) {
+        const effectiveUpdates = resolveLegacyShippingEstadoUpdate(order, updates);
         const prevEstado = (order.estado || '').toLowerCase();
-        const nextEstado = (updates.estado !== undefined ? updates.estado : order.estado || '').toLowerCase();
+        const nextEstado = (effectiveUpdates.estado !== undefined ? effectiveUpdates.estado : order.estado || '').toLowerCase();
         const prevConEnvio = order.con_envio;
         
         const hasPaymentMedio = (medio) => !!medio && String(medio).trim() !== '';
-        const resolveMedioPago = (o, u) => (u.medio_pago !== undefined ? u.medio_pago : o.medio_pago);
-        const isFinanciallyPaid = (estado, medio) => {
-          const e = (estado || '').toLowerCase();
-          if (e === 'cancelado') return false;
-          return e === 'finalizado' || e === 'cobrado' || hasPaymentMedio(medio);
-        };
+        const isFinalizadoEstado = (estado) => estado === 'finalizado' || estado === 'cobrado';
+        const hasAnticipo = (estado, medio) => !isFinalizadoEstado(estado) && hasPaymentMedio(medio) && medio !== 'Cta Cte';
 
-        const isPrevPaid = isFinanciallyPaid(prevEstado, order.medio_pago);
-        const isNextPaid = isFinanciallyPaid(nextEstado, resolveMedioPago(order, updates));
-        
         const prevMedio = order.medio_pago || '';
-        const nextMedio = updates.medio_pago !== undefined ? updates.medio_pago : prevMedio;
+        const nextMedio = effectiveUpdates.medio_pago !== undefined ? effectiveUpdates.medio_pago : prevMedio;
         const isPrevCtaCte = prevMedio === 'Cta Cte';
         const isNextCtaCte = nextMedio === 'Cta Cte';
+
+        const prevHadAnticipo = hasAnticipo(prevEstado, prevMedio);
+        const nextHadAnticipo = hasAnticipo(nextEstado, nextMedio);
+        const prevFinalized = isFinalizadoEstado(prevEstado);
+        const nextFinalized = isFinalizadoEstado(nextEstado);
 
         const orderRef = String(order.id).split('_')[1] || order.id;
         const total = parseFloat(order.total);
@@ -2069,47 +2080,78 @@ export const db = {
           });
         };
 
-        // A. Cancel: only affects CC if the order was already finalized
+        // A. Cancel
         if (nextEstado === 'cancelado' && prevEstado !== 'cancelado') {
           cancelledOrderItemsList.push(order.items || []);
-          if (isPrevPaid) {
+          if (prevHadAnticipo) {
+            adjustMockSaldo(total);
+            pushMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
+          } else if (prevFinalized) {
             if (prevMedio !== 'Cta Cte') {
               adjustMockSaldo(total);
               pushMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
             }
             adjustMockSaldo(-total);
-            const cancellationConcept = updates.motivo_cancelacion
-              ? `Cancelación Pedido #${orderRef} (Motivo: ${updates.motivo_cancelacion})`
+            const cancellationConcept = effectiveUpdates.motivo_cancelacion
+              ? `Cancelación Pedido #${orderRef} (Motivo: ${effectiveUpdates.motivo_cancelacion})`
               : `Cancelación Pedido #${orderRef}`;
             pushMovement(cancellationConcept, 0, total);
           }
         }
 
-        // B. Finalize: register debt, then payment if not Cta Cte
-        else if (isNextPaid && !isPrevPaid) {
+        // B. Register anticipo
+        else if (nextHadAnticipo && !prevHadAnticipo) {
+          adjustMockSaldo(-total);
+          pushMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
+        }
+
+        // C. Reverse anticipo
+        else if (prevHadAnticipo && !nextHadAnticipo && !nextFinalized) {
+          adjustMockSaldo(total);
+          pushMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
+        }
+
+        // D. Finalize
+        else if (nextFinalized && !prevFinalized) {
           adjustMockSaldo(total);
           pushMovement(`Pedido #${orderRef}`, total, 0);
 
-          if (nextMedio !== 'Cta Cte') {
+          if (prevHadAnticipo) {
+            adjustMockSaldo(-total);
+            pushMovement(`Aplicación anticipo Pedido #${orderRef}`, 0, total);
+          } else if (hasPaymentMedio(nextMedio) && nextMedio !== 'Cta Cte') {
             adjustMockSaldo(-total);
             pushMovement(`Cobro Pedido #${orderRef} (${nextMedio})`, 0, total);
           }
         }
 
-        // C. Revert from paid to unpaid
-        else if (!isNextPaid && isPrevPaid && nextEstado !== 'cancelado') {
-          if (prevMedio !== 'Cta Cte') {
-            adjustMockSaldo(total);
-            pushMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
-          }
+        // E. Revert finalize
+        else if (prevFinalized && !nextFinalized && nextEstado !== 'cancelado') {
           adjustMockSaldo(-total);
           pushMovement(`Reversión Pedido #${orderRef}`, 0, total);
+
+          if (prevMedio !== 'Cta Cte' && hasPaymentMedio(prevMedio)) {
+            if (nextHadAnticipo) {
+              adjustMockSaldo(-total);
+              pushMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
+            } else {
+              adjustMockSaldo(total);
+              pushMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
+            }
+          }
         }
 
-        // D. If payment method changed within paid states
-        else if (isNextPaid && isPrevPaid && prevMedio !== nextMedio) {
+        // F. Change payment on Pagado
+        else if (prevHadAnticipo && nextHadAnticipo && prevMedio !== nextMedio) {
+          adjustMockSaldo(total);
+          pushMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
+          adjustMockSaldo(-total);
+          pushMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
+        }
+
+        // G. Change payment on Finalizado
+        else if (nextFinalized && prevFinalized && prevMedio !== nextMedio) {
           if (isPrevCtaCte && !isNextCtaCte) {
-            // Debt to cash: Decrement balance, add credit
             clientes = clientes.map(c => {
               if (c.id === order.cliente_id) {
                 return { ...c, saldo: parseFloat(c.saldo || 0) - parseFloat(order.total) };
@@ -2125,7 +2167,6 @@ export const db = {
               haber: parseFloat(order.total)
             });
           } else if (!isPrevCtaCte && isNextCtaCte) {
-            // Cash to debt: Restore debt (increment balance), add debit/reversal
             clientes = clientes.map(c => {
               if (c.id === order.cliente_id) {
                 return { ...c, saldo: parseFloat(c.saldo || 0) + parseFloat(order.total) };
@@ -2143,25 +2184,25 @@ export const db = {
           }
         }
 
-        // 2. Apply status fields updates
+        // Apply status fields updates
         const updatedOrder = { ...order };
-        if (updates.estado !== undefined) updatedOrder.estado = updates.estado;
-        if (updates.repartidor !== undefined) updatedOrder.repartidor = updates.repartidor;
-        if (updates.medio_pago !== undefined) updatedOrder.medio_pago = updates.medio_pago;
-        if (updates.motivo_cancelacion !== undefined) updatedOrder.motivo_cancelacion = updates.motivo_cancelacion;
-        if (updates.con_envio !== undefined) {
-          updatedOrder.con_envio = updates.con_envio;
-          if (updates.con_envio === false) {
+        if (effectiveUpdates.estado !== undefined) updatedOrder.estado = effectiveUpdates.estado;
+        if (effectiveUpdates.repartidor !== undefined) updatedOrder.repartidor = effectiveUpdates.repartidor;
+        if (effectiveUpdates.medio_pago !== undefined) updatedOrder.medio_pago = effectiveUpdates.medio_pago;
+        if (effectiveUpdates.motivo_cancelacion !== undefined) updatedOrder.motivo_cancelacion = effectiveUpdates.motivo_cancelacion;
+        if (effectiveUpdates.con_envio !== undefined) {
+          updatedOrder.con_envio = effectiveUpdates.con_envio;
+          if (effectiveUpdates.con_envio === false) {
             updatedOrder.direccion_envio = null;
             updatedOrder.repartidor = null;
           }
         }
-        if (updates.cae !== undefined) updatedOrder.cae = updates.cae;
-        if (updates.cae_vencimiento !== undefined) updatedOrder.cae_vencimiento = updates.cae_vencimiento;
-        if (updates.factura_nro !== undefined) updatedOrder.factura_nro = updates.factura_nro;
-        if (updates.factura_fecha !== undefined) updatedOrder.factura_fecha = updates.factura_fecha;
-        if (updates.factura_tipo !== undefined) updatedOrder.factura_tipo = updates.factura_tipo;
-        if (updates.factura_error !== undefined) updatedOrder.factura_error = updates.factura_error;
+        if (effectiveUpdates.cae !== undefined) updatedOrder.cae = effectiveUpdates.cae;
+        if (effectiveUpdates.cae_vencimiento !== undefined) updatedOrder.cae_vencimiento = effectiveUpdates.cae_vencimiento;
+        if (effectiveUpdates.factura_nro !== undefined) updatedOrder.factura_nro = effectiveUpdates.factura_nro;
+        if (effectiveUpdates.factura_fecha !== undefined) updatedOrder.factura_fecha = effectiveUpdates.factura_fecha;
+        if (effectiveUpdates.factura_tipo !== undefined) updatedOrder.factura_tipo = effectiveUpdates.factura_tipo;
+        if (effectiveUpdates.factura_error !== undefined) updatedOrder.factura_error = effectiveUpdates.factura_error;
 
         return updatedOrder;
       }
@@ -2225,20 +2266,18 @@ export const db = {
     const orderRef = String(order.id).substring(0, 6);
 
     const hasPaymentMedio = (medio) => !!medio && String(medio).trim() !== '';
-    const resolveMedioPago = (o, u) => (u.medio_pago !== undefined ? u.medio_pago : o.medio_pago);
-    const isFinanciallyPaid = (estado, medio) => {
-      const e = (estado || '').toLowerCase();
-      if (e === 'cancelado') return false;
-      return e === 'finalizado' || e === 'cobrado' || hasPaymentMedio(medio);
-    };
-
-    const isPrevPaid = isFinanciallyPaid(prevEstado, order.medio_pago);
-    const isNextPaid = isFinanciallyPaid(nextEstado, resolveMedioPago(order, updates));
+    const isFinalizadoEstado = (estado) => estado === 'finalizado' || estado === 'cobrado';
+    const hasAnticipo = (estado, medio) => !isFinalizadoEstado(estado) && hasPaymentMedio(medio) && medio !== 'Cta Cte';
 
     const prevMedio = order.medio_pago || '';
     const nextMedio = updates.medio_pago !== undefined ? updates.medio_pago : prevMedio;
     const isPrevCtaCte = prevMedio === 'Cta Cte';
     const isNextCtaCte = nextMedio === 'Cta Cte';
+
+    const prevHadAnticipo = hasAnticipo(prevEstado, prevMedio);
+    const nextHadAnticipo = hasAnticipo(nextEstado, nextMedio);
+    const prevFinalized = isFinalizadoEstado(prevEstado);
+    const nextFinalized = isFinalizadoEstado(nextEstado);
 
     const adjustClientSaldo = async (delta) => {
       const { data: client } = await supabase
@@ -2266,9 +2305,12 @@ export const db = {
       }]);
     };
 
-    // A. Cancel: only affects CC if the order was already finalized
+    // A. Cancel
     if (nextEstado === 'cancelado' && prevEstado !== 'cancelado') {
-      if (isPrevPaid) {
+      if (prevHadAnticipo) {
+        await adjustClientSaldo(total);
+        await insertMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
+      } else if (prevFinalized) {
         if (prevMedio !== 'Cta Cte') {
           await adjustClientSaldo(total);
           await insertMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
@@ -2279,31 +2321,61 @@ export const db = {
           : `Cancelación Pedido #${orderRef}`;
         await insertMovement(cancellationConcept, 0, total);
       }
+      return;
     }
 
-    // B. Finalize: register debt on account, then payment if not Cta Cte
-    else if (isNextPaid && !isPrevPaid) {
+    // B. Register anticipo (payment → Pagado)
+    if (nextHadAnticipo && !prevHadAnticipo) {
+      await adjustClientSaldo(-total);
+      await insertMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
+    }
+
+    // C. Reverse anticipo (leave Pagado without finalizing)
+    else if (prevHadAnticipo && !nextHadAnticipo && !nextFinalized) {
+      await adjustClientSaldo(total);
+      await insertMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
+    }
+
+    // D. Finalize order
+    else if (nextFinalized && !prevFinalized) {
       await adjustClientSaldo(total);
       await insertMovement(`Pedido #${orderRef}`, total, 0);
 
-      if (nextMedio !== 'Cta Cte') {
+      if (prevHadAnticipo) {
+        await adjustClientSaldo(-total);
+        await insertMovement(`Aplicación anticipo Pedido #${orderRef}`, 0, total);
+      } else if (hasPaymentMedio(nextMedio) && nextMedio !== 'Cta Cte') {
         await adjustClientSaldo(-total);
         await insertMovement(`Cobro Pedido #${orderRef} (${nextMedio})`, 0, total);
       }
     }
 
-    // C. Revert from paid to unpaid
-    else if (!isNextPaid && isPrevPaid && nextEstado !== 'cancelado') {
-      if (prevMedio !== 'Cta Cte') {
-        await adjustClientSaldo(total);
-        await insertMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
-      }
+    // E. Revert finalize
+    else if (prevFinalized && !nextFinalized && nextEstado !== 'cancelado') {
       await adjustClientSaldo(-total);
       await insertMovement(`Reversión Pedido #${orderRef}`, 0, total);
+
+      if (prevMedio !== 'Cta Cte' && hasPaymentMedio(prevMedio)) {
+        if (nextHadAnticipo) {
+          await adjustClientSaldo(-total);
+          await insertMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
+        } else {
+          await adjustClientSaldo(total);
+          await insertMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
+        }
+      }
     }
 
-    // D. If paid state payment method changed
-    else if (isNextPaid && isPrevPaid && prevMedio !== nextMedio) {
+    // F. Change payment on Pagado (swap anticipo)
+    else if (prevHadAnticipo && nextHadAnticipo && prevMedio !== nextMedio) {
+      await adjustClientSaldo(total);
+      await insertMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
+      await adjustClientSaldo(-total);
+      await insertMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
+    }
+
+    // G. Change payment on Finalizado
+    else if (nextFinalized && prevFinalized && prevMedio !== nextMedio) {
       if (isPrevCtaCte && !isNextCtaCte) {
         const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).eq('business_id', businessId).single();
         const newSaldo = parseFloat(client.saldo || 0) - parseFloat(order.total);
