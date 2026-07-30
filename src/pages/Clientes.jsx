@@ -2391,6 +2391,7 @@ function Clientes({ navigate, profile, accentColor }) {
   });
 
   const isSelectionEnabled = typeFilter !== null && statusFilter !== null && statusFilter !== 'cancelados';
+  const showShippingColumn = statusFilter === null;
 
   const handleSelectOrder = (id) => {
     if (!isSelectionEnabled) return; // Disable selections unless both filters are selected
@@ -3780,12 +3781,14 @@ function Clientes({ navigate, profile, accentColor }) {
                     >
                       Cliente {orderSortField === 'cliente' && (orderSortAsc ? '▴' : '▾')}
                     </th>
-                    <th 
-                      style={{ padding: '12px', textAlign: 'center', cursor: 'pointer', userSelect: 'none' }}
-                      onClick={() => handleSortOrders('estado')}
-                    >
-                      Envío {orderSortField === 'estado' && (orderSortAsc ? '▴' : '▾')}
-                    </th>
+                    {showShippingColumn && (
+                      <th 
+                        style={{ padding: '12px', textAlign: 'center', cursor: 'pointer', userSelect: 'none' }}
+                        onClick={() => handleSortOrders('estado')}
+                      >
+                        Envío {orderSortField === 'estado' && (orderSortAsc ? '▴' : '▾')}
+                      </th>
+                    )}
                     <th style={{ padding: '12px', textAlign: 'center' }}>
                       Cobro
                     </th>
@@ -3868,22 +3871,24 @@ function Clientes({ navigate, profile, accentColor }) {
                             </span>
                           )}
                         </td>
-                        <td style={{ padding: '12px', textAlign: 'center' }}>
-                          <span 
-                            style={{ 
-                              display: 'inline-block',
-                              padding: '2px 8px', 
-                              borderRadius: '12px', 
-                              fontSize: '0.75rem', 
-                              fontWeight: '700', 
-                              backgroundColor: badgeBg, 
-                              color: badgeText,
-                              textTransform: 'uppercase'
-                            }}
-                          >
-                            {shippingEstado}
-                          </span>
-                        </td>
+                        {showShippingColumn && (
+                          <td style={{ padding: '12px', textAlign: 'center' }}>
+                            <span 
+                              style={{ 
+                                display: 'inline-block',
+                                padding: '2px 8px', 
+                                borderRadius: '12px', 
+                                fontSize: '0.75rem', 
+                                fontWeight: '700', 
+                                backgroundColor: badgeBg, 
+                                color: badgeText,
+                                textTransform: 'uppercase'
+                              }}
+                            >
+                              {shippingEstado}
+                            </span>
+                          </td>
+                        )}
                         <td style={{ padding: '12px', textAlign: 'center' }}>
                           {isOrderCancelled(order) ? (
                             <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>—</span>
