@@ -91,10 +91,7 @@ const isOrderPaid = (order) => {
 
 const canCobrarOrder = (order) => {
   if (!order || isOrderCancelled(order) || isOrderPaid(order)) return false;
-  const estLower = (order.estado || '').toLowerCase();
-  if (!order.con_envio && estLower === 'pendiente') return true;
-  if (order.con_envio && estLower === 'entregado' && !order.medio_pago) return true;
-  return false;
+  return true;
 };
 
 function Clientes({ navigate, profile, accentColor }) {
@@ -4606,7 +4603,7 @@ function Clientes({ navigate, profile, accentColor }) {
       {/* MODAL: EDITAR PEDIDO PENDIENTE */}
       {editOrderModal && editingOrder && (
         <div className="modal-overlay">
-          <div className="modal-content-card" style={{ maxWidth: '640px' }}>
+          <div className="modal-content-card modal-content-card--scrollable" style={{ maxWidth: '640px' }}>
             <div className="modal-header" style={{ backgroundColor: '#f59e0b' }}>
               <h5 className="modal-title" style={{ color: 'white' }}>
                 <i className="bi bi-pencil-fill me-2"></i>
@@ -4624,57 +4621,70 @@ function Clientes({ navigate, profile, accentColor }) {
                 <i className="bi bi-x-lg"></i>
               </button>
             </div>
-            <div className="modal-body">
+            <div className="modal-body-scroll">
               <div style={{ marginBottom: '16px' }}>
                 <label className="form-label" style={{ fontSize: '0.85rem', fontWeight: '700' }}>Ítems del pedido</label>
                 {editOrderItems.length > 0 ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <div className="modal-items-scroll" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {editOrderItems.map((item) => (
                       <div
                         key={item.id}
                         style={{
-                          display: 'grid',
-                          gridTemplateColumns: '1fr 70px 90px 36px',
-                          gap: '8px',
-                          alignItems: 'center',
                           padding: '8px',
                           backgroundColor: '#f8fafc',
                           borderRadius: '8px',
                           border: '1px solid #e2e8f0',
                         }}
                       >
-                        <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>{item.producto}</div>
-                        <input
-                          type="number"
-                          className="form-input input-no-spinner text-end"
-                          style={{ margin: 0, padding: '6px', fontSize: '0.8rem' }}
-                          min="0.01"
-                          step="any"
-                          value={item.cantidad}
-                          onChange={(e) => handleEditOrderItemChange(item.id, 'cantidad', e.target.value)}
-                          onKeyDown={handleNumericKeyDown}
-                          title="Cantidad"
-                        />
-                        <input
-                          type="number"
-                          className="form-input input-no-spinner text-end"
-                          style={{ margin: 0, padding: '6px', fontSize: '0.8rem' }}
-                          min="0"
-                          step="any"
-                          value={item.valor}
-                          onChange={(e) => handleEditOrderItemChange(item.id, 'valor', e.target.value)}
-                          onKeyDown={handleNumericKeyDown}
-                          title="Precio unitario"
-                        />
-                        <button
-                          type="button"
-                          className="btn-nav-back"
-                          style={{ padding: '4px', color: '#ef4444', border: 'none', margin: 0 }}
-                          onClick={() => handleRemoveEditOrderItem(item.id)}
-                          title="Quitar ítem"
+                        <div
+                          style={{
+                            display: 'grid',
+                            gridTemplateColumns: '1fr 70px 90px 36px',
+                            gap: '8px',
+                            alignItems: 'center',
+                          }}
                         >
-                          <i className="bi bi-trash-fill"></i>
-                        </button>
+                          <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>{item.producto}</div>
+                          <input
+                            type="number"
+                            className="form-input input-no-spinner text-end"
+                            style={{ margin: 0, padding: '6px', fontSize: '0.8rem' }}
+                            min="0.01"
+                            step="any"
+                            value={item.cantidad}
+                            onChange={(e) => handleEditOrderItemChange(item.id, 'cantidad', e.target.value)}
+                            onKeyDown={handleNumericKeyDown}
+                            title="Cantidad"
+                          />
+                          <input
+                            type="number"
+                            className="form-input input-no-spinner text-end"
+                            style={{ margin: 0, padding: '6px', fontSize: '0.8rem' }}
+                            min="0"
+                            step="any"
+                            value={item.valor}
+                            onChange={(e) => handleEditOrderItemChange(item.id, 'valor', e.target.value)}
+                            onKeyDown={handleNumericKeyDown}
+                            title="Precio unitario"
+                          />
+                          <button
+                            type="button"
+                            className="btn-nav-back"
+                            style={{ padding: '4px', color: '#ef4444', border: 'none', margin: 0 }}
+                            onClick={() => handleRemoveEditOrderItem(item.id)}
+                            title="Quitar ítem"
+                          >
+                            <i className="bi bi-trash-fill"></i>
+                          </button>
+                        </div>
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={{ marginTop: '6px', padding: '6px 8px', fontSize: '0.78rem', width: '100%' }}
+                          placeholder="Observación / detalle"
+                          value={item.observacion || ''}
+                          onChange={(e) => handleEditOrderItemChange(item.id, 'observacion', e.target.value)}
+                        />
                       </div>
                     ))}
                   </div>
@@ -4775,33 +4785,41 @@ function Clientes({ navigate, profile, accentColor }) {
                     <i className="bi bi-plus-lg"></i>
                   </button>
                 </div>
+                <input
+                  type="text"
+                  className="form-input"
+                  style={{ fontSize: '0.85rem', padding: '8px', marginTop: '8px', width: '100%' }}
+                  placeholder="Observación / detalle (opcional)"
+                  value={editItemObs}
+                  onChange={(e) => setEditItemObs(e.target.value)}
+                />
               </form>
+            </div>
 
-              <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
-                <button
-                  type="button"
-                  className="btn-submit"
-                  style={{ backgroundColor: '#6b7280', margin: 0 }}
-                  onClick={() => {
-                    setEditOrderModal(false);
-                    setEditingOrder(null);
-                    setEditOrderItems([]);
-                    resetEditOrderForm();
-                  }}
-                  disabled={editOrderSaving}
-                >
-                  CANCELAR
-                </button>
-                <button
-                  type="button"
-                  className="btn-submit"
-                  style={{ backgroundColor: '#f59e0b', margin: 0, flex: 1 }}
-                  onClick={handleSaveEditOrder}
-                  disabled={editOrderSaving || editOrderItems.length === 0}
-                >
-                  {editOrderSaving ? 'GUARDANDO...' : 'GUARDAR CAMBIOS'}
-                </button>
-              </div>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="btn-submit"
+                style={{ backgroundColor: '#6b7280', margin: 0 }}
+                onClick={() => {
+                  setEditOrderModal(false);
+                  setEditingOrder(null);
+                  setEditOrderItems([]);
+                  resetEditOrderForm();
+                }}
+                disabled={editOrderSaving}
+              >
+                CANCELAR
+              </button>
+              <button
+                type="button"
+                className="btn-submit"
+                style={{ backgroundColor: '#f59e0b', margin: 0, flex: 1 }}
+                onClick={handleSaveEditOrder}
+                disabled={editOrderSaving || editOrderItems.length === 0}
+              >
+                {editOrderSaving ? 'GUARDANDO...' : 'GUARDAR CAMBIOS'}
+              </button>
             </div>
           </div>
         </div>

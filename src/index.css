@@ -607,6 +607,37 @@ h1, h2, h3, h4, h5, h6 {
   padding: 20px;
 }
 
+.modal-content-card--scrollable {
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-content-card--scrollable .modal-body-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.modal-footer {
+  padding: 16px 20px;
+  border-top: 1px solid var(--border-color);
+  background: var(--card-bg);
+  flex-shrink: 0;
+  display: flex;
+  gap: 10px;
+}
+
+.modal-items-scroll {
+  max-height: min(42vh, 360px);
+  overflow-y: auto;
+  padding-right: 4px;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* Forms */
 .form-group {
   margin-bottom: 16px;
