@@ -3781,12 +3781,6 @@ function Clientes({ navigate, profile, accentColor }) {
                       Cliente {orderSortField === 'cliente' && (orderSortAsc ? '▴' : '▾')}
                     </th>
                     <th 
-                      style={{ padding: '12px', cursor: 'pointer', userSelect: 'none' }}
-                      onClick={() => handleSortOrders('tipo')}
-                    >
-                      Tipo {orderSortField === 'tipo' && (orderSortAsc ? '▴' : '▾')}
-                    </th>
-                    <th 
                       style={{ padding: '12px', textAlign: 'center', cursor: 'pointer', userSelect: 'none' }}
                       onClick={() => handleSortOrders('estado')}
                     >
@@ -3871,17 +3865,6 @@ function Clientes({ navigate, profile, accentColor }) {
                           {clientSaldo !== null && (
                             <span style={{ fontSize: '0.72rem', fontWeight: '500', color: 'var(--text-muted)', marginLeft: '4px' }}>
                               ($ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(clientSaldo)})
-                            </span>
-                          )}
-                        </td>
-                        <td style={{ padding: '12px' }}>
-                          {order.con_envio ? (
-                            <span style={{ color: '#3b82f6', fontWeight: '600' }}>
-                              <i className="bi bi-truck me-1"></i> Delivery
-                            </span>
-                          ) : (
-                            <span style={{ color: '#64748b' }}>
-                              <i className="bi bi-shop me-1"></i> Local
                             </span>
                           )}
                         </td>
