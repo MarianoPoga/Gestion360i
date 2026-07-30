@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import ExcelJS from 'exceljs'
 import { db, isSupabaseConfigured, supabase } from '../supabaseClient'
 import { CSV_IMPORT_HELP, IMPORT_FIELDS, analyzeCsvImport, getColumnLabel, normalizeIva } from '../clientesImport'
+import { getMedioIcon } from '../cierreMedios'
 
 const cleanAddressText = (str) => {
   if (!str) return '';
@@ -81,6 +82,19 @@ const createDeliveryItem = (fee, envioProduct) => ({
 const isOrderCancelled = (order) => {
   const est = (order?.estado || '').toLowerCase().trim();
   return est === 'cancelado' || est === 'cancelada' || est === 'cancelled';
+};
+
+const isOrderPaid = (order) => {
+  const estLower = (order?.estado || '').toLowerCase();
+  return estLower === 'finalizado' || estLower === 'cobrado' || (estLower === 'entregado' && order.medio_pago);
+};
+
+const canCobrarOrder = (order) => {
+  if (!order || isOrderCancelled(order) || isOrderPaid(order)) return false;
+  const estLower = (order.estado || '').toLowerCase();
+  if (!order.con_envio && estLower === 'pendiente') return true;
+  if (order.con_envio && estLower === 'entregado' && !order.medio_pago) return true;
+  return false;
 };
 
 function Clientes({ navigate, profile, accentColor }) {
@@ -938,12 +952,35 @@ function Clientes({ navigate, profile, accentColor }) {
   }, [dateFilter, customDate, orders]);
 
   const getPaymentMethodValue = (concept) => {
-    if (concept.id === 'transferencia') return 'Transferencia';
-    if (concept.id === 'tarjeta') return 'Tarjeta';
-    if (concept.id === 'qrPago') return 'QR';
-    if (concept.id === 'linkPago') return 'Link de pago';
-    if (concept.id === 'ctaCte') return 'Cta Cte';
-    return concept.label || concept.id;
+    const id = concept?.id || '';
+    if (id === 'medio_01') return 'Efectivo';
+    if (id === 'medio_02' || id === 'transferencia') return 'Transferencia';
+    if (id === 'medio_03' || id === 'tarjeta') return 'Tarjeta';
+    if (id === 'medio_04' || id === 'qrPago') return 'QR';
+    if (id === 'medio_05' || id === 'linkPago') return 'Link de pago';
+    if (id === 'medio_06' || id === 'ctaCte') return 'Cta Cte';
+    return concept.label?.trim() || id;
+  };
+
+  const enabledPaymentMethods = activePaymentMethods.filter((c) => c.enabled && c.label?.trim());
+
+  const resolveMedioPagoKey = (medioPago) => {
+    const method = String(medioPago || 'Efectivo').trim();
+    if (!method) return 'Efectivo';
+
+    for (const concept of enabledPaymentMethods) {
+      const key = getPaymentMethodValue(concept);
+      if (method === key || method === concept.label) return key;
+    }
+
+    const legacyAliases = {
+      'Transferencia Bancaria': 'Transferencia',
+      'Tarjeta (Crédito/Débito)': 'Tarjeta',
+      'QR / Mercado Pago': 'QR',
+      'Link de Pago': 'Link de pago',
+      'Cuenta Corriente (Deuda)': 'Cta Cte',
+    };
+    return legacyAliases[method] || method;
   };
 
   const getPaymentMethodEmoji = (id) => {
@@ -956,6 +993,16 @@ function Clientes({ navigate, profile, accentColor }) {
   };
 
   const getConceptIcon = (id) => {
+    if (id === 'medio_01') return 'bi-cash-coin text-success';
+    if (String(id).startsWith('medio_')) {
+      const icon = getMedioIcon(id);
+      if (id === 'medio_02') return `${icon} text-primary`;
+      if (id === 'medio_03') return `${icon} text-info`;
+      if (id === 'medio_04') return `${icon} text-warning`;
+      if (id === 'medio_05') return `${icon} text-secondary`;
+      if (id === 'medio_06') return `${icon} text-danger`;
+      return `${icon} text-dark`;
+    }
     if (id === 'transferencia') return 'bi-bank text-primary';
     if (id === 'tarjeta') return 'bi-credit-card text-info';
     if (id === 'qrPago') return 'bi-qr-code text-warning';
@@ -2334,11 +2381,12 @@ function Clientes({ navigate, profile, accentColor }) {
       }
       
       setSelectedOrderIds([]);
-      loadOrders();
-      
+      await loadOrders();
+
       // Reload client lists to update balances globally
       const cl = await db.getClientes();
       setClientes(cl);
+      setStatusFilter('finalizado');
     } catch (err) {
       console.error(err);
       alert("Error al registrar los cobros individuales.");
@@ -2354,6 +2402,12 @@ function Clientes({ navigate, profile, accentColor }) {
       initialPayments[id] = order?.medio_pago || 'Efectivo';
     });
     setBulkOrdersPayments(initialPayments);
+    setBulkPaymentModal(true);
+  };
+
+  const handleOpenCobrarOrder = (order) => {
+    setSelectedOrderIds([order.id]);
+    setBulkOrdersPayments({ [order.id]: order.medio_pago || 'Efectivo' });
     setBulkPaymentModal(true);
   };
 
@@ -2401,37 +2455,30 @@ function Clientes({ navigate, profile, accentColor }) {
   const totalSoldSum = reportOrders.reduce((sum, o) => sum + parseFloat(o.total || 0), 0);
 
   // Sales by payment method (never includes cancelled orders)
-  const salesByMethod = {
-    'Efectivo': 0,
-    'Pendiente': 0 // Open orders without resolved payment method yet
-  };
+  const salesByMethod = { Pendiente: 0 };
 
-  // Add all enabled payment methods to our tracker
-  activePaymentMethods.filter(c => c.enabled).forEach(c => {
-    const val = getPaymentMethodValue(c);
-    salesByMethod[val] = 0;
+  enabledPaymentMethods.forEach((concept) => {
+    salesByMethod[getPaymentMethodValue(concept)] = 0;
   });
-  if (salesByMethod['Cta Cte'] === undefined) {
-    salesByMethod['Cta Cte'] = 0;
+  if (salesByMethod.Efectivo === undefined) {
+    salesByMethod.Efectivo = 0;
   }
 
   reportOrders.forEach(o => {
     const total = parseFloat(o.total || 0);
     const estLower = (o.estado || '').toLowerCase();
 
-    // Check if the order is finalized/paid
     const isOrderFinalized = estLower === 'finalizado' || estLower === 'cobrado' || (estLower === 'entregado' && o.medio_pago);
 
     if (isOrderFinalized) {
-      const method = o.medio_pago || 'Efectivo';
+      const method = resolveMedioPagoKey(o.medio_pago);
       if (salesByMethod[method] !== undefined) {
         salesByMethod[method] += total;
       } else {
-        salesByMethod['Efectivo'] += total;
+        salesByMethod.Efectivo += total;
       }
     } else {
-      // Pedidos abiertos (Pendiente, En reparto, or Entregado without payment) are pending settlement
-      salesByMethod['Pendiente'] += total;
+      salesByMethod.Pendiente += total;
     }
   });
 
@@ -2440,14 +2487,14 @@ function Clientes({ navigate, profile, accentColor }) {
     let method = 'Efectivo';
     const match = r.concepto.match(/\(([^)]+)\)/);
     if (match && match[1]) {
-      method = match[1];
+      method = resolveMedioPagoKey(match[1]);
     }
-    
+
     const amt = parseFloat(r.debe || 0);
     if (salesByMethod[method] !== undefined) {
       salesByMethod[method] -= amt;
     } else {
-      salesByMethod['Efectivo'] -= amt;
+      salesByMethod.Efectivo -= amt;
     }
   });
 
@@ -3642,7 +3689,7 @@ function Clientes({ navigate, profile, accentColor }) {
                     >
                       Total {orderSortField === 'total' && (orderSortAsc ? '▴' : '▾')}
                     </th>
-                    <th style={{ padding: '12px', textAlign: 'center', width: '170px' }}>Ticket</th>
+                    <th style={{ padding: '12px', textAlign: 'center', width: '210px' }}>Ticket</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -3807,6 +3854,30 @@ function Clientes({ navigate, profile, accentColor }) {
                               </button>
                             )}
 
+                            {canCobrarOrder(order) && (
+                              <button
+                                type="button"
+                                className="btn-new-task"
+                                style={{
+                                  padding: '4px 8px',
+                                  fontSize: '0.75rem',
+                                  backgroundColor: 'transparent',
+                                  color: '#10b981',
+                                  border: '1px solid #10b981',
+                                  borderRadius: '6px',
+                                  cursor: 'pointer',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  margin: 0
+                                }}
+                                onClick={() => handleOpenCobrarOrder(order)}
+                                title={order.con_envio ? 'Rendir / cobrar pedido' : 'Cobrar pedido'}
+                              >
+                                <i className="bi bi-cash-coin"></i>
+                              </button>
+                            )}
+
                             {(order.cae || order.factura_nro) && (
                               <button
                                 type="button"
@@ -3904,15 +3975,7 @@ function Clientes({ navigate, profile, accentColor }) {
                     Desglose por Medio de Pago:
                   </span>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.85rem' }}>
-                    
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #f1f5f9', paddingBottom: '6px' }}>
-                      <span style={{ display: 'flex', alignItems: 'center' }}>
-                        <i className="bi bi-cash text-success me-2" style={{ fontSize: '1rem' }}></i> Efectivo
-                      </span>
-                      <strong>$ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(salesByMethod['Efectivo'])}</strong>
-                    </div>
-
-                    {activePaymentMethods.filter(c => c.enabled).map(concept => {
+                    {enabledPaymentMethods.map((concept) => {
                       const valueName = getPaymentMethodValue(concept);
                       const iconClass = getConceptIcon(concept.id);
                       return (
@@ -4349,7 +4412,9 @@ function Clientes({ navigate, profile, accentColor }) {
                             }}
                           >
                             <option value="Efectivo">Efectivo 💵</option>
-                            {activePaymentMethods.filter(c => c.enabled).map(concept => {
+                            {enabledPaymentMethods
+                              .filter((concept) => getPaymentMethodValue(concept) !== 'Efectivo')
+                              .map(concept => {
                               const valueName = getPaymentMethodValue(concept);
                               const emoji = getPaymentMethodEmoji(concept.id);
                               return (
