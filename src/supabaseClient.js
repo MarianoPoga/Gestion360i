@@ -1625,33 +1625,6 @@ export const db = {
           }
         }
 
-        // 3. Add movement to client ledger (Initial debit/debt)
-        const orderNum = String(orderData.id).substring(0, 6);
-        const conceptStr = `Pedido #${orderNum} - ${pedido.items.map(it => `${it.cantidad}x ${it.producto.split(' (')[0]}`).join(', ')}`;
-        const { error: movErr } = await supabase.from('gst_cliente_movimientos').insert([{
-          business_id: businessId,
-          cliente_id: pedido.cliente_id,
-          concepto: conceptStr.substring(0, 100),
-          debe: pedido.total,
-          haber: 0.00
-        }]);
-        if (movErr) throw new Error(movErr.message);
-
-        // 4. Update client balance (increases debt)
-        const { data: currentClient } = await supabase
-          .from('gst_clientes')
-          .select('saldo')
-          .eq('id', pedido.cliente_id)
-          .eq('business_id', businessId)
-          .single();
-        
-        const newSaldo = parseFloat(currentClient.saldo || 0) + parseFloat(pedido.total);
-        await supabase
-          .from('gst_clientes')
-          .update({ saldo: newSaldo })
-          .eq('id', pedido.cliente_id)
-          .eq('business_id', businessId);
-
         return { success: true };
       } catch (err) {
         console.warn("Supabase savePedido error, falling back to mock:", err);
@@ -1663,31 +1636,11 @@ export const db = {
     let clientes = storedClientes ? JSON.parse(storedClientes) : [];
     let clienteNombre = "Cliente";
     
-    // 1. Update Client Balance (increases debt)
-    clientes = clientes.map(c => {
+    clientes.forEach(c => {
       if (c.id === pedido.cliente_id) {
         clienteNombre = c.nombre;
-        return { ...c, saldo: parseFloat(c.saldo || 0) + parseFloat(pedido.total) };
       }
-      return c;
     });
-    localStorage.setItem('mock_clientes', JSON.stringify(clientes));
-
-    // 2. Add Ledger Entry (Initial debit/debt)
-    const orderId = "o_" + Date.now();
-    const orderNum = orderId.split('_')[1];
-    const storedMovs = localStorage.getItem('mock_movimientos');
-    const movements = storedMovs ? JSON.parse(storedMovs) : [];
-    const conceptStr = `Pedido #${orderNum} - ${pedido.items.map(it => `${it.cantidad}x ${it.producto.split(' (')[0]}`).join(', ')}`;
-    movements.push({
-      id: "m_" + Date.now(),
-      cliente_id: pedido.cliente_id,
-      fecha: new Date().toISOString(),
-      concepto: conceptStr.substring(0, 100),
-      debe: parseFloat(pedido.total),
-      haber: 0.00
-    });
-    localStorage.setItem('mock_movimientos', JSON.stringify(movements));
 
     // 2b. Decrement stock in Mock Products
     const storedProds = localStorage.getItem('mock_productos');
@@ -1704,6 +1657,7 @@ export const db = {
     }
 
     // 3. Save Order object in mock_pedidos
+    const orderId = "o_" + Date.now();
     const storedOrders = localStorage.getItem('mock_pedidos');
     const orders = storedOrders ? JSON.parse(storedOrders) : [];
     const newOrder = {
@@ -1773,10 +1727,6 @@ export const db = {
         }
 
         const oldItems = order.gst_pedido_items || [];
-        const oldTotal = parseFloat(order.total || 0);
-        const orderNum = String(pedidoId).substring(0, 6);
-        const conceptStr = `Pedido #${orderNum} - ${normalizedItems.map((it) => `${it.cantidad}x ${it.producto.split(' (')[0]}`).join(', ')}`;
-
         const { error: updateErr } = await supabase
           .from('gst_pedidos')
           .update({ total: parsedTotal })
@@ -1810,45 +1760,6 @@ export const db = {
           await adjustProductStock(item.producto, -parseFloat(item.cantidad));
         }
 
-        const saldoDiff = parsedTotal - oldTotal;
-        if (saldoDiff !== 0) {
-          const { data: currentClient } = await supabase
-            .from('gst_clientes')
-            .select('saldo')
-            .eq('id', cliente_id || order.cliente_id)
-            .eq('business_id', businessId)
-            .single();
-
-          if (currentClient) {
-            const newSaldo = parseFloat(currentClient.saldo || 0) + saldoDiff;
-            await supabase
-              .from('gst_clientes')
-              .update({ saldo: newSaldo })
-              .eq('id', cliente_id || order.cliente_id)
-              .eq('business_id', businessId);
-          }
-        }
-
-        const { data: movs } = await supabase
-          .from('gst_cliente_movimientos')
-          .select('id, concepto, debe')
-          .eq('cliente_id', cliente_id || order.cliente_id)
-          .eq('business_id', businessId)
-          .like('concepto', `Pedido #${orderNum}%`)
-          .order('fecha', { ascending: false })
-          .limit(1);
-
-        if (movs?.length) {
-          await supabase
-            .from('gst_cliente_movimientos')
-            .update({
-              concepto: conceptStr.substring(0, 100),
-              debe: parsedTotal,
-            })
-            .eq('id', movs[0].id)
-            .eq('business_id', businessId);
-        }
-
         return { success: true };
       } catch (err) {
         console.warn('Supabase updatePedido error, falling back to mock:', err);
@@ -1875,9 +1786,6 @@ export const db = {
     }
 
     const oldItems = order.items || [];
-    const oldTotal = parseFloat(order.total || 0);
-    const orderNum = String(pedidoId).split('_')[1] || pedidoId;
-    const conceptStr = `Pedido #${orderNum} - ${normalizedItems.map((it) => `${it.cantidad}x ${it.producto.split(' (')[0]}`).join(', ')}`;
 
     mockProds = mockProds.map((p) => {
       const oldItem = oldItems.find((it) => it.producto === p.nombre);
@@ -1895,29 +1803,6 @@ export const db = {
       items: normalizedItems,
     };
     localStorage.setItem('mock_pedidos', JSON.stringify(orders));
-
-    const saldoDiff = parsedTotal - oldTotal;
-    if (saldoDiff !== 0) {
-      clientes = clientes.map((c) => {
-        if (c.id === (cliente_id || order.cliente_id)) {
-          return { ...c, saldo: parseFloat(c.saldo || 0) + saldoDiff };
-        }
-        return c;
-      });
-      localStorage.setItem('mock_clientes', JSON.stringify(clientes));
-    }
-
-    movements = movements.map((m) => {
-      if (
-        m.cliente_id === (cliente_id || order.cliente_id) &&
-        m.concepto &&
-        m.concepto.startsWith(`Pedido #${orderNum}`)
-      ) {
-        return { ...m, concepto: conceptStr.substring(0, 100), debe: parsedTotal };
-      }
-      return m;
-    });
-    localStorage.setItem('mock_movimientos', JSON.stringify(movements));
 
     return { success: true };
   },
@@ -2104,74 +1989,64 @@ export const db = {
         const isPrevCtaCte = prevMedio === 'Cta Cte';
         const isNextCtaCte = nextMedio === 'Cta Cte';
 
-        // 1. Financial Bookkeeping
-        // A. If changing to Cancelado
-        if (nextEstado === 'cancelado' && prevEstado !== 'cancelado') {
-          // Reduce client debt balance
+        const orderRef = String(order.id).split('_')[1] || order.id;
+        const total = parseFloat(order.total);
+
+        const adjustMockSaldo = (delta) => {
           clientes = clientes.map(c => {
             if (c.id === order.cliente_id) {
-              return { ...c, saldo: parseFloat(c.saldo || 0) - parseFloat(order.total) };
+              return { ...c, saldo: parseFloat(c.saldo || 0) + parseFloat(delta) };
             }
             return c;
           });
-          
-          // Log offset credit in ledger
-          const cancellationConcept = updates.motivo_cancelacion 
-            ? `Cancelación Pedido #${String(order.id).split('_')[1] || order.id} (Motivo: ${updates.motivo_cancelacion})`
-            : `Cancelación Pedido #${String(order.id).split('_')[1] || order.id}`;
+        };
 
+        const pushMovement = (concepto, debe, haber) => {
           movements.push({
-            id: "m_c_" + Date.now() + Math.random(),
+            id: "m_" + Date.now() + Math.random(),
             cliente_id: order.cliente_id,
             fecha: new Date().toISOString(),
-            concepto: cancellationConcept,
-            debe: 0.00,
-            haber: parseFloat(order.total)
+            concepto,
+            debe,
+            haber,
           });
-        }
-        
-        // B. If changing to Paid (from a non-paid state)
-        else if (isNextPaid && !isPrevPaid) {
-          // If payment is not Cta Cte, client pays now -> subtract balance and record payment
-          if (nextMedio !== 'Cta Cte') {
-            clientes = clientes.map(c => {
-              if (c.id === order.cliente_id) {
-                return { ...c, saldo: parseFloat(c.saldo || 0) - parseFloat(order.total) };
-              }
-              return c;
-            });
+        };
 
-            movements.push({
-              id: "m_p_" + Date.now() + Math.random(),
-              cliente_id: order.cliente_id,
-              fecha: new Date().toISOString(),
-              concepto: `Cobro Pedido #${String(order.id).split('_')[1] || order.id} (${nextMedio})`,
-              debe: 0.00,
-              haber: parseFloat(order.total)
-            });
+        // 1. Financial Bookkeeping (only when order is finalized/cobrado)
+        // A. Cancel: only affects CC if the order was already finalized
+        if (nextEstado === 'cancelado' && prevEstado !== 'cancelado') {
+          if (isPrevPaid) {
+            if (prevMedio !== 'Cta Cte') {
+              adjustMockSaldo(total);
+              pushMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
+            }
+            adjustMockSaldo(-total);
+            const cancellationConcept = updates.motivo_cancelacion
+              ? `Cancelación Pedido #${orderRef} (Motivo: ${updates.motivo_cancelacion})`
+              : `Cancelación Pedido #${orderRef}`;
+            pushMovement(cancellationConcept, 0, total);
           }
         }
 
-        // C. If reverting from Paid to Unpaid (but NOT if next is cancelled)
+        // B. Finalize: register debt, then payment if not Cta Cte
+        else if (isNextPaid && !isPrevPaid) {
+          adjustMockSaldo(total);
+          pushMovement(`Pedido #${orderRef}`, total, 0);
+
+          if (nextMedio !== 'Cta Cte') {
+            adjustMockSaldo(-total);
+            pushMovement(`Cobro Pedido #${orderRef} (${nextMedio})`, 0, total);
+          }
+        }
+
+        // C. Revert from paid to unpaid
         else if (!isNextPaid && isPrevPaid && nextEstado !== 'cancelado') {
           if (prevMedio !== 'Cta Cte') {
-            // Restore client balance
-            clientes = clientes.map(c => {
-              if (c.id === order.cliente_id) {
-                return { ...c, saldo: parseFloat(c.saldo || 0) + parseFloat(order.total) };
-              }
-              return c;
-            });
-
-            movements.push({
-              id: "m_r_" + Date.now() + Math.random(),
-              cliente_id: order.cliente_id,
-              fecha: new Date().toISOString(),
-              concepto: `Reversión Cobro Pedido #${String(order.id).split('_')[1] || order.id}`,
-              debe: parseFloat(order.total),
-              haber: 0.00
-            });
+            adjustMockSaldo(total);
+            pushMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
           }
+          adjustMockSaldo(-total);
+          pushMovement(`Reversión Pedido #${orderRef}`, 0, total);
         }
 
         // D. If payment method changed within paid states
@@ -2248,78 +2123,77 @@ export const db = {
     const businessId = await ensureBusinessContext();
     const prevEstado = (order.estado || '').toLowerCase();
     const nextEstado = (updates.estado !== undefined ? updates.estado : order.estado || '').toLowerCase();
-    
+    const total = parseFloat(order.total || 0);
+    const orderRef = String(order.id).substring(0, 6);
+
     const isPrevPaid = prevEstado === 'finalizado' || prevEstado === 'cobrado' || (prevEstado === 'entregado' && order.medio_pago);
     const isNextPaid = nextEstado === 'finalizado' || nextEstado === 'cobrado' || (nextEstado === 'entregado' && updates.medio_pago);
-    
+
     const prevMedio = order.medio_pago || '';
     const nextMedio = updates.medio_pago !== undefined ? updates.medio_pago : prevMedio;
     const isPrevCtaCte = prevMedio === 'Cta Cte';
     const isNextCtaCte = nextMedio === 'Cta Cte';
-    
-    // A. If Cancelling
-    if (nextEstado === 'cancelado' && prevEstado !== 'cancelado') {
+
+    const adjustClientSaldo = async (delta) => {
       const { data: client } = await supabase
         .from('gst_clientes')
         .select('saldo')
         .eq('id', order.cliente_id)
         .eq('business_id', businessId)
         .maybeSingle();
+      if (!client) return;
+      const newSaldo = parseFloat(client.saldo || 0) + parseFloat(delta);
+      await supabase
+        .from('gst_clientes')
+        .update({ saldo: newSaldo })
+        .eq('id', order.cliente_id)
+        .eq('business_id', businessId);
+    };
 
-      if (client) {
-        const newSaldo = parseFloat(client.saldo || 0) - parseFloat(order.total);
-        await supabase
-          .from('gst_clientes')
-          .update({ saldo: newSaldo })
-          .eq('id', order.cliente_id)
-          .eq('business_id', businessId);
-      }
-
-      const cancellationConcept = updates.motivo_cancelacion
-        ? `Cancelación Pedido #${String(order.id).substring(0, 6)} (Motivo: ${updates.motivo_cancelacion})`
-        : `Cancelación Pedido #${String(order.id).substring(0, 6)}`;
-
+    const insertMovement = async (concepto, debe, haber) => {
       await supabase.from('gst_cliente_movimientos').insert([{
         business_id: businessId,
         cliente_id: order.cliente_id,
-        concepto: cancellationConcept,
-        debe: 0.00,
-        haber: order.total,
+        concepto,
+        debe,
+        haber,
       }]);
-    }
-    
-    // B. If completing/paying
-    else if (isNextPaid && !isPrevPaid) {
-      if (nextMedio !== 'Cta Cte') {
-        const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).eq('business_id', businessId).single();
-        const newSaldo = parseFloat(client.saldo || 0) - parseFloat(order.total);
-        await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id).eq('business_id', businessId);
+    };
 
-        await supabase.from('gst_cliente_movimientos').insert([{
-          business_id: businessId,
-          cliente_id: order.cliente_id,
-          concepto: `Cobro Pedido #${String(order.id).substring(0,6)} (${nextMedio})`,
-          debe: 0.00,
-          haber: order.total
-        }]);
+    // A. Cancel: only affects CC if the order was already finalized
+    if (nextEstado === 'cancelado' && prevEstado !== 'cancelado') {
+      if (isPrevPaid) {
+        if (prevMedio !== 'Cta Cte') {
+          await adjustClientSaldo(total);
+          await insertMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
+        }
+        await adjustClientSaldo(-total);
+        const cancellationConcept = updates.motivo_cancelacion
+          ? `Cancelación Pedido #${orderRef} (Motivo: ${updates.motivo_cancelacion})`
+          : `Cancelación Pedido #${orderRef}`;
+        await insertMovement(cancellationConcept, 0, total);
       }
     }
 
-    // C. If reverting from Paid to Unpaid (but NOT if next is cancelled)
+    // B. Finalize: register debt on account, then payment if not Cta Cte
+    else if (isNextPaid && !isPrevPaid) {
+      await adjustClientSaldo(total);
+      await insertMovement(`Pedido #${orderRef}`, total, 0);
+
+      if (nextMedio !== 'Cta Cte') {
+        await adjustClientSaldo(-total);
+        await insertMovement(`Cobro Pedido #${orderRef} (${nextMedio})`, 0, total);
+      }
+    }
+
+    // C. Revert from paid to unpaid
     else if (!isNextPaid && isPrevPaid && nextEstado !== 'cancelado') {
       if (prevMedio !== 'Cta Cte') {
-        const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).eq('business_id', businessId).single();
-        const newSaldo = parseFloat(client.saldo || 0) + parseFloat(order.total);
-        await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id).eq('business_id', businessId);
-
-        await supabase.from('gst_cliente_movimientos').insert([{
-          business_id: businessId,
-          cliente_id: order.cliente_id,
-          concepto: `Reversión Cobro Pedido #${String(order.id).substring(0,6)}`,
-          debe: order.total,
-          haber: 0.00
-        }]);
+        await adjustClientSaldo(total);
+        await insertMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
       }
+      await adjustClientSaldo(-total);
+      await insertMovement(`Reversión Pedido #${orderRef}`, 0, total);
     }
 
     // D. If paid state payment method changed
