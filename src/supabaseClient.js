@@ -1943,6 +1943,22 @@ export const db = {
           continue;
         }
 
+        const prevEstado = (order.estado || '').toLowerCase();
+        const nextEstado = (updates.estado !== undefined ? updates.estado : order.estado || '').toLowerCase();
+
+        if (nextEstado === 'cancelado' && prevEstado !== 'cancelado') {
+          try {
+            const { data: items } = await supabase
+              .from('gst_pedido_items')
+              .select('producto, cantidad')
+              .eq('pedido_id', id)
+              .eq('business_id', businessId);
+            await db.restoreOrderStock(items || []);
+          } catch (stockErr) {
+            console.warn('restoreOrderStock failed, continuing with status update:', stockErr);
+          }
+        }
+
         try {
           await db.processFinancialTransactions(order, updates);
         } catch (finErr) {
@@ -2006,6 +2022,7 @@ export const db = {
     let orders = storedOrders ? JSON.parse(storedOrders) : [];
     let clientes = storedClientes ? JSON.parse(storedClientes) : [];
     let movements = storedMovs ? JSON.parse(storedMovs) : [];
+    const cancelledOrderItemsList = [];
 
     orders = orders.map(order => {
       if (ids.includes(order.id)) {
@@ -2013,8 +2030,16 @@ export const db = {
         const nextEstado = (updates.estado !== undefined ? updates.estado : order.estado || '').toLowerCase();
         const prevConEnvio = order.con_envio;
         
-        const isPrevPaid = prevEstado === 'finalizado' || prevEstado === 'cobrado' || (prevEstado === 'entregado' && order.medio_pago);
-        const isNextPaid = nextEstado === 'finalizado' || nextEstado === 'cobrado' || (nextEstado === 'entregado' && updates.medio_pago);
+        const hasPaymentMedio = (medio) => !!medio && String(medio).trim() !== '';
+        const resolveMedioPago = (o, u) => (u.medio_pago !== undefined ? u.medio_pago : o.medio_pago);
+        const isFinanciallyPaid = (estado, medio) => {
+          const e = (estado || '').toLowerCase();
+          if (e === 'cancelado') return false;
+          return e === 'finalizado' || e === 'cobrado' || hasPaymentMedio(medio);
+        };
+
+        const isPrevPaid = isFinanciallyPaid(prevEstado, order.medio_pago);
+        const isNextPaid = isFinanciallyPaid(nextEstado, resolveMedioPago(order, updates));
         
         const prevMedio = order.medio_pago || '';
         const nextMedio = updates.medio_pago !== undefined ? updates.medio_pago : prevMedio;
@@ -2044,9 +2069,9 @@ export const db = {
           });
         };
 
-        // 1. Financial Bookkeeping (only when order is finalized/cobrado)
         // A. Cancel: only affects CC if the order was already finalized
         if (nextEstado === 'cancelado' && prevEstado !== 'cancelado') {
+          cancelledOrderItemsList.push(order.items || []);
           if (isPrevPaid) {
             if (prevMedio !== 'Cta Cte') {
               adjustMockSaldo(total);
@@ -2143,11 +2168,52 @@ export const db = {
       return order;
     });
 
+    for (const items of cancelledOrderItemsList) {
+      await db.restoreOrderStock(items);
+    }
+
     localStorage.setItem('mock_pedidos', JSON.stringify(orders));
     localStorage.setItem('mock_clientes', JSON.stringify(clientes));
     localStorage.setItem('mock_movimientos', JSON.stringify(movements));
 
     return { success: true };
+  },
+
+  restoreOrderStock: async (items) => {
+    if (!items?.length) return;
+
+    const businessId = await ensureBusinessContext();
+    if (isSupabaseConfigured() && supabase) {
+      for (const item of items) {
+        const { data: prodData } = await supabase
+          .from('gst_productos')
+          .select('id, stock')
+          .eq('nombre', item.producto)
+          .eq('business_id', businessId)
+          .maybeSingle();
+        if (prodData) {
+          const newStock = parseFloat(prodData.stock || 0) + parseFloat(item.cantidad);
+          await supabase
+            .from('gst_productos')
+            .update({ stock: newStock })
+            .eq('id', prodData.id)
+            .eq('business_id', businessId);
+        }
+      }
+      return;
+    }
+
+    const storedProds = localStorage.getItem('mock_productos');
+    if (!storedProds) return;
+    let mockProds = JSON.parse(storedProds);
+    mockProds = mockProds.map((p) => {
+      const orderItem = items.find((it) => it.producto === p.nombre);
+      if (orderItem) {
+        return { ...p, stock: parseFloat(p.stock || 0) + parseFloat(orderItem.cantidad) };
+      }
+      return p;
+    });
+    localStorage.setItem('mock_productos', JSON.stringify(mockProds));
   },
 
   // Helper for Supabase financial sync
@@ -2158,8 +2224,16 @@ export const db = {
     const total = parseFloat(order.total || 0);
     const orderRef = String(order.id).substring(0, 6);
 
-    const isPrevPaid = prevEstado === 'finalizado' || prevEstado === 'cobrado' || (prevEstado === 'entregado' && order.medio_pago);
-    const isNextPaid = nextEstado === 'finalizado' || nextEstado === 'cobrado' || (nextEstado === 'entregado' && updates.medio_pago);
+    const hasPaymentMedio = (medio) => !!medio && String(medio).trim() !== '';
+    const resolveMedioPago = (o, u) => (u.medio_pago !== undefined ? u.medio_pago : o.medio_pago);
+    const isFinanciallyPaid = (estado, medio) => {
+      const e = (estado || '').toLowerCase();
+      if (e === 'cancelado') return false;
+      return e === 'finalizado' || e === 'cobrado' || hasPaymentMedio(medio);
+    };
+
+    const isPrevPaid = isFinanciallyPaid(prevEstado, order.medio_pago);
+    const isNextPaid = isFinanciallyPaid(nextEstado, resolveMedioPago(order, updates));
 
     const prevMedio = order.medio_pago || '';
     const nextMedio = updates.medio_pago !== undefined ? updates.medio_pago : prevMedio;

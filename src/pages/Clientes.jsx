@@ -84,14 +84,18 @@ const isOrderCancelled = (order) => {
   return est === 'cancelado' || est === 'cancelada' || est === 'cancelled';
 };
 
+const hasPaymentMedio = (medio) => !!medio && String(medio).trim() !== '';
+
 const isOrderPaid = (order) => {
-  const estLower = (order?.estado || '').toLowerCase();
-  return estLower === 'finalizado' || estLower === 'cobrado' || (estLower === 'entregado' && order.medio_pago);
+  if (!order || isOrderCancelled(order)) return false;
+  const estLower = (order.estado || '').toLowerCase();
+  return estLower === 'finalizado' || estLower === 'cobrado' || hasPaymentMedio(order.medio_pago);
 };
 
 const canCobrarOrder = (order) => {
-  if (!order || isOrderCancelled(order) || isOrderPaid(order)) return false;
-  return true;
+  if (!order || isOrderCancelled(order)) return false;
+  const estLower = (order.estado || '').toLowerCase();
+  return estLower !== 'finalizado' && estLower !== 'cobrado';
 };
 
 function Clientes({ navigate, profile, accentColor }) {
@@ -2439,13 +2443,9 @@ function Clientes({ navigate, profile, accentColor }) {
     setLoadingSubmit(true);
     
     try {
-      const finalState = 'Finalizado';
-      
-      // Loop to update each selected order with its assigned payment method
       for (const id of selectedOrderIds) {
         const orderPaymentMethod = bulkOrdersPayments[id] || 'Efectivo';
         await db.updatePedidosStatus([id], {
-          estado: finalState,
           medio_pago: orderPaymentMethod
         });
       }
@@ -2453,10 +2453,8 @@ function Clientes({ navigate, profile, accentColor }) {
       setSelectedOrderIds([]);
       await loadOrders();
 
-      // Reload client lists to update balances globally
       const cl = await db.getClientes();
       setClientes(cl);
-      setStatusFilter('finalizado');
     } catch (err) {
       console.error(err);
       alert("Error al registrar los cobros individuales.");
@@ -2503,6 +2501,8 @@ function Clientes({ navigate, profile, accentColor }) {
         await loadOrders();
         const cl = await db.getClientes();
         setClientes(cl);
+        const pr = await db.getProducts();
+        setProducts(pr);
         setStatusFilter('cancelados');
       } else {
         alert(res.error || 'Error al cancelar pedidos.');
@@ -3875,7 +3875,7 @@ function Clientes({ navigate, profile, accentColor }) {
                               <strong>Repartidor:</strong> {order.repartidor}
                             </div>
                           )}
-                          {isFinished && order.medio_pago && (
+                          {hasPaymentMedio(order.medio_pago) && (
                             <div style={{ color: '#065f46', fontWeight: '500' }}>
                               <strong>Pago:</strong> {order.medio_pago}
                             </div>
