@@ -193,6 +193,7 @@ function Clientes({ navigate, profile, accentColor }) {
 
   // Orders View states
   const [orders, setOrders] = useState([]);
+  const [repartidores, setRepartidores] = useState([]);
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [selectedOrderIds, setSelectedOrderIds] = useState([]);
   const [selectedOrderForInvoice, setSelectedOrderForInvoice] = useState(null);
@@ -1014,6 +1015,8 @@ function Clientes({ navigate, profile, accentColor }) {
       setClientes(cl);
       const pr = await db.getProducts();
       setProducts(pr);
+      const reps = await db.getRepartidores();
+      setRepartidores(reps || []);
       loadOrders();
       const concepts = await db.getCierreConceptos() || [];
       setActivePaymentMethods(concepts);
@@ -1032,6 +1035,13 @@ function Clientes({ navigate, profile, accentColor }) {
     } finally {
       setLoadingOrders(false);
     }
+  };
+
+  const getOrderClientSaldo = (order) => {
+    const client = clientes.find((c) => c.id === order.cliente_id)
+      || clientes.find((c) => c.nombre === order.cliente_nombre || c.razon_social === order.cliente_nombre);
+    if (!client) return null;
+    return parseFloat(client.saldo || 0);
   };
 
   const loadClientAddresses = async () => {
@@ -1734,9 +1744,12 @@ function Clientes({ navigate, profile, accentColor }) {
     });
   };
 
-  const buildWhatsAppDeliveryMessage = (total) => {
-    const totalStr = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(total || 0);
-    return `☀️ Buen día! 👋\n\n✅ Perfecto, se lo llevamos.\n\n💰 El total es: ${totalStr}\n\n🙏 Muchas gracias!!`;
+  const buildWhatsAppOrderMessage = (order) => {
+    const totalStr = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(order?.total || 0);
+    const confirmLine = order?.con_envio
+      ? '✅ Perfecto, se lo llevamos.'
+      : '✅ Perfecto, se lo reservamos.';
+    return `☀️ Buen día! 👋\n\n${confirmLine}\n\n💰 El total es: ${totalStr}\n\n🙏 Muchas gracias!!`;
   };
 
   const handleCopyWhatsAppMessage = async (text) => {
@@ -2346,6 +2359,11 @@ function Clientes({ navigate, profile, accentColor }) {
     } finally {
       setLoadingSubmit(false);
     }
+  };
+
+  const openBulkRepartidorModal = () => {
+    setBulkRepartidorName(repartidores[0] || '');
+    setBulkRepartidorModal(true);
   };
 
   const handleBulkRepartir = (e) => {
@@ -3457,7 +3475,7 @@ function Clientes({ navigate, profile, accentColor }) {
                       type="button" 
                       className="btn-new-task" 
                       style={{ backgroundColor: '#2563eb' }}
-                      onClick={() => setBulkRepartidorModal(true)}
+                      onClick={openBulkRepartidorModal}
                     >
                       <i className="bi bi-truck me-1"></i> Asignar Repartidor
                     </button>
@@ -3695,8 +3713,7 @@ function Clientes({ navigate, profile, accentColor }) {
                     const isCancelled = isOrderCancelled(order);
                     const isFinished = (order.estado || '').toLowerCase() === 'finalizado' || (order.estado || '').toLowerCase() === 'cobrado' || ((order.estado || '').toLowerCase() === 'entregado' && order.medio_pago);
                     const dateFmt = new Date(order.fecha).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-                    
-                    // State Badge color config
+                    const clientSaldo = getOrderClientSaldo(order);
                     const estLower = (order.estado || '').toLowerCase();
                     let badgeBg = '#cbd5e1'; // grey
                     let badgeText = '#334155';
@@ -3745,7 +3762,14 @@ function Clientes({ navigate, profile, accentColor }) {
                           )}
                         </td>
                         <td style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '0.8rem' }}>{dateFmt}</td>
-                        <td style={{ padding: '12px', fontWeight: '600', fontSize: '1.05rem' }}>{order.cliente_nombre}</td>
+                        <td style={{ padding: '12px', fontWeight: '600', fontSize: '1.05rem' }}>
+                          {order.cliente_nombre}
+                          {clientSaldo !== null && (
+                            <span style={{ fontSize: '0.72rem', fontWeight: '500', color: 'var(--text-muted)', marginLeft: '4px' }}>
+                              ($ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(clientSaldo)})
+                            </span>
+                          )}
+                        </td>
                         <td style={{ padding: '12px' }}>
                           {order.con_envio ? (
                             <span style={{ color: '#3b82f6', fontWeight: '600' }}>
@@ -4329,16 +4353,39 @@ function Clientes({ navigate, profile, accentColor }) {
             <div className="modal-body">
               <form onSubmit={handleBulkRepartir}>
                 <div className="form-group">
-                  <label className="form-label">Nombre del Repartidor</label>
-                  <input 
-                    type="text" 
-                    className="form-input" 
-                    required 
-                    placeholder="Ej: Juan Gómez, Moto Express..."
-                    value={bulkRepartidorName}
-                    onChange={(e) => setBulkRepartidorName(e.target.value)}
-                    autoFocus
-                  />
+                  <label className="form-label">Repartidor</label>
+                  {repartidores.length > 0 ? (
+                    <select
+                      className="form-select"
+                      required
+                      value={bulkRepartidorName}
+                      onChange={(e) => setBulkRepartidorName(e.target.value)}
+                      autoFocus
+                    >
+                      <option value="">Seleccionar repartidor...</option>
+                      {repartidores.map((name) => (
+                        <option key={name} value={name}>{name}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <>
+                      <div className="alert-box" style={{ backgroundColor: '#fffbeb', borderColor: '#fde68a', color: '#92400e', fontSize: '0.82rem', marginBottom: '10px' }}>
+                        <i className="bi bi-info-circle-fill"></i>
+                        <div>
+                          No hay repartidores cargados. Configuralos en <strong>Configuración → Módulos → Clientes</strong>.
+                        </div>
+                      </div>
+                      <input 
+                        type="text" 
+                        className="form-input" 
+                        required 
+                        placeholder="Ej: Juan Gómez, Moto Express..."
+                        value={bulkRepartidorName}
+                        onChange={(e) => setBulkRepartidorName(e.target.value)}
+                        autoFocus
+                      />
+                    </>
+                  )}
                 </div>
                 <div style={{ display: 'flex', gap: '10px', marginTop: '15px' }}>
                   <button 
@@ -4556,7 +4603,7 @@ function Clientes({ navigate, profile, accentColor }) {
                           borderRadius: '6px',
                           margin: 0,
                         }}
-                        onClick={() => handleCopyWhatsAppMessage(buildWhatsAppDeliveryMessage(printObsPendingOrder.total))}
+                        onClick={() => handleCopyWhatsAppMessage(buildWhatsAppOrderMessage(printObsPendingOrder))}
                       >
                         <i className="bi bi-clipboard me-1"></i>
                         {waCopyFeedback || 'Copiar'}
@@ -4572,7 +4619,7 @@ function Clientes({ navigate, profile, accentColor }) {
                         cursor: 'text',
                       }}
                     >
-                      {buildWhatsAppDeliveryMessage(printObsPendingOrder.total)}
+                      {buildWhatsAppOrderMessage(printObsPendingOrder)}
                     </div>
                   </div>
                 )}

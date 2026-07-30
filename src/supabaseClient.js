@@ -334,6 +334,7 @@ const BUSINESS_CONFIG = {
   CIERRE_TURNOS: 'cierre_turnos',
   CIERRE_CONCEPTOS: 'cierre_conceptos',
   CIERRE_MEDIOS_USED: 'cierre_medios_used',
+  REPARTIDORES: 'repartidores',
 };
 
 const OPERATIONAL_CONFIG_KEYS = new Set([
@@ -919,6 +920,40 @@ export const db = {
       : { ok: true };
     if (!result.ok) return { success: false, error: result.error };
     localStorage.setItem('cierre_turnos', JSON.stringify(turnos));
+    return { success: true };
+  },
+
+  getRepartidores: async () => {
+    const businessId = getBusinessId();
+    if (isSupabaseConfigured() && supabase && businessId) {
+      try {
+        const list =
+          (await getBusinessConfig(BUSINESS_CONFIG.REPARTIDORES)) ||
+          (await migrateLegacyTerminalConfig(businessId, BUSINESS_CONFIG.REPARTIDORES));
+        if (list) return Array.isArray(list) ? list : [];
+      } catch (err) {
+        console.warn('Supabase getRepartidores failed:', err);
+      }
+    }
+
+    const stored = localStorage.getItem('repartidores_list');
+    return stored ? JSON.parse(stored) : [];
+  },
+
+  saveRepartidores: async (repartidores) => {
+    const cleanList = (repartidores || [])
+      .map((name) => String(name || '').trim())
+      .filter((name) => name.length > 0);
+
+    const adminCheck = await requireBusinessAdmin();
+    if (!adminCheck.ok) return { success: false, error: adminCheck.error };
+
+    const result = isSupabaseConfigured() && supabase
+      ? await saveBusinessConfig(BUSINESS_CONFIG.REPARTIDORES, cleanList)
+      : { ok: true };
+    if (!result.ok) return { success: false, error: result.error };
+
+    localStorage.setItem('repartidores_list', JSON.stringify(cleanList));
     return { success: true };
   },
 
@@ -3585,6 +3620,41 @@ export const db = {
     const storedClientes = localStorage.getItem('mock_clientes');
     let clientes = storedClientes ? JSON.parse(storedClientes) : [];
     clientes = clientes.map(c => ({ ...c, saldo: 0 }));
+    localStorage.setItem('mock_clientes', JSON.stringify(clientes));
+
+    return { success: true };
+  },
+
+  resetAllClientSaldos: async () => {
+    const adminCheck = await requireBusinessAdmin();
+    if (!adminCheck.ok) throw new Error(adminCheck.error);
+
+    const businessId = await ensureBusinessContext();
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { error: movsErr } = await supabase
+          .from('gst_cliente_movimientos')
+          .delete()
+          .eq('business_id', businessId);
+        if (movsErr) throw movsErr;
+
+        const { error: clientsErr } = await supabase
+          .from('gst_clientes')
+          .update({ saldo: 0 })
+          .eq('business_id', businessId);
+        if (clientsErr) throw clientsErr;
+
+        return { success: true };
+      } catch (err) {
+        console.error('Supabase resetAllClientSaldos error:', err);
+        throw err;
+      }
+    }
+
+    localStorage.setItem('mock_movimientos', JSON.stringify([]));
+    const storedClientes = localStorage.getItem('mock_clientes');
+    let clientes = storedClientes ? JSON.parse(storedClientes) : [];
+    clientes = clientes.map((c) => ({ ...c, saldo: 0 }));
     localStorage.setItem('mock_clientes', JSON.stringify(clientes));
 
     return { success: true };

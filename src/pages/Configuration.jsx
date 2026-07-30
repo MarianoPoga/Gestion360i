@@ -108,8 +108,10 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   
   // Cierre settings
   const [turnosList, setTurnosList] = useState([]);
+  const [repartidoresList, setRepartidoresList] = useState([]);
   const [conceptsList, setConceptsList] = useState([]);
   const [newTurnoInput, setNewTurnoInput] = useState('');
+  const [newRepartidorInput, setNewRepartidorInput] = useState('');
   const [newConceptInput, setNewConceptInput] = useState('');
 
   // Compras configuration settings
@@ -161,6 +163,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   const [testStatus, setTestStatus] = useState(''); // 'testing', 'success', 'error', ''
   const [testError, setTestError] = useState('');
   const [clearStatus, setClearStatus] = useState(''); // 'clearing', 'success', 'error', ''
+  const [resetSaldosStatus, setResetSaldosStatus] = useState('');
   const [syncStatus, setSyncStatus] = useState('');
   const [syncMessage, setSyncMessage] = useState('');
   const [supabaseFromEnv, setSupabaseFromEnv] = useState(false);
@@ -171,9 +174,10 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   useEffect(() => {
     async function initConfig() {
       try {
-        const [m, t, c, cc, cco, cp, rp, arca] = await Promise.all([
+        const [m, t, r, c, cc, cco, cp, rp, arca] = await Promise.all([
           db.getModules(),
           db.getCierreTurnos(),
+          db.getRepartidores(),
           db.getCierreConceptos(),
           db.getComprasCategorias(),
           db.getComprasConceptos(),
@@ -184,6 +188,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
         
         setModules(m || {});
         setTurnosList(t || []);
+        setRepartidoresList(r || []);
         setConceptsList(c || []);
         
         const formattedCats = (cc || []).map(cat => {
@@ -336,6 +341,19 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
 
   const handleRemoveTurnoTag = (index) => {
     setTurnosList(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handleAddRepartidorTag = (e) => {
+    if (e) e.preventDefault();
+    const val = newRepartidorInput.trim();
+    if (val && !repartidoresList.includes(val)) {
+      setRepartidoresList((prev) => [...prev, val]);
+      setNewRepartidorInput('');
+    }
+  };
+
+  const handleRemoveRepartidorTag = (index) => {
+    setRepartidoresList((prev) => prev.filter((_, i) => i !== index));
   };
 
   const handleAddConceptTag = (e) => {
@@ -500,11 +518,15 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       const cleanTurnos = turnosList
         .map(t => t.trim())
         .filter(t => t.length > 0);
+      const cleanRepartidores = repartidoresList
+        .map((name) => name.trim())
+        .filter((name) => name.length > 0);
 
       // Save all database settings concurrently and await them
       const saveResults = await Promise.all([
         db.saveModules(modulesWithColors),
         db.saveCierreTurnos(cleanTurnos.length > 0 ? cleanTurnos : ["Mañana", "Tarde", "Delivery", "Noche"]),
+        db.saveRepartidores(cleanRepartidores),
         db.saveCierreConceptos(conceptsList),
         db.saveComprasCategorias(comprasCategoriasList),
         db.saveComprasConceptos(comprasConceptosList),
@@ -633,6 +655,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       localStorage.removeItem('cierre_turnos');
       localStorage.removeItem('cierre_conceptos');
       localStorage.removeItem('cierre_medios_used');
+      localStorage.removeItem('repartidores_list');
       localStorage.removeItem('rendiciones_config');
       setRendicionCajaNombre(DEFAULT_CAJA_FUERTE_NAME);
       setRendicionAllowAdelantos(true);
@@ -702,6 +725,25 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
         setSaveStatus('');
         navigate('dashboard');
       }, 1500);
+    }
+  };
+
+  const handleResetClientSaldos = async () => {
+    if (window.confirm('¿Restablecer todos los saldos de clientes a $0?\n\nSe eliminarán los movimientos de cuenta corriente pero los pedidos se mantienen.')) {
+      setResetSaldosStatus('clearing');
+      try {
+        await db.resetAllClientSaldos();
+        setResetSaldosStatus('success');
+        setTimeout(() => {
+          setResetSaldosStatus('');
+        }, 3000);
+      } catch (err) {
+        console.error(err);
+        setResetSaldosStatus('error');
+        setTimeout(() => {
+          setResetSaldosStatus('');
+        }, 3000);
+      }
     }
   };
 
@@ -1277,6 +1319,40 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                       <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
                         Permite vaciar las tablas de pedidos y restablecer los saldos deudores de las cuentas corrientes de los clientes correspondientes.
                       </div>
+                      <button
+                        type="button"
+                        className="btn-nav-back"
+                        style={{
+                          padding: '10px 16px',
+                          fontSize: '0.85rem',
+                          color: '#ffffff',
+                          backgroundColor: '#f59e0b',
+                          border: 'none',
+                          alignSelf: 'flex-start',
+                          cursor: 'pointer',
+                          borderRadius: '6px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                        }}
+                        onClick={handleResetClientSaldos}
+                        disabled={resetSaldosStatus === 'clearing'}
+                      >
+                        <i className="bi bi-arrow-counterclockwise"></i>
+                        {resetSaldosStatus === 'clearing' ? 'Restableciendo...' : 'Poner saldos de clientes en $0'}
+                      </button>
+                      {resetSaldosStatus === 'success' && (
+                        <div className="alert-box-success" style={{ marginTop: '10px' }}>
+                          <i className="bi bi-check-circle-fill"></i>
+                          <div>Todos los saldos de clientes quedaron en $0. Los pedidos no se modificaron.</div>
+                        </div>
+                      )}
+                      {resetSaldosStatus === 'error' && (
+                        <div className="alert-box" style={{ marginTop: '10px', backgroundColor: '#fee2e2', borderColor: '#fecaca', color: '#991b1b' }}>
+                          <i className="bi bi-exclamation-triangle-fill"></i>
+                          <div>Error al restablecer los saldos de clientes.</div>
+                        </div>
+                      )}
                       <button 
                         type="button" 
                         className="btn-nav-back" 
@@ -1692,6 +1768,38 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
 
               {/* Clientes / Pedidos */}
               {renderModuleHeader('clientes', MODULE_LABELS.clientes, MODULE_DESCRIPTIONS.clientes, 'bi-journal-text', 'bg-clientes')}
+              {modules.clientes && expandedModule === 'clientes' && (
+                <div style={{ padding: '5px 20px 10px 48px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                  <div>
+                    <label className="form-label fw-bold small text-muted mb-2">Repartidores disponibles</label>
+                    <div className="small text-muted mb-2">
+                      Listado para asignar al enviar pedidos a reparto.
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '10px', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '8px', backgroundColor: '#fff' }}>
+                      {repartidoresList.length > 0 ? repartidoresList.map((name, i) => (
+                        <span key={i} className="badge bg-light text-dark border d-flex align-items-center gap-2">
+                          {name} <i className="bi bi-x cursor-pointer" onClick={() => handleRemoveRepartidorTag(i)}></i>
+                        </span>
+                      )) : (
+                        <span className="small text-muted">Sin repartidores cargados.</span>
+                      )}
+                    </div>
+                    <div className="d-flex gap-2">
+                      <input
+                        type="text"
+                        className="form-input"
+                        placeholder="Nuevo repartidor..."
+                        value={newRepartidorInput}
+                        onChange={(e) => setNewRepartidorInput(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleAddRepartidorTag())}
+                      />
+                      <button type="button" className="btn-new-task" onClick={handleAddRepartidorTag}>
+                        <i className="bi bi-plus-lg"></i>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Pago Proveedores */}
               {renderModuleHeader('pago-proveedores', MODULE_LABELS['pago-proveedores'], MODULE_DESCRIPTIONS['pago-proveedores'], 'bi-wallet2', 'bg-success')}
