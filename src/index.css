@@ -1019,6 +1019,18 @@ input:checked + .slider:before {
   background: #94a3b8;
 }
 
+/* Hide number input spinners (qty/price fields) */
+.input-no-spinner {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.input-no-spinner::-webkit-outer-spin-button,
+.input-no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 /* Responsive adjustment */
 @media (max-width: 480px) {
   .menu-grid {

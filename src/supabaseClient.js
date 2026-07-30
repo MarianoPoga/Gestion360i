@@ -28,7 +28,7 @@ import {
   findExistingPeriodicItem,
   normalizePeriodicPayment,
 } from './periodicPaymentsDefaults'
-import { mapCsvRowsToClientes, parseCsvText } from './clientesImport'
+import { mapCsvRowsToClientes, parseCsvText, analyzeCsvImport } from './clientesImport'
 
 // Credentials: localStorage first, then Vite env vars (for local dev)
 const getCredentials = () => {
@@ -1229,9 +1229,28 @@ export const db = {
     return { success: true };
   },
 
-  importClientesFromCsv: async (csvText, { replaceAll = false } = {}) => {
+  importClientesFromCsv: async (csvText, { replaceAll = false, columnMapping, hasHeaderRow } = {}) => {
     const rows = parseCsvText(csvText);
-    const { clients, errors: parseErrors, skippedEmpty = 0, inferredNames = 0 } = mapCsvRowsToClientes(rows);
+    const analysis = analyzeCsvImport(csvText);
+    if (analysis.error) {
+      return {
+        success: false,
+        imported: 0,
+        skipped: 0,
+        skippedEmpty: 0,
+        inferredNames: 0,
+        failed: 0,
+        deleted: 0,
+        errors: [analysis.error],
+      };
+    }
+
+    const mapping = columnMapping || analysis.suggestedMapping;
+    const useHeaderRow = hasHeaderRow ?? analysis.hasHeaderRow;
+    const { clients, errors: parseErrors, skippedEmpty = 0, inferredNames = 0 } = mapCsvRowsToClientes(rows, {
+      columnMapping: mapping,
+      hasHeaderRow: useHeaderRow,
+    });
     if (!clients.length) {
       return {
         success: false,
@@ -1706,6 +1725,203 @@ export const db = {
     return { success: true };
   },
 
+  updatePedido: async (pedidoId, { items, total, cliente_id }) => {
+    const businessId = getBusinessId();
+    const parsedTotal = parseFloat(total);
+    const normalizedItems = (items || []).map((item) => ({
+      producto: item.producto,
+      cantidad: parseFloat(item.cantidad),
+      valor: parseFloat(item.valor),
+      observacion: item.observacion || null,
+      iva_alicuota: item.iva_alicuota !== undefined ? parseFloat(item.iva_alicuota) : 21.00,
+    }));
+
+    if (!normalizedItems.length) {
+      return { success: false, error: 'El pedido debe tener al menos un ítem.' };
+    }
+
+    const adjustProductStock = async (productName, delta) => {
+      if (!isSupabaseConfigured() || !supabase) return;
+      const { data: prodData } = await supabase
+        .from('gst_productos')
+        .select('id, stock')
+        .eq('nombre', productName)
+        .eq('business_id', businessId)
+        .maybeSingle();
+      if (prodData) {
+        const newStock = parseFloat(prodData.stock || 0) + parseFloat(delta);
+        await supabase
+          .from('gst_productos')
+          .update({ stock: newStock })
+          .eq('id', prodData.id)
+          .eq('business_id', businessId);
+      }
+    };
+
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { data: order, error: orderErr } = await supabase
+          .from('gst_pedidos')
+          .select('*, gst_pedido_items(*)')
+          .eq('id', pedidoId)
+          .eq('business_id', businessId)
+          .single();
+
+        if (orderErr || !order) throw new Error(orderErr?.message || 'Pedido no encontrado.');
+        if ((order.estado || '').toLowerCase() !== 'pendiente') {
+          throw new Error('Solo se pueden editar pedidos en estado Pendiente.');
+        }
+
+        const oldItems = order.gst_pedido_items || [];
+        const oldTotal = parseFloat(order.total || 0);
+        const orderNum = String(pedidoId).substring(0, 6);
+        const conceptStr = `Pedido #${orderNum} - ${normalizedItems.map((it) => `${it.cantidad}x ${it.producto.split(' (')[0]}`).join(', ')}`;
+
+        const { error: updateErr } = await supabase
+          .from('gst_pedidos')
+          .update({ total: parsedTotal })
+          .eq('id', pedidoId)
+          .eq('business_id', businessId);
+        if (updateErr) throw new Error(updateErr.message);
+
+        const { error: deleteErr } = await supabase
+          .from('gst_pedido_items')
+          .delete()
+          .eq('pedido_id', pedidoId)
+          .eq('business_id', businessId);
+        if (deleteErr) throw new Error(deleteErr.message);
+
+        const itemsToInsert = normalizedItems.map((item) => ({
+          business_id: businessId,
+          pedido_id: pedidoId,
+          producto: item.producto,
+          cantidad: item.cantidad,
+          valor: item.valor,
+          observacion: item.observacion,
+          iva_alicuota: item.iva_alicuota,
+        }));
+        const { error: itemsErr } = await supabase.from('gst_pedido_items').insert(itemsToInsert);
+        if (itemsErr) throw new Error(itemsErr.message);
+
+        for (const item of oldItems) {
+          await adjustProductStock(item.producto, parseFloat(item.cantidad));
+        }
+        for (const item of normalizedItems) {
+          await adjustProductStock(item.producto, -parseFloat(item.cantidad));
+        }
+
+        const saldoDiff = parsedTotal - oldTotal;
+        if (saldoDiff !== 0) {
+          const { data: currentClient } = await supabase
+            .from('gst_clientes')
+            .select('saldo')
+            .eq('id', cliente_id || order.cliente_id)
+            .eq('business_id', businessId)
+            .single();
+
+          if (currentClient) {
+            const newSaldo = parseFloat(currentClient.saldo || 0) + saldoDiff;
+            await supabase
+              .from('gst_clientes')
+              .update({ saldo: newSaldo })
+              .eq('id', cliente_id || order.cliente_id)
+              .eq('business_id', businessId);
+          }
+        }
+
+        const { data: movs } = await supabase
+          .from('gst_cliente_movimientos')
+          .select('id, concepto, debe')
+          .eq('cliente_id', cliente_id || order.cliente_id)
+          .eq('business_id', businessId)
+          .like('concepto', `Pedido #${orderNum}%`)
+          .order('fecha', { ascending: false })
+          .limit(1);
+
+        if (movs?.length) {
+          await supabase
+            .from('gst_cliente_movimientos')
+            .update({
+              concepto: conceptStr.substring(0, 100),
+              debe: parsedTotal,
+            })
+            .eq('id', movs[0].id)
+            .eq('business_id', businessId);
+        }
+
+        return { success: true };
+      } catch (err) {
+        console.warn('Supabase updatePedido error, falling back to mock:', err);
+        return { success: false, error: err.message || 'No se pudo actualizar el pedido.' };
+      }
+    }
+
+    const storedOrders = localStorage.getItem('mock_pedidos');
+    const storedClientes = localStorage.getItem('mock_clientes');
+    const storedMovs = localStorage.getItem('mock_movimientos');
+    const storedProds = localStorage.getItem('mock_productos');
+
+    let orders = storedOrders ? JSON.parse(storedOrders) : [];
+    let clientes = storedClientes ? JSON.parse(storedClientes) : [];
+    let movements = storedMovs ? JSON.parse(storedMovs) : [];
+    let mockProds = storedProds ? JSON.parse(storedProds) : [];
+
+    const orderIndex = orders.findIndex((o) => o.id === pedidoId);
+    if (orderIndex < 0) return { success: false, error: 'Pedido no encontrado.' };
+
+    const order = orders[orderIndex];
+    if ((order.estado || '').toLowerCase() !== 'pendiente') {
+      return { success: false, error: 'Solo se pueden editar pedidos en estado Pendiente.' };
+    }
+
+    const oldItems = order.items || [];
+    const oldTotal = parseFloat(order.total || 0);
+    const orderNum = String(pedidoId).split('_')[1] || pedidoId;
+    const conceptStr = `Pedido #${orderNum} - ${normalizedItems.map((it) => `${it.cantidad}x ${it.producto.split(' (')[0]}`).join(', ')}`;
+
+    mockProds = mockProds.map((p) => {
+      const oldItem = oldItems.find((it) => it.producto === p.nombre);
+      const newItem = normalizedItems.find((it) => it.producto === p.nombre);
+      let stock = parseFloat(p.stock || 0);
+      if (oldItem) stock += parseFloat(oldItem.cantidad);
+      if (newItem) stock -= parseFloat(newItem.cantidad);
+      return { ...p, stock };
+    });
+    localStorage.setItem('mock_productos', JSON.stringify(mockProds));
+
+    orders[orderIndex] = {
+      ...order,
+      total: parsedTotal,
+      items: normalizedItems,
+    };
+    localStorage.setItem('mock_pedidos', JSON.stringify(orders));
+
+    const saldoDiff = parsedTotal - oldTotal;
+    if (saldoDiff !== 0) {
+      clientes = clientes.map((c) => {
+        if (c.id === (cliente_id || order.cliente_id)) {
+          return { ...c, saldo: parseFloat(c.saldo || 0) + saldoDiff };
+        }
+        return c;
+      });
+      localStorage.setItem('mock_clientes', JSON.stringify(clientes));
+    }
+
+    movements = movements.map((m) => {
+      if (
+        m.cliente_id === (cliente_id || order.cliente_id) &&
+        m.concepto &&
+        m.concepto.startsWith(`Pedido #${orderNum}`)
+      ) {
+        return { ...m, concepto: conceptStr.substring(0, 100), debe: parsedTotal };
+      }
+      return m;
+    });
+    localStorage.setItem('mock_movimientos', JSON.stringify(movements));
+
+    return { success: true };
+  },
+
   getPedidos: async () => {
     const businessId = getBusinessId();
     if (isSupabaseConfigured() && supabase) {
@@ -1795,44 +2011,74 @@ export const db = {
     const businessId = await ensureBusinessContext();
     // updates: { estado, repartidor, medio_pago, con_envio }
     if (isSupabaseConfigured() && supabase) {
-      try {
-        for (const id of ids) {
-          const { data: order } = await supabase
-            .from('gst_pedidos')
-            .select('*')
-            .eq('id', id)
-            .eq('business_id', businessId)
-            .single();
-          if (order) {
-            await db.processFinancialTransactions(order, updates);
-            
-            // Perform actual database update
-            const fieldsToUpdate = {};
-            if (updates.estado !== undefined) fieldsToUpdate.estado = updates.estado;
-            if (updates.repartidor !== undefined) fieldsToUpdate.repartidor = updates.repartidor;
-            if (updates.medio_pago !== undefined) fieldsToUpdate.medio_pago = updates.medio_pago;
-            if (updates.motivo_cancelacion !== undefined) fieldsToUpdate.motivo_cancelacion = updates.motivo_cancelacion;
-            if (updates.con_envio !== undefined) {
-              fieldsToUpdate.con_envio = updates.con_envio;
-              if (updates.con_envio === false) {
-                fieldsToUpdate.direccion_envio = null;
-                fieldsToUpdate.repartidor = null;
-              }
-            }
-            if (updates.cae !== undefined) fieldsToUpdate.cae = updates.cae;
-            if (updates.cae_vencimiento !== undefined) fieldsToUpdate.cae_vencimiento = updates.cae_vencimiento;
-            if (updates.factura_nro !== undefined) fieldsToUpdate.factura_nro = updates.factura_nro;
-            if (updates.factura_fecha !== undefined) fieldsToUpdate.factura_fecha = updates.factura_fecha;
-            if (updates.factura_tipo !== undefined) fieldsToUpdate.factura_tipo = updates.factura_tipo;
-            if (updates.factura_error !== undefined) fieldsToUpdate.factura_error = updates.factura_error;
+      const updateErrors = [];
 
-            await supabase.from('gst_pedidos').update(fieldsToUpdate).eq('id', id).eq('business_id', businessId);
+      for (const id of ids) {
+        const { data: order, error: orderErr } = await supabase
+          .from('gst_pedidos')
+          .select('*')
+          .eq('id', id)
+          .eq('business_id', businessId)
+          .single();
+
+        if (orderErr || !order) {
+          updateErrors.push(orderErr?.message || `Pedido ${id} no encontrado.`);
+          continue;
+        }
+
+        try {
+          await db.processFinancialTransactions(order, updates);
+        } catch (finErr) {
+          console.warn('processFinancialTransactions failed, continuing with status update:', finErr);
+        }
+
+        const fieldsToUpdate = {};
+        if (updates.estado !== undefined) fieldsToUpdate.estado = updates.estado;
+        if (updates.repartidor !== undefined) fieldsToUpdate.repartidor = updates.repartidor;
+        if (updates.medio_pago !== undefined) fieldsToUpdate.medio_pago = updates.medio_pago;
+        if (updates.motivo_cancelacion !== undefined) fieldsToUpdate.motivo_cancelacion = updates.motivo_cancelacion;
+        if (updates.con_envio !== undefined) {
+          fieldsToUpdate.con_envio = updates.con_envio;
+          if (updates.con_envio === false) {
+            fieldsToUpdate.direccion_envio = null;
+            fieldsToUpdate.repartidor = null;
           }
         }
-        return { success: true };
-      } catch (err) {
-        console.warn("Supabase updatePedidosStatus error, falling back to mock:", err);
+        if (updates.cae !== undefined) fieldsToUpdate.cae = updates.cae;
+        if (updates.cae_vencimiento !== undefined) fieldsToUpdate.cae_vencimiento = updates.cae_vencimiento;
+        if (updates.factura_nro !== undefined) fieldsToUpdate.factura_nro = updates.factura_nro;
+        if (updates.factura_fecha !== undefined) fieldsToUpdate.factura_fecha = updates.factura_fecha;
+        if (updates.factura_tipo !== undefined) fieldsToUpdate.factura_tipo = updates.factura_tipo;
+        if (updates.factura_error !== undefined) fieldsToUpdate.factura_error = updates.factura_error;
+
+        let { error: updateErr } = await supabase
+          .from('gst_pedidos')
+          .update(fieldsToUpdate)
+          .eq('id', id)
+          .eq('business_id', businessId);
+
+        if (updateErr && fieldsToUpdate.motivo_cancelacion !== undefined) {
+          const { motivo_cancelacion, ...withoutMotivo } = fieldsToUpdate;
+          ({ error: updateErr } = await supabase
+            .from('gst_pedidos')
+            .update(withoutMotivo)
+            .eq('id', id)
+            .eq('business_id', businessId));
+        }
+
+        if (updateErr) {
+          updateErrors.push(`Pedido ${String(id).substring(0, 8)}: ${updateErr.message}`);
+        }
       }
+
+      if (updateErrors.length === ids.length) {
+        return { success: false, error: updateErrors[0] || 'No se pudo actualizar ningún pedido.' };
+      }
+
+      return {
+        success: true,
+        warnings: updateErrors.length ? updateErrors : undefined,
+      };
     }
 
     // Mock Mode status updates and financial logic
@@ -2013,22 +2259,32 @@ export const db = {
     
     // A. If Cancelling
     if (nextEstado === 'cancelado' && prevEstado !== 'cancelado') {
-      // 1. Decrement balance
-      const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).eq('business_id', businessId).single();
-      const newSaldo = parseFloat(client.saldo || 0) - parseFloat(order.total);
-      await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id).eq('business_id', businessId);
+      const { data: client } = await supabase
+        .from('gst_clientes')
+        .select('saldo')
+        .eq('id', order.cliente_id)
+        .eq('business_id', businessId)
+        .maybeSingle();
 
-      // 2. Add credit offset to ledger
-      const cancellationConcept = updates.motivo_cancelacion 
-        ? `Cancelación Pedido #${String(order.id).substring(0,6)} (Motivo: ${updates.motivo_cancelacion})`
-        : `Cancelación Pedido #${String(order.id).substring(0,6)}`;
+      if (client) {
+        const newSaldo = parseFloat(client.saldo || 0) - parseFloat(order.total);
+        await supabase
+          .from('gst_clientes')
+          .update({ saldo: newSaldo })
+          .eq('id', order.cliente_id)
+          .eq('business_id', businessId);
+      }
+
+      const cancellationConcept = updates.motivo_cancelacion
+        ? `Cancelación Pedido #${String(order.id).substring(0, 6)} (Motivo: ${updates.motivo_cancelacion})`
+        : `Cancelación Pedido #${String(order.id).substring(0, 6)}`;
 
       await supabase.from('gst_cliente_movimientos').insert([{
         business_id: businessId,
         cliente_id: order.cliente_id,
         concepto: cancellationConcept,
         debe: 0.00,
-        haber: order.total
+        haber: order.total,
       }]);
     }
     

@@ -4,7 +4,9 @@ const normalizeHeader = (value) =>
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\s+/g, '_');
+    .replace(/[.\s]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
 
 const COLUMN_ALIASES = {
   nombre: ['nombre', 'name', 'cliente', 'nombre_comercial', 'comercial'],
@@ -14,6 +16,7 @@ const COLUMN_ALIASES = {
   direccion: ['direccion', 'direccion_envio', 'address', 'domicilio', 'envio'],
   condicion_iva: [
     'condicion_iva',
+    'cond_iva',
     'condicioniva',
     'condicion',
     'iva',
@@ -24,11 +27,22 @@ const COLUMN_ALIASES = {
   saldo: ['saldo', 'deuda', 'cuenta_corriente', 'cc'],
 };
 
+export const IMPORT_FIELDS = [
+  { key: 'nombre', label: 'Nombre' },
+  { key: 'razon_social', label: 'Razón social' },
+  { key: 'cuit', label: 'CUIT' },
+  { key: 'telefono', label: 'Teléfono / WhatsApp' },
+  { key: 'direccion', label: 'Dirección' },
+  { key: 'condicion_iva', label: 'Cond. IVA' },
+  { key: 'saldo', label: 'Saldo' },
+];
+
 const findColumnKey = (headers, field) => {
   const aliases = COLUMN_ALIASES[field] || [field];
   for (let i = 0; i < headers.length; i += 1) {
     const header = headers[i];
     if (aliases.includes(header)) return i;
+    if (field === 'condicion_iva' && header.includes('iva')) return i;
   }
   return -1;
 };
@@ -129,6 +143,19 @@ const isIvaToken = (value) => {
   );
 };
 
+const normalizeCuit = (value) => {
+  const digits = String(value || '').replace(/[^0-9]/g, '');
+  return digits || 'N/A';
+};
+
+const normalizePhone = (value) => String(value || '').replace(/[^0-9]/g, '');
+
+const buildRowGetter = (row, indexes) => (key) => {
+  const idx = indexes[key];
+  if (idx == null || idx < 0) return '';
+  return String(row[idx] ?? '').trim();
+};
+
 const resolveIvaFromRow = (row, indexes, get) => {
   const fromColumn = get('condicion_iva');
   if (fromColumn) return normalizeIva(fromColumn);
@@ -143,23 +170,12 @@ const resolveIvaFromRow = (row, indexes, get) => {
   return 'Consumidor Final';
 };
 
-const normalizeCuit = (value) => {
-  const digits = String(value || '').replace(/[^0-9]/g, '');
-  return digits || 'N/A';
-};
-
-const normalizePhone = (value) => String(value || '').replace(/[^0-9]/g, '');
-
-const buildRowGetter = (row, indexes) => (key) => {
-  const idx = indexes[key];
-  if (idx < 0) return '';
-  return String(row[idx] ?? '').trim();
-};
-
 const resolveNombre = (row, indexes) => {
   const get = buildRowGetter(row, indexes);
-  const nombreColA = String(row[0] ?? '').trim();
-  if (nombreColA && !isIvaToken(nombreColA)) return { nombre: nombreColA, inferred: false };
+  const mappedNombre = indexes.nombre >= 0 ? get('nombre') : '';
+  if (mappedNombre && !isIvaToken(mappedNombre)) {
+    return { nombre: mappedNombre, inferred: false };
+  }
 
   const razonSocial = get('razon_social');
   if (razonSocial && !isIvaToken(razonSocial)) return { nombre: razonSocial, inferred: true };
@@ -181,35 +197,85 @@ const resolveNombre = (row, indexes) => {
   return null;
 };
 
-export const mapCsvRowsToClientes = (rows) => {
-  if (!rows?.length) return { clients: [], errors: ['El archivo está vacío.'], skippedEmpty: 0, inferredNames: 0 };
+export const buildSuggestedMapping = (normalizedHeaders, hasHeaderRow = true) => {
+  if (!hasHeaderRow) {
+    return {
+      nombre: 0,
+      razon_social: 1,
+      cuit: 2,
+      telefono: 3,
+      direccion: 4,
+      condicion_iva: 5,
+      saldo: 6,
+    };
+  }
 
-  const headers = rows[0].map(normalizeHeader);
-  const hasHeaderRow =
-    headers[0] === 'nombre' ||
-    findColumnKey(headers, 'nombre') >= 0 ||
-    findColumnKey(headers, 'condicion_iva') >= 0;
+  const nombreIdx = findColumnKey(normalizedHeaders, 'nombre');
+  return {
+    nombre: nombreIdx >= 0 ? nombreIdx : 0,
+    razon_social: findColumnKey(normalizedHeaders, 'razon_social'),
+    cuit: findColumnKey(normalizedHeaders, 'cuit'),
+    telefono: findColumnKey(normalizedHeaders, 'telefono'),
+    direccion: findColumnKey(normalizedHeaders, 'direccion'),
+    condicion_iva: findColumnKey(normalizedHeaders, 'condicion_iva'),
+    saldo: findColumnKey(normalizedHeaders, 'saldo'),
+  };
+};
+
+export const detectHeaderRow = (normalizedHeaders, rawHeaders) => {
+  const hasKnownHeader = IMPORT_FIELDS.some(
+    (field) => findColumnKey(normalizedHeaders, field.key) >= 0
+  );
+  if (hasKnownHeader) return true;
+
+  return rawHeaders.some((header) =>
+    /nombre|raz[oó]n|cuit|tel|dire|iva|saldo|whatsapp/i.test(String(header || ''))
+  );
+};
+
+export const analyzeCsvImport = (csvText, options = {}) => {
+  const rows = parseCsvText(csvText);
+  if (!rows.length) {
+    return { error: 'El archivo está vacío.' };
+  }
+
+  const autoHeaderRow = detectHeaderRow(
+    rows[0].map(normalizeHeader),
+    rows[0].map((cell) => String(cell ?? '').trim())
+  );
+  const hasHeaderRow = options.hasHeaderRow ?? autoHeaderRow;
+  const rawHeaders = hasHeaderRow
+    ? rows[0].map((cell) => String(cell ?? '').trim())
+    : rows[0].map((_, index) => `Columna ${index + 1}`);
+  const normalizedHeaders = hasHeaderRow ? rawHeaders.map(normalizeHeader) : [];
+  const suggestedMapping = buildSuggestedMapping(normalizedHeaders, hasHeaderRow);
   const dataRows = hasHeaderRow ? rows.slice(1) : rows;
 
-  const indexes = hasHeaderRow
-    ? {
-        nombre: findColumnKey(headers, 'nombre') >= 0 ? findColumnKey(headers, 'nombre') : 0,
-        razon_social: findColumnKey(headers, 'razon_social'),
-        cuit: findColumnKey(headers, 'cuit'),
-        telefono: findColumnKey(headers, 'telefono'),
-        direccion: findColumnKey(headers, 'direccion'),
-        condicion_iva: findColumnKey(headers, 'condicion_iva'),
-        saldo: findColumnKey(headers, 'saldo'),
-      }
-    : {
-        nombre: 0,
-        razon_social: 1,
-        cuit: 2,
-        telefono: 3,
-        direccion: 4,
-        condicion_iva: 5,
-        saldo: 6,
-      };
+  return {
+    rows,
+    rawHeaders,
+    normalizedHeaders,
+    hasHeaderRow,
+    suggestedMapping,
+    previewRows: dataRows.slice(0, 3),
+    rowCount: dataRows.length,
+    delimiter: detectDelimiter(csvText),
+  };
+};
+
+export const mapCsvRowsToClientes = (rows, options = {}) => {
+  const hasHeaderRow = options.hasHeaderRow ?? true;
+  const columnMapping = options.columnMapping || buildSuggestedMapping(
+    (hasHeaderRow ? rows[0] : []).map(normalizeHeader),
+    hasHeaderRow
+  );
+
+  if (!rows?.length) {
+    return { clients: [], errors: ['El archivo está vacío.'], skippedEmpty: 0, inferredNames: 0 };
+  }
+
+  const dataRows = hasHeaderRow ? rows.slice(1) : rows;
+  const indexes = { ...columnMapping };
 
   const clients = [];
   const errors = [];
@@ -253,13 +319,19 @@ export const mapCsvRowsToClientes = (rows) => {
     errors.unshift('No hay filas con datos para importar.');
   }
 
-  return { clients, errors, headers, skippedEmpty, inferredNames };
+  return { clients, errors, skippedEmpty, inferredNames };
+};
+
+export const getColumnLabel = (index, rawHeaders) => {
+  if (index == null || index < 0) return '(No importar)';
+  const letter = String.fromCharCode(65 + index);
+  const header = rawHeaders?.[index];
+  return header ? `${letter} — ${header}` : `${letter} — (columna ${index + 1})`;
 };
 
 export const CSV_IMPORT_HELP = [
   'En Google Sheets: Archivo → Descargar → CSV (.csv). Acepta separador , o ;',
-  'Columna nombre puede estar vacía (se infiere de otros datos).',
-  'Columnas: nombre, razon_social, cuit, telefono, direccion, condicion_iva, saldo',
+  'Subí el archivo y revisá/corregí la asignación de columnas antes de importar.',
   'IVA: CF = Consumidor Final, RI = Responsable Inscripto, EX = Exento',
-  'Podés borrar todos los clientes antes de importar.',
+  'Podés borrar todos los clientes actuales antes de importar.',
 ];

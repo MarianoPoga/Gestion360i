@@ -104,6 +104,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   
   // WhatsApp settings
   const [whatsappTemplate, setWhatsappTemplate] = useState('Hola! Estoy por llegar con su pedido 🛵 🍔. Gracias!!');
+  const [deliveryFee, setDeliveryFee] = useState('1000');
   
   // Cierre settings
   const [turnosList, setTurnosList] = useState([]);
@@ -248,6 +249,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       setSupabaseAnonKey(localStorage.getItem('supabase_anon_key') || envKey || '');
       setGeminiApiKey(localStorage.getItem('gemini_api_key') || '');
       setWhatsappTemplate(localStorage.getItem('whatsapp_template') || 'Hola! Estoy por llegar con su pedido 🛵 🍔. Gracias!!');
+      setDeliveryFee(localStorage.getItem('delivery_fee') || '1000');
 
       const rConf = JSON.parse(localStorage.getItem('rendiciones_config') || `{"caja_nombre":"${DEFAULT_CAJA_FUERTE_NAME}","allow_adelantos":true,"allow_compras":true,"allow_pagos":true}`);
       setRendicionCajaNombre(rConf.caja_nombre || DEFAULT_CAJA_FUERTE_NAME);
@@ -530,6 +532,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
 
       // Save WhatsApp and Compras settings to localStorage
       localStorage.setItem('whatsapp_template', whatsappTemplate);
+      localStorage.setItem('delivery_fee', String(parseFloat(deliveryFee) || 0));
       localStorage.setItem('compras_wa_reclaim_template', comprasWaReclaimTemplate);
 
       // Save Adelantos configurations
@@ -626,6 +629,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       localStorage.removeItem('compras_conceptos');
       localStorage.removeItem('compras_formas_pago');
       localStorage.removeItem('whatsapp_template');
+      localStorage.removeItem('delivery_fee');
       localStorage.removeItem('cierre_turnos');
       localStorage.removeItem('cierre_conceptos');
       localStorage.removeItem('cierre_medios_used');
@@ -647,6 +651,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       setSupabaseAnonKey('');
       setGeminiApiKey('');
       setWhatsappTemplate('Hola! Estoy por llegar con su pedido 🛵 🍔. Gracias!!');
+      setDeliveryFee('1000');
       setArcaCuit('');
       setArcaRazonSocial('');
       setArcaNombreComercial('');
@@ -1458,7 +1463,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                 </div>
 
                 {expandedModule === 'whatsapp' && (
-                  <div style={{ padding: '15px 20px 15px 55px' }}>
+                  <div style={{ padding: '15px 20px 15px 55px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '15px', flexWrap: 'wrap' }}>
                       <span style={{ fontSize: '0.8rem', fontWeight: 'bold', color: 'var(--text-muted)', minWidth: '150px' }}>
                         Mensaje WhatsApp:
@@ -1471,6 +1476,24 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                         onChange={(e) => setWhatsappTemplate(e.target.value)}
                         style={{ fontSize: '0.85rem', padding: '6px 10px', flex: '1 1 250px', height: '34px', margin: 0 }}
                       />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '15px', flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: '0.8rem', fontWeight: 'bold', color: 'var(--text-muted)', minWidth: '150px' }}>
+                        Precio de envío:
+                      </span>
+                      <input
+                        type="number"
+                        className="form-input input-no-spinner"
+                        placeholder="0.00"
+                        min="0"
+                        step="any"
+                        value={deliveryFee}
+                        onChange={(e) => setDeliveryFee(e.target.value)}
+                        style={{ fontSize: '0.85rem', padding: '6px 10px', width: '140px', height: '34px', margin: 0 }}
+                      />
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                        Respaldo si no existe el producto &quot;Envio&quot; en inventario.
+                      </span>
                     </div>
                   </div>
                 )}

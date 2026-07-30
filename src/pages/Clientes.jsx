@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import ExcelJS from 'exceljs'
 import { db, isSupabaseConfigured, supabase } from '../supabaseClient'
-import { CSV_IMPORT_HELP } from '../clientesImport'
+import { CSV_IMPORT_HELP, IMPORT_FIELDS, analyzeCsvImport, getColumnLabel, normalizeIva } from '../clientesImport'
 
 const cleanAddressText = (str) => {
   if (!str) return '';
@@ -39,6 +39,50 @@ const getGmapsUrl = (str) => {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`;
 };
 
+const DELIVERY_ITEM_ID = '__delivery_item__';
+const DEFAULT_DELIVERY_FEE = 1000;
+
+const readDeliveryFee = () => {
+  const parsed = parseFloat(localStorage.getItem('delivery_fee'));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_DELIVERY_FEE;
+};
+
+const findEnvioProduct = (products) =>
+  (products || []).find((p) => {
+    const name = String(p.nombre || '').trim().toLowerCase();
+    return name === 'envio' || name === 'envío';
+  });
+
+const resolveDeliveryFee = (products) => {
+  const envioProduct = findEnvioProduct(products);
+  if (envioProduct) {
+    const price = parseFloat(envioProduct.precio);
+    if (Number.isFinite(price) && price >= 0) return price;
+  }
+  return readDeliveryFee();
+};
+
+const isDeliveryItem = (item) =>
+  item?.id === DELIVERY_ITEM_ID ||
+  item?.isDeliveryFee === true ||
+  item?.producto === 'Envio' ||
+  item?.producto === 'Envío';
+
+const createDeliveryItem = (fee, envioProduct) => ({
+  id: DELIVERY_ITEM_ID,
+  producto: envioProduct?.nombre || 'Envio',
+  cantidad: 1,
+  valor: fee,
+  observacion: '',
+  iva_alicuota: envioProduct?.iva !== undefined ? parseFloat(envioProduct.iva) : 21.00,
+  isDeliveryFee: true,
+});
+
+const isOrderCancelled = (order) => {
+  const est = (order?.estado || '').toLowerCase().trim();
+  return est === 'cancelado' || est === 'cancelada' || est === 'cancelled';
+};
+
 function Clientes({ navigate, profile, accentColor }) {
   // Navigation View Mode: 'register' (Cargar Pedidos) or 'orders' (Ver Pedidos)
   const [viewMode, setViewMode] = useState('register');
@@ -64,6 +108,13 @@ function Clientes({ navigate, profile, accentColor }) {
   const [importClientesStatus, setImportClientesStatus] = useState('');
   const [importClientesResult, setImportClientesResult] = useState(null);
   const [importReplaceAll, setImportReplaceAll] = useState(true);
+  const [importCsvText, setImportCsvText] = useState('');
+  const [importCsvHeaders, setImportCsvHeaders] = useState([]);
+  const [importHasHeaderRow, setImportHasHeaderRow] = useState(true);
+  const [importColumnMapping, setImportColumnMapping] = useState({});
+  const [importPreviewRows, setImportPreviewRows] = useState([]);
+  const [importRowCount, setImportRowCount] = useState(0);
+  const [importFileName, setImportFileName] = useState('');
   const csvFileInputRef = useRef(null);
   const [clientSearchQuery, setClientSearchQuery] = useState('');
   const [clientSortField, setClientSortField] = useState('nombre');
@@ -123,6 +174,7 @@ function Clientes({ navigate, profile, accentColor }) {
 
   // Delivery states (Register View)
   const [conEnvio, setConEnvio] = useState(false);
+  const [deliveryFee, setDeliveryFee] = useState(DEFAULT_DELIVERY_FEE);
   const [addresses, setAddresses] = useState([]);
   const [selectedAddress, setSelectedAddress] = useState('');
   const [newAddressOpen, setNewAddressOpen] = useState(false);
@@ -744,6 +796,20 @@ function Clientes({ navigate, profile, accentColor }) {
   const [printObsText, setPrintObsText] = useState('');
   const [printObsPhone, setPrintObsPhone] = useState('');
   const [printObsPendingOrder, setPrintObsPendingOrder] = useState(null);
+  const [waCopyFeedback, setWaCopyFeedback] = useState('');
+
+  // Edit pending order
+  const [editOrderModal, setEditOrderModal] = useState(false);
+  const [editingOrder, setEditingOrder] = useState(null);
+  const [editOrderItems, setEditOrderItems] = useState([]);
+  const [editOrderSaving, setEditOrderSaving] = useState(false);
+  const [editProductSearch, setEditProductSearch] = useState('');
+  const [editSelectedProduct, setEditSelectedProduct] = useState(null);
+  const [editShowProductSuggestions, setEditShowProductSuggestions] = useState(false);
+  const [editItemQty, setEditItemQty] = useState(1);
+  const [editItemPrice, setEditItemPrice] = useState(0);
+  const [editItemObs, setEditItemObs] = useState('');
+  const editProductRef = useRef(null);
 
   // Submit messages
   const [successMsg, setSuccessMsg] = useState('');
@@ -771,6 +837,9 @@ function Clientes({ navigate, profile, accentColor }) {
       if (productRef.current && !productRef.current.contains(event.target)) {
         setShowProductSuggestions(false);
       }
+      if (editProductRef.current && !editProductRef.current.contains(event.target)) {
+        setEditShowProductSuggestions(false);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
@@ -797,6 +866,24 @@ function Clientes({ navigate, profile, accentColor }) {
       setSelectedOrderIds([]);
     }
   }, [viewMode]);
+
+  useEffect(() => {
+    const fee = resolveDeliveryFee(products);
+    setDeliveryFee(fee);
+    setOrderItems((prev) => {
+      if (!prev.some(isDeliveryItem)) return prev;
+      const envioProduct = findEnvioProduct(products);
+      return prev.map((item) =>
+        isDeliveryItem(item) ? createDeliveryItem(fee, envioProduct) : item
+      );
+    });
+  }, [products]);
+
+  useEffect(() => {
+    if (viewMode === 'register') {
+      setDeliveryFee(resolveDeliveryFee(products));
+    }
+  }, [viewMode, products]);
 
   // Clear selections when changing active order filters
   useEffect(() => {
@@ -1156,10 +1243,76 @@ function Clientes({ navigate, profile, accentColor }) {
     setNewClientCuit(formatted);
   };
 
+  const resetImportMapping = () => {
+    setImportCsvText('');
+    setImportCsvHeaders([]);
+    setImportHasHeaderRow(true);
+    setImportColumnMapping({});
+    setImportPreviewRows([]);
+    setImportRowCount(0);
+    setImportFileName('');
+    setImportClientesResult(null);
+    setImportClientesStatus('');
+  };
+
+  const refreshImportAnalysis = (csvText, hasHeaderRow) => {
+    const analysis = analyzeCsvImport(csvText, { hasHeaderRow });
+    if (analysis.error) return analysis;
+    setImportCsvHeaders(analysis.rawHeaders);
+    setImportColumnMapping(analysis.suggestedMapping);
+    setImportPreviewRows(analysis.previewRows);
+    setImportRowCount(analysis.rowCount);
+    return analysis;
+  };
+
   const handleImportCsvFile = async (event) => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
+
+    setImportClientesStatus('');
+    setImportClientesResult(null);
+
+    try {
+      const csvText = await file.text();
+      const analysis = analyzeCsvImport(csvText);
+      if (analysis.error) {
+        setImportClientesStatus('error');
+        setImportClientesResult({
+          imported: 0,
+          skipped: 0,
+          skippedEmpty: 0,
+          inferredNames: 0,
+          failed: 0,
+          deleted: 0,
+          errors: [analysis.error],
+        });
+        return;
+      }
+
+      setImportCsvText(csvText);
+      setImportCsvHeaders(analysis.rawHeaders);
+      setImportHasHeaderRow(analysis.hasHeaderRow);
+      setImportColumnMapping(analysis.suggestedMapping);
+      setImportPreviewRows(analysis.previewRows);
+      setImportRowCount(analysis.rowCount);
+      setImportFileName(file.name);
+      setImportClientesStatus('mapping');
+    } catch (err) {
+      setImportClientesStatus('error');
+      setImportClientesResult({
+        imported: 0,
+        skipped: 0,
+        skippedEmpty: 0,
+        failed: 0,
+        deleted: 0,
+        errors: [err.message || 'No se pudo leer el archivo CSV.'],
+      });
+    }
+  };
+
+  const handleConfirmImportCsv = async () => {
+    if (!importCsvText) return;
 
     if (importReplaceAll) {
       const ok = window.confirm(
@@ -1172,8 +1325,11 @@ function Clientes({ navigate, profile, accentColor }) {
     setImportClientesResult(null);
 
     try {
-      const csvText = await file.text();
-      const result = await db.importClientesFromCsv(csvText, { replaceAll: importReplaceAll });
+      const result = await db.importClientesFromCsv(importCsvText, {
+        replaceAll: importReplaceAll,
+        columnMapping: importColumnMapping,
+        hasHeaderRow: importHasHeaderRow,
+      });
       setImportClientesResult(result);
       setImportClientesStatus(result.imported > 0 ? 'success' : 'error');
 
@@ -1191,7 +1347,7 @@ function Clientes({ navigate, profile, accentColor }) {
         skippedEmpty: 0,
         failed: 0,
         deleted: 0,
-        errors: [err.message || 'No se pudo leer el archivo CSV.'],
+        errors: [err.message || 'No se pudo importar el archivo CSV.'],
       });
     }
   };
@@ -1513,7 +1669,142 @@ function Clientes({ navigate, profile, accentColor }) {
   };
 
   const handleRemoveItem = (itemId) => {
-    setOrderItems(prev => prev.filter(item => item.id !== itemId));
+    setOrderItems((prev) => {
+      const target = prev.find((item) => item.id === itemId);
+      if (target && isDeliveryItem(target)) {
+        setConEnvio(false);
+      }
+      return prev.filter((item) => item.id !== itemId);
+    });
+  };
+
+  const handleConEnvioChange = (checked) => {
+    setConEnvio(checked);
+    const envioProduct = findEnvioProduct(products);
+    const fee = resolveDeliveryFee(products);
+    setDeliveryFee(fee);
+    setOrderItems((prev) => {
+      const withoutDelivery = prev.filter((item) => !isDeliveryItem(item));
+      if (!checked) return withoutDelivery;
+      return [...withoutDelivery, createDeliveryItem(fee, envioProduct)];
+    });
+  };
+
+  const buildWhatsAppDeliveryMessage = (total) => {
+    const totalStr = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(total || 0);
+    return `☀️ Buen día! 👋\n\n✅ Perfecto, se lo llevamos.\n\n💰 El total es: ${totalStr}\n\n🙏 Muchas gracias!!`;
+  };
+
+  const handleCopyWhatsAppMessage = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setWaCopyFeedback('¡Copiado!');
+      setTimeout(() => setWaCopyFeedback(''), 2000);
+    } catch {
+      setWaCopyFeedback('No se pudo copiar');
+      setTimeout(() => setWaCopyFeedback(''), 2000);
+    }
+  };
+
+  const resetEditOrderForm = () => {
+    setEditProductSearch('');
+    setEditSelectedProduct(null);
+    setEditShowProductSuggestions(false);
+    setEditItemQty(1);
+    setEditItemPrice(0);
+    setEditItemObs('');
+  };
+
+  const handleOpenEditOrder = (order) => {
+    setEditingOrder(order);
+    setEditOrderItems((order.items || []).map((item) => ({
+      id: item.id || `tmp_${Date.now()}_${Math.random()}`,
+      producto: item.producto,
+      cantidad: parseFloat(item.cantidad),
+      valor: parseFloat(item.valor),
+      observacion: item.observacion || '',
+      iva_alicuota: item.iva_alicuota !== undefined ? parseFloat(item.iva_alicuota) : 21.00,
+    })));
+    resetEditOrderForm();
+    setEditOrderModal(true);
+  };
+
+  const handleEditOrderItemChange = (itemId, field, value) => {
+    setEditOrderItems((prev) => prev.map((item) => {
+      if (item.id !== itemId) return item;
+      if (field === 'cantidad' || field === 'valor') {
+        const parsed = parseFloat(value);
+        return { ...item, [field]: Number.isFinite(parsed) ? parsed : 0 };
+      }
+      return { ...item, [field]: value };
+    }));
+  };
+
+  const handleRemoveEditOrderItem = (itemId) => {
+    setEditOrderItems((prev) => prev.filter((item) => item.id !== itemId));
+  };
+
+  const handleSelectEditProduct = (product) => {
+    setEditSelectedProduct(product);
+    setEditProductSearch(product.nombre);
+    setEditItemPrice(product.precio);
+    setEditShowProductSuggestions(false);
+  };
+
+  const handleAddEditOrderItem = (e) => {
+    e.preventDefault();
+    if (!editSelectedProduct) {
+      alert('Por favor selecciona un producto de la lista.');
+      return;
+    }
+    if (editItemQty <= 0) {
+      alert('La cantidad debe ser mayor a cero.');
+      return;
+    }
+
+    setEditOrderItems((prev) => [...prev, {
+      id: `tmp_${Date.now()}_${Math.random()}`,
+      producto: editSelectedProduct.nombre,
+      cantidad: parseFloat(editItemQty),
+      valor: parseFloat(editItemPrice),
+      observacion: editItemObs.trim(),
+      iva_alicuota: editSelectedProduct.iva !== undefined ? parseFloat(editSelectedProduct.iva) : 21.00,
+    }]);
+    resetEditOrderForm();
+  };
+
+  const handleSaveEditOrder = async () => {
+    if (!editingOrder || editOrderItems.length === 0) {
+      alert('El pedido debe tener al menos un ítem.');
+      return;
+    }
+
+    const newTotal = editOrderItems.reduce((sum, item) => sum + (item.cantidad * item.valor), 0);
+    setEditOrderSaving(true);
+
+    try {
+      const res = await db.updatePedido(editingOrder.id, {
+        items: editOrderItems,
+        total: newTotal,
+        cliente_id: editingOrder.cliente_id,
+      });
+
+      if (res.success) {
+        setEditOrderModal(false);
+        setEditingOrder(null);
+        setEditOrderItems([]);
+        resetEditOrderForm();
+        await loadOrders();
+        const cl = await db.getClientes();
+        setClientes(cl);
+      } else {
+        alert(res.error || 'No se pudo actualizar el pedido.');
+      }
+    } catch (err) {
+      alert(err.message || 'Error al actualizar el pedido.');
+    } finally {
+      setEditOrderSaving(false);
+    }
   };
 
   const handleCreateAddress = async (e) => {
@@ -1772,6 +2063,7 @@ function Clientes({ navigate, profile, accentColor }) {
 
   const handlePrintRequest = (order) => {
     setPrintObsText('');
+    setWaCopyFeedback('');
     
     // Attempt to find client's phone number
     let phone = '';
@@ -1910,12 +2202,24 @@ function Clientes({ navigate, profile, accentColor }) {
     return true; // 'all'
   });
 
+  const activeOrdersForType = (delivery) =>
+    dateFilteredOrders.filter((o) => o.con_envio === delivery && !isOrderCancelled(o));
+
+  const cancelledOrdersForType = (delivery) =>
+    dateFilteredOrders.filter((o) => o.con_envio === delivery && isOrderCancelled(o));
+
   const filteredOrders = dateFilteredOrders.filter(o => {
     // Apply type filter (delivery / local)
     if (typeFilter === 'delivery' && !o.con_envio) return false;
     if (typeFilter === 'local' && o.con_envio) return false;
 
     const estLower = (o.estado || '').toLowerCase();
+    const cancelled = isOrderCancelled(o);
+
+    if (statusFilter === 'cancelados') {
+      return cancelled;
+    }
+    if (cancelled) return false;
 
     // Apply status filter
     if (statusFilter === 'pendiente' && estLower !== 'pendiente') return false;
@@ -1956,7 +2260,7 @@ function Clientes({ navigate, profile, accentColor }) {
     return orderSortAsc ? comparison : -comparison;
   });
 
-  const isSelectionEnabled = typeFilter !== null && statusFilter !== null;
+  const isSelectionEnabled = typeFilter !== null && statusFilter !== null && statusFilter !== 'cancelados';
 
   const handleSelectOrder = (id) => {
     if (!isSelectionEnabled) return; // Disable selections unless both filters are selected
@@ -2071,9 +2375,13 @@ function Clientes({ navigate, profile, accentColor }) {
       });
       if (res.success) {
         setSelectedOrderIds([]);
-        loadOrders();
+        setCancelMotiveText('');
+        await loadOrders();
         const cl = await db.getClientes();
         setClientes(cl);
+        setStatusFilter('cancelados');
+      } else {
+        alert(res.error || 'Error al cancelar pedidos.');
       }
     } catch (err) {
       console.error(err);
@@ -2084,11 +2392,15 @@ function Clientes({ navigate, profile, accentColor }) {
   };
 
   // --- REPORT CALCULATIONS ---
-  // Exclude cancelled from total sold
-  const validOrders = filteredOrders.filter(o => (o.estado || '').toLowerCase() !== 'cancelado');
-  const totalSoldSum = validOrders.reduce((sum, o) => sum + parseFloat(o.total || 0), 0);
+  const reportOrders = dateFilteredOrders.filter((o) => {
+    if (typeFilter === 'delivery' && !o.con_envio) return false;
+    if (typeFilter === 'local' && o.con_envio) return false;
+    return !isOrderCancelled(o);
+  });
 
-  // Sales by payment method
+  const totalSoldSum = reportOrders.reduce((sum, o) => sum + parseFloat(o.total || 0), 0);
+
+  // Sales by payment method (never includes cancelled orders)
   const salesByMethod = {
     'Efectivo': 0,
     'Pendiente': 0 // Open orders without resolved payment method yet
@@ -2103,37 +2415,23 @@ function Clientes({ navigate, profile, accentColor }) {
     salesByMethod['Cta Cte'] = 0;
   }
 
-  filteredOrders.forEach(o => {
+  reportOrders.forEach(o => {
     const total = parseFloat(o.total || 0);
     const estLower = (o.estado || '').toLowerCase();
-    const isCancelled = estLower === 'cancelado';
-    
-    if (isCancelled) {
-      if (o.medio_pago && o.medio_pago !== 'Cta Cte') {
-        const method = o.medio_pago;
-        if (salesByMethod[method] !== undefined) {
-          salesByMethod[method] += total;
-        } else {
-          salesByMethod['Efectivo'] += total;
-        }
-        // Subtract from Cta Cte to balance
-        salesByMethod['Cta Cte'] -= total;
+
+    // Check if the order is finalized/paid
+    const isOrderFinalized = estLower === 'finalizado' || estLower === 'cobrado' || (estLower === 'entregado' && o.medio_pago);
+
+    if (isOrderFinalized) {
+      const method = o.medio_pago || 'Efectivo';
+      if (salesByMethod[method] !== undefined) {
+        salesByMethod[method] += total;
+      } else {
+        salesByMethod['Efectivo'] += total;
       }
     } else {
-      // Check if the order is finalized/paid
-      const isOrderFinalized = estLower === 'finalizado' || estLower === 'cobrado' || (estLower === 'entregado' && o.medio_pago);
-      
-      if (isOrderFinalized) {
-        const method = o.medio_pago || 'Efectivo';
-        if (salesByMethod[method] !== undefined) {
-          salesByMethod[method] += total;
-        } else {
-          salesByMethod['Efectivo'] += total;
-        }
-      } else {
-        // Pedidos abiertos (Pendiente, En reparto, or Entregado without payment) are pending settlement
-        salesByMethod['Pendiente'] += total;
-      }
+      // Pedidos abiertos (Pendiente, En reparto, or Entregado without payment) are pending settlement
+      salesByMethod['Pendiente'] += total;
     }
   });
 
@@ -2352,8 +2650,7 @@ function Clientes({ navigate, profile, accentColor }) {
                 style={{ backgroundColor: '#475569', padding: '10px 14px', height: '42px', flexShrink: 0 }}
                 onClick={() => {
                   setImportClientesModal(true);
-                  setImportClientesStatus('');
-                  setImportClientesResult(null);
+                  resetImportMapping();
                 }}
               >
                 <i className="bi bi-file-earmark-spreadsheet me-1"></i> Importar CSV
@@ -2507,7 +2804,7 @@ function Clientes({ navigate, profile, accentColor }) {
                     <input 
                       ref={qtyInputRef}
                       type="number" 
-                      className="form-input text-end" 
+                      className="form-input text-end input-no-spinner" 
                       style={{ fontSize: '0.85rem', padding: '8px' }}
                       min="0.01" 
                       step="any"
@@ -2523,7 +2820,7 @@ function Clientes({ navigate, profile, accentColor }) {
                     <label className="form-label" style={{ fontSize: '0.75rem' }}>Val. Unit</label>
                     <input 
                       type="number" 
-                      className="form-input text-end" 
+                      className="form-input text-end input-no-spinner" 
                       style={{ fontSize: '0.85rem', padding: '8px' }}
                       min="0" 
                       step="any"
@@ -2608,10 +2905,13 @@ function Clientes({ navigate, profile, accentColor }) {
                         style={{ width: '22px', height: '22px', margin: 0 }}
                         id="checkEnvio"
                         checked={conEnvio}
-                        onChange={(e) => setConEnvio(e.target.checked)}
+                        onChange={(e) => handleConEnvioChange(e.target.checked)}
                       />
                       <label className="form-check-label fw-bold text-dark" htmlFor="checkEnvio" style={{ cursor: 'pointer' }}>
                         <i className="bi bi-truck me-1 text-primary"></i> Delivery
+                        <span style={{ fontWeight: '500', color: 'var(--text-muted)', marginLeft: '6px', fontSize: '0.85rem' }}>
+                          (+ $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(deliveryFee)} envío)
+                        </span>
                       </label>
                     </div>
 
@@ -2876,7 +3176,7 @@ function Clientes({ navigate, profile, accentColor }) {
                     setSelectedOrderIds([]);
                   }}
                 >
-                  <i className="bi bi-truck me-1"></i> Delivery ({dateFilteredOrders.filter(o => o.con_envio === true).length})
+                  <i className="bi bi-truck me-1"></i> Delivery ({activeOrdersForType(true).length})
                 </button>
                 <button 
                   type="button" 
@@ -2894,7 +3194,7 @@ function Clientes({ navigate, profile, accentColor }) {
                     setSelectedOrderIds([]);
                   }}
                 >
-                  <i className="bi bi-shop me-1"></i> Local ({dateFilteredOrders.filter(o => o.con_envio === false).length})
+                  <i className="bi bi-shop me-1"></i> Local ({activeOrdersForType(false).length})
                 </button>
               </div>
             </div>
@@ -2923,7 +3223,7 @@ function Clientes({ navigate, profile, accentColor }) {
                       setSelectedOrderIds([]);
                     }}
                   >
-                    <i className="bi bi-grid-fill me-1"></i> Todos ({dateFilteredOrders.filter(o => o.con_envio).length})
+                    <i className="bi bi-grid-fill me-1"></i> Todos ({activeOrdersForType(true).length})
                   </button>
                   <button 
                     type="button" 
@@ -2940,7 +3240,7 @@ function Clientes({ navigate, profile, accentColor }) {
                       setSelectedOrderIds([]);
                     }}
                   >
-                    <i className="bi bi-clock me-1"></i> Pendientes ({dateFilteredOrders.filter(o => o.con_envio && (o.estado || '').toLowerCase() === 'pendiente').length})
+                    <i className="bi bi-clock me-1"></i> Pendientes ({dateFilteredOrders.filter(o => o.con_envio && !isOrderCancelled(o) && (o.estado || '').toLowerCase() === 'pendiente').length})
                   </button>
                   <button 
                     type="button" 
@@ -2991,7 +3291,24 @@ function Clientes({ navigate, profile, accentColor }) {
                       setSelectedOrderIds([]);
                     }}
                   >
-                    <i className="bi bi-check-circle-fill me-1"></i> Finalizados ({dateFilteredOrders.filter(o => o.con_envio && ((o.estado || '').toLowerCase() === 'finalizado' || (o.estado || '').toLowerCase() === 'cobrado' || ((o.estado || '').toLowerCase() === 'entregado' && o.medio_pago))).length})
+                    <i className="bi bi-check-circle-fill me-1"></i> Finalizados ({dateFilteredOrders.filter(o => o.con_envio && !isOrderCancelled(o) && ((o.estado || '').toLowerCase() === 'finalizado' || (o.estado || '').toLowerCase() === 'cobrado' || ((o.estado || '').toLowerCase() === 'entregado' && o.medio_pago))).length})
+                  </button>
+                  <button 
+                    type="button" 
+                    className={`btn-new-task ${statusFilter === 'cancelados' ? 'active' : ''}`}
+                    style={{ 
+                      backgroundColor: statusFilter === 'cancelados' ? '#64748b' : 'white',
+                      color: statusFilter === 'cancelados' ? 'white' : 'var(--text-muted)',
+                      border: '1px solid var(--border-color)',
+                      padding: '6px 12px',
+                      fontSize: '0.8rem'
+                    }}
+                    onClick={() => {
+                      setStatusFilter(statusFilter === 'cancelados' ? null : 'cancelados');
+                      setSelectedOrderIds([]);
+                    }}
+                  >
+                    <i className="bi bi-x-circle me-1"></i> Cancelados ({cancelledOrdersForType(true).length})
                   </button>
                 </>
               ) : (
@@ -3011,7 +3328,7 @@ function Clientes({ navigate, profile, accentColor }) {
                       setSelectedOrderIds([]);
                     }}
                   >
-                    <i className="bi bi-grid-fill me-1"></i> Todos ({dateFilteredOrders.filter(o => !o.con_envio).length})
+                    <i className="bi bi-grid-fill me-1"></i> Todos ({activeOrdersForType(false).length})
                   </button>
                   <button 
                     type="button" 
@@ -3028,7 +3345,7 @@ function Clientes({ navigate, profile, accentColor }) {
                       setSelectedOrderIds([]);
                     }}
                   >
-                    <i className="bi bi-clock me-1"></i> Pendientes ({dateFilteredOrders.filter(o => !o.con_envio && (o.estado || '').toLowerCase() === 'pendiente').length})
+                    <i className="bi bi-clock me-1"></i> Pendientes ({dateFilteredOrders.filter(o => !o.con_envio && !isOrderCancelled(o) && (o.estado || '').toLowerCase() === 'pendiente').length})
                   </button>
                   <button 
                     type="button" 
@@ -3045,7 +3362,24 @@ function Clientes({ navigate, profile, accentColor }) {
                       setSelectedOrderIds([]);
                     }}
                   >
-                    <i className="bi bi-check-circle-fill me-1"></i> Finalizados ({dateFilteredOrders.filter(o => !o.con_envio && ((o.estado || '').toLowerCase() === 'finalizado' || ['cobrado', 'entregado'].includes((o.estado || '').toLowerCase()))).length})
+                    <i className="bi bi-check-circle-fill me-1"></i> Finalizados ({dateFilteredOrders.filter(o => !o.con_envio && !isOrderCancelled(o) && ((o.estado || '').toLowerCase() === 'finalizado' || ['cobrado', 'entregado'].includes((o.estado || '').toLowerCase()))).length})
+                  </button>
+                  <button 
+                    type="button" 
+                    className={`btn-new-task ${statusFilter === 'cancelados' ? 'active' : ''}`}
+                    style={{ 
+                      backgroundColor: statusFilter === 'cancelados' ? '#64748b' : 'white',
+                      color: statusFilter === 'cancelados' ? 'white' : 'var(--text-muted)',
+                      border: '1px solid var(--border-color)',
+                      padding: '6px 12px',
+                      fontSize: '0.8rem'
+                    }}
+                    onClick={() => {
+                      setStatusFilter(statusFilter === 'cancelados' ? null : 'cancelados');
+                      setSelectedOrderIds([]);
+                    }}
+                  >
+                    <i className="bi bi-x-circle me-1"></i> Cancelados ({cancelledOrdersForType(false).length})
                   </button>
                 </>
               )}
@@ -3308,13 +3642,13 @@ function Clientes({ navigate, profile, accentColor }) {
                     >
                       Total {orderSortField === 'total' && (orderSortAsc ? '▴' : '▾')}
                     </th>
-                    <th style={{ padding: '12px', textAlign: 'center', width: '130px' }}>Ticket</th>
+                    <th style={{ padding: '12px', textAlign: 'center', width: '170px' }}>Ticket</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredOrders.map(order => {
                     const isSelected = selectedOrderIds.includes(order.id);
-                    const isCancelled = order.estado === 'Cancelado';
+                    const isCancelled = isOrderCancelled(order);
                     const isFinished = (order.estado || '').toLowerCase() === 'finalizado' || (order.estado || '').toLowerCase() === 'cobrado' || ((order.estado || '').toLowerCase() === 'entregado' && order.medio_pago);
                     const dateFmt = new Date(order.fecha).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
                     
@@ -3449,6 +3783,30 @@ function Clientes({ navigate, profile, accentColor }) {
                               <i className="bi bi-printer"></i> Comanda
                             </button>
 
+                            {estLower === 'pendiente' && !isCancelled && (
+                              <button
+                                type="button"
+                                className="btn-new-task"
+                                style={{
+                                  padding: '4px 8px',
+                                  fontSize: '0.75rem',
+                                  backgroundColor: 'transparent',
+                                  color: '#f59e0b',
+                                  border: '1px solid #f59e0b',
+                                  borderRadius: '6px',
+                                  cursor: 'pointer',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  margin: 0
+                                }}
+                                onClick={() => handleOpenEditOrder(order)}
+                                title="Editar ítems del pedido"
+                              >
+                                <i className="bi bi-pencil-fill"></i>
+                              </button>
+                            )}
+
                             {(order.cae || order.factura_nro) && (
                               <button
                                 type="button"
@@ -3492,6 +3850,8 @@ function Clientes({ navigate, profile, accentColor }) {
                 {typeFilter === 'delivery' && statusFilter === 'finalizado' && "No hay pedidos delivery finalizados actualmente."}
                 {typeFilter === 'local' && statusFilter === 'pendiente' && "No hay pedidos locales pendientes actualmente."}
                 {typeFilter === 'local' && statusFilter === 'finalizado' && "No hay pedidos locales finalizados actualmente."}
+                {statusFilter === 'cancelados' && typeFilter === 'delivery' && "No hay pedidos delivery cancelados."}
+                {statusFilter === 'cancelados' && typeFilter === 'local' && "No hay pedidos locales cancelados."}
                 {typeFilter === null && "No hay pedidos cargados en el sistema actualmente."}
               </div>
             </div>
@@ -3500,7 +3860,7 @@ function Clientes({ navigate, profile, accentColor }) {
           {/* ============================================================== */}
           {/* TOTAL SALES BILLING METRICS                                    */}
           {/* ============================================================== */}
-          {orders.length > 0 && (
+          {orders.length > 0 && statusFilter !== 'cancelados' && (
             <div className="page-card" style={{ marginTop: '30px', padding: '20px', backgroundColor: '#f8fafc', borderColor: 'var(--border-color)', borderStyle: 'solid', borderWidth: '1px' }}>
               <h4 className="text-dark fw-bold mb-3" style={{ fontSize: '1rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-color)', paddingBottom: '6px' }}>
                 <i className="bi bi-bar-chart-line-fill me-2"></i>Resumen de Ventas
@@ -3527,7 +3887,7 @@ function Clientes({ navigate, profile, accentColor }) {
                     $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(totalSoldSum)}
                   </div>
                   <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '6px', fontStyle: 'italic' }}>
-                    Calculado según la fecha y filtros seleccionados
+                    Según fecha y tipo (Delivery/Local). Excluye pedidos cancelados.
                   </span>
                 </div>
                 
@@ -3590,7 +3950,10 @@ function Clientes({ navigate, profile, accentColor }) {
           <div className="modal-content-card">
             <div className="modal-header" style={{ backgroundColor: '#475569' }}>
               <h5 className="modal-title"><i className="bi bi-file-earmark-spreadsheet me-2"></i>Importar clientes desde Google Sheets</h5>
-              <button className="modal-close-btn" onClick={() => setImportClientesModal(false)}>
+              <button className="modal-close-btn" onClick={() => {
+                setImportClientesModal(false);
+                resetImportMapping();
+              }}>
                 <i className="bi bi-x-lg"></i>
               </button>
             </div>
@@ -3602,7 +3965,7 @@ function Clientes({ navigate, profile, accentColor }) {
               </ol>
 
               <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '12px', marginBottom: '16px', fontSize: '0.82rem', fontFamily: 'monospace' }}>
-                nombre,razon_social,cuit,telefono,direccion,condicion_iva,saldo<br />
+                nombre,razon_social,cuit,telefono,direccion,Cond. IVA,saldo<br />
                 Dietética Central,Central SRL,30754321012,5492994123456,Av. Argentina 120 Neuquén,CF,0
               </div>
 
@@ -3631,8 +3994,99 @@ function Clientes({ navigate, profile, accentColor }) {
                 disabled={importClientesStatus === 'importing'}
                 onClick={() => csvFileInputRef.current?.click()}
               >
-                {importClientesStatus === 'importing' ? 'IMPORTANDO...' : 'ELEGIR ARCHIVO CSV'}
+                {importCsvText ? 'CAMBIAR ARCHIVO CSV' : 'ELEGIR ARCHIVO CSV'}
               </button>
+
+              {importFileName && (
+                <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '12px' }}>
+                  Archivo: <strong>{importFileName}</strong> · {importRowCount} fila(s) detectada(s)
+                </div>
+              )}
+
+              {importClientesStatus === 'mapping' && importCsvHeaders.length > 0 && (
+                <div style={{ marginBottom: '16px' }}>
+                  <h6 style={{ fontWeight: '700', marginBottom: '10px' }}>Asignación de columnas</h6>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px', cursor: 'pointer', fontSize: '0.85rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={importHasHeaderRow}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setImportHasHeaderRow(checked);
+                        if (importCsvText) refreshImportAnalysis(importCsvText, checked);
+                      }}
+                      style={{ width: '16px', height: '16px' }}
+                    />
+                    La primera fila del archivo es encabezado
+                  </label>
+
+                  <div style={{ display: 'grid', gap: '10px', marginBottom: '14px' }}>
+                    {IMPORT_FIELDS.map((field) => (
+                      <div key={field.key} style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: '8px', alignItems: 'center' }}>
+                        <label style={{ fontSize: '0.85rem', fontWeight: '600' }}>{field.label}</label>
+                        <select
+                          className="form-input"
+                          style={{ margin: 0, fontSize: '0.85rem' }}
+                          value={importColumnMapping[field.key] ?? -1}
+                          onChange={(e) => {
+                            const value = parseInt(e.target.value, 10);
+                            setImportColumnMapping((prev) => ({
+                              ...prev,
+                              [field.key]: Number.isNaN(value) ? -1 : value,
+                            }));
+                          }}
+                        >
+                          <option value={-1}>(No importar)</option>
+                          {importCsvHeaders.map((header, index) => (
+                            <option key={`${field.key}-${index}`} value={index}>
+                              {getColumnLabel(index, importCsvHeaders)}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+
+                  {importPreviewRows.length > 0 && (
+                    <div style={{ overflowX: 'auto', marginBottom: '14px' }}>
+                      <div style={{ fontSize: '0.8rem', fontWeight: '600', marginBottom: '6px' }}>Vista previa (3 filas)</div>
+                      <table className="table table-sm" style={{ fontSize: '0.75rem', margin: 0 }}>
+                        <thead>
+                          <tr>
+                            {IMPORT_FIELDS.filter((f) => (importColumnMapping[f.key] ?? -1) >= 0).map((field) => (
+                              <th key={field.key}>{field.label}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {importPreviewRows.map((row, rowIdx) => (
+                            <tr key={rowIdx}>
+                              {IMPORT_FIELDS.filter((f) => (importColumnMapping[f.key] ?? -1) >= 0).map((field) => {
+                                const idx = importColumnMapping[field.key];
+                                const cell = String(row[idx] ?? '').trim();
+                                const display = field.key === 'condicion_iva' && cell
+                                  ? `${cell} → ${normalizeIva(cell)}`
+                                  : cell || '—';
+                                return <td key={field.key}>{display}</td>;
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    className="btn-submit"
+                    style={{ backgroundColor: '#8b5cf6' }}
+                    disabled={importClientesStatus === 'importing'}
+                    onClick={handleConfirmImportCsv}
+                  >
+                    {importClientesStatus === 'importing' ? 'IMPORTANDO...' : `IMPORTAR ${importRowCount} CLIENTES`}
+                  </button>
+                </div>
+              )}
 
               {importClientesResult && (
                 <div style={{ fontSize: '0.9rem' }}>
@@ -4014,6 +4468,53 @@ function Clientes({ navigate, profile, accentColor }) {
                     autoFocus
                   />
                 </div>
+
+                {printObsPendingOrder && (
+                  <div style={{
+                    backgroundColor: '#ecfdf5',
+                    border: '1px solid #a7f3d0',
+                    borderRadius: '10px',
+                    padding: '12px',
+                    marginBottom: '16px',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', gap: '10px' }}>
+                      <label className="form-label text-dark" style={{ margin: 0, fontSize: '0.85rem' }}>
+                        <i className="bi bi-whatsapp me-1" style={{ color: '#25d366' }}></i>
+                        Mensaje para WhatsApp
+                      </label>
+                      <button
+                        type="button"
+                        className="btn-new-task"
+                        style={{
+                          padding: '4px 10px',
+                          fontSize: '0.75rem',
+                          backgroundColor: '#25d366',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '6px',
+                          margin: 0,
+                        }}
+                        onClick={() => handleCopyWhatsAppMessage(buildWhatsAppDeliveryMessage(printObsPendingOrder.total))}
+                      >
+                        <i className="bi bi-clipboard me-1"></i>
+                        {waCopyFeedback || 'Copiar'}
+                      </button>
+                    </div>
+                    <div
+                      style={{
+                        fontSize: '0.85rem',
+                        lineHeight: 1.5,
+                        whiteSpace: 'pre-wrap',
+                        color: '#065f46',
+                        userSelect: 'text',
+                        cursor: 'text',
+                      }}
+                    >
+                      {buildWhatsAppDeliveryMessage(printObsPendingOrder.total)}
+                    </div>
+                  </div>
+                )}
+
                 <div style={{ display: 'flex', gap: '10px', marginTop: '15px' }}>
                   <button 
                     type="button" 
@@ -4032,6 +4533,210 @@ function Clientes({ navigate, profile, accentColor }) {
                   </button>
                 </div>
               </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: EDITAR PEDIDO PENDIENTE */}
+      {editOrderModal && editingOrder && (
+        <div className="modal-overlay">
+          <div className="modal-content-card" style={{ maxWidth: '640px' }}>
+            <div className="modal-header" style={{ backgroundColor: '#f59e0b' }}>
+              <h5 className="modal-title" style={{ color: 'white' }}>
+                <i className="bi bi-pencil-fill me-2"></i>
+                Editar Pedido — {editingOrder.cliente_nombre}
+              </h5>
+              <button
+                className="modal-close-btn"
+                onClick={() => {
+                  setEditOrderModal(false);
+                  setEditingOrder(null);
+                  setEditOrderItems([]);
+                  resetEditOrderForm();
+                }}
+              >
+                <i className="bi bi-x-lg"></i>
+              </button>
+            </div>
+            <div className="modal-body">
+              <div style={{ marginBottom: '16px' }}>
+                <label className="form-label" style={{ fontSize: '0.85rem', fontWeight: '700' }}>Ítems del pedido</label>
+                {editOrderItems.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {editOrderItems.map((item) => (
+                      <div
+                        key={item.id}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: '1fr 70px 90px 36px',
+                          gap: '8px',
+                          alignItems: 'center',
+                          padding: '8px',
+                          backgroundColor: '#f8fafc',
+                          borderRadius: '8px',
+                          border: '1px solid #e2e8f0',
+                        }}
+                      >
+                        <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>{item.producto}</div>
+                        <input
+                          type="number"
+                          className="form-input input-no-spinner text-end"
+                          style={{ margin: 0, padding: '6px', fontSize: '0.8rem' }}
+                          min="0.01"
+                          step="any"
+                          value={item.cantidad}
+                          onChange={(e) => handleEditOrderItemChange(item.id, 'cantidad', e.target.value)}
+                          onKeyDown={handleNumericKeyDown}
+                          title="Cantidad"
+                        />
+                        <input
+                          type="number"
+                          className="form-input input-no-spinner text-end"
+                          style={{ margin: 0, padding: '6px', fontSize: '0.8rem' }}
+                          min="0"
+                          step="any"
+                          value={item.valor}
+                          onChange={(e) => handleEditOrderItemChange(item.id, 'valor', e.target.value)}
+                          onKeyDown={handleNumericKeyDown}
+                          title="Precio unitario"
+                        />
+                        <button
+                          type="button"
+                          className="btn-nav-back"
+                          style={{ padding: '4px', color: '#ef4444', border: 'none', margin: 0 }}
+                          onClick={() => handleRemoveEditOrderItem(item.id)}
+                          title="Quitar ítem"
+                        >
+                          <i className="bi bi-trash-fill"></i>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center text-muted p-3 small" style={{ border: '1px dashed #e2e8f0', borderRadius: '8px' }}>
+                    No hay ítems. Agregá al menos uno para guardar.
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '12px', padding: '0 4px' }}>
+                  <span className="fw-bold text-dark text-uppercase" style={{ fontSize: '0.85rem' }}>Total:</span>
+                  <span className="fw-bold" style={{ fontSize: '1.1rem', color: '#1e293b' }}>
+                    $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(
+                      editOrderItems.reduce((sum, item) => sum + (item.cantidad * item.valor), 0)
+                    )}
+                  </span>
+                </div>
+              </div>
+
+              <form onSubmit={handleAddEditOrderItem} style={{ borderTop: '1px solid #e2e8f0', paddingTop: '16px' }}>
+                <label className="form-label" style={{ fontSize: '0.85rem', fontWeight: '700' }}>Agregar ítem</label>
+                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: '8px', alignItems: 'end' }}>
+                  <div className="form-group" ref={editProductRef} style={{ marginBottom: 0, position: 'relative' }}>
+                    <input
+                      type="text"
+                      className="form-input"
+                      style={{ fontSize: '0.85rem', padding: '8px' }}
+                      placeholder="Buscar producto..."
+                      value={editProductSearch}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setEditProductSearch(val);
+                        setEditShowProductSuggestions(true);
+                        if (val.trim() === '') {
+                          setEditSelectedProduct(null);
+                          setEditItemPrice(0);
+                        } else {
+                          const matches = products.filter((p) =>
+                            p.nombre.toLowerCase().includes(val.toLowerCase())
+                          );
+                          if (matches.length > 0) {
+                            setEditSelectedProduct(matches[0]);
+                            setEditItemPrice(matches[0].precio);
+                          } else {
+                            setEditSelectedProduct(null);
+                            setEditItemPrice(0);
+                          }
+                        }
+                      }}
+                      onFocus={() => setEditShowProductSuggestions(true)}
+                    />
+                    {editShowProductSuggestions && editProductSearch.trim() !== '' && (
+                      <ul className="suggestions-list" style={{ position: 'absolute', zIndex: 10, width: '100%', maxHeight: '160px', overflowY: 'auto' }}>
+                        {products
+                          .filter((p) => p.nombre.toLowerCase().includes(editProductSearch.toLowerCase()))
+                          .slice(0, 8)
+                          .map((p) => (
+                            <li
+                              key={p.id}
+                              className="suggestion-item text-start"
+                              style={{ padding: '8px 10px', fontSize: '0.85rem' }}
+                              onClick={() => handleSelectEditProduct(p)}
+                            >
+                              <strong>{p.nombre}</strong>
+                              <span style={{ float: 'right', color: 'var(--text-muted)' }}>${p.precio}</span>
+                            </li>
+                          ))}
+                      </ul>
+                    )}
+                  </div>
+                  <input
+                    type="number"
+                    className="form-input input-no-spinner text-end"
+                    style={{ fontSize: '0.85rem', padding: '8px', margin: 0 }}
+                    min="0.01"
+                    step="any"
+                    value={editItemQty}
+                    onChange={(e) => setEditItemQty(e.target.value)}
+                    onKeyDown={handleNumericKeyDown}
+                    title="Cantidad"
+                  />
+                  <input
+                    type="number"
+                    className="form-input input-no-spinner text-end"
+                    style={{ fontSize: '0.85rem', padding: '8px', margin: 0 }}
+                    min="0"
+                    step="any"
+                    value={editItemPrice}
+                    onChange={(e) => setEditItemPrice(e.target.value)}
+                    onKeyDown={handleNumericKeyDown}
+                    title="Precio"
+                  />
+                  <button
+                    type="submit"
+                    className="btn-submit"
+                    style={{ backgroundColor: '#8b5cf6', width: 'auto', padding: '8px 12px', margin: 0, fontSize: '0.8rem' }}
+                  >
+                    <i className="bi bi-plus-lg"></i>
+                  </button>
+                </div>
+              </form>
+
+              <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
+                <button
+                  type="button"
+                  className="btn-submit"
+                  style={{ backgroundColor: '#6b7280', margin: 0 }}
+                  onClick={() => {
+                    setEditOrderModal(false);
+                    setEditingOrder(null);
+                    setEditOrderItems([]);
+                    resetEditOrderForm();
+                  }}
+                  disabled={editOrderSaving}
+                >
+                  CANCELAR
+                </button>
+                <button
+                  type="button"
+                  className="btn-submit"
+                  style={{ backgroundColor: '#f59e0b', margin: 0, flex: 1 }}
+                  onClick={handleSaveEditOrder}
+                  disabled={editOrderSaving || editOrderItems.length === 0}
+                >
+                  {editOrderSaving ? 'GUARDANDO...' : 'GUARDAR CAMBIOS'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
