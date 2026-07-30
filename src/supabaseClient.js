@@ -41,11 +41,13 @@ const resolveLegacyShippingEstadoUpdate = (order, updates) => {
 import { mapCsvRowsToClientes, parseCsvText, analyzeCsvImport } from './clientesImport'
 
 // Credentials: localStorage first, then Vite env vars (for local dev)
-const getCredentials = () => {
+export const getSupabaseCredentials = () => {
   const url = localStorage.getItem('supabase_url') || import.meta.env.VITE_SUPABASE_URL || '';
   const key = localStorage.getItem('supabase_anon_key') || import.meta.env.VITE_SUPABASE_ANON_KEY || '';
   return { url, key };
 };
+
+const getCredentials = getSupabaseCredentials;
 
 const { url, key } = getCredentials();
 

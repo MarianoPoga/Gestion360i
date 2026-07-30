@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import ExcelJS from 'exceljs'
-import { db, isSupabaseConfigured, supabase } from '../supabaseClient'
+import { db, isSupabaseConfigured, supabase, getBusinessId } from '../supabaseClient'
+import { readArcaFromCache } from '../arcaConfig'
 import { CSV_IMPORT_HELP, IMPORT_FIELDS, analyzeCsvImport, getColumnLabel, normalizeIva } from '../clientesImport'
 import { getMedioIcon } from '../cierreMedios'
 
@@ -86,6 +87,14 @@ const isOrderCancelled = (order) => {
 
 const hasPaymentMedio = (medio) => !!medio && String(medio).trim() !== '';
 
+const isMedioCtaCte = (medio) => {
+  const normalized = String(medio || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized === 'cta cte'
+    || normalized === 'cuenta corriente (deuda)'
+    || normalized === 'cuenta corriente';
+};
+
 const normalizeOrderEstado = (order) => (order?.estado || '').toLowerCase().trim();
 
 const getOrderShippingEstado = (order) => {
@@ -101,13 +110,18 @@ const getOrderShippingEstado = (order) => {
 
 const getOrderShippingEstadoLower = (order) => getOrderShippingEstado(order).toLowerCase();
 
+const isOrderCtaCte = (order) => {
+  if (!order || isOrderCancelled(order)) return false;
+  return isMedioCtaCte(order.medio_pago);
+};
+
 const isOrderPagado = (order) => {
   if (!order || isOrderCancelled(order)) return false;
-  return hasPaymentMedio(order.medio_pago);
+  return hasPaymentMedio(order.medio_pago) && !isMedioCtaCte(order.medio_pago);
 };
 
 const isOrderCobroPendiente = (order) => {
-  if (!order || isOrderCancelled(order) || isOrderFinalizado(order)) return false;
+  if (!order || isOrderCancelled(order)) return false;
   return !hasPaymentMedio(order.medio_pago);
 };
 
@@ -116,7 +130,20 @@ const isOrderFinalizado = (order) => {
   return est === 'finalizado' || est === 'cobrado';
 };
 
-const isOrderPaid = (order) => isOrderPagado(order) || isOrderFinalizado(order);
+const getOrderCobroEstado = (order) => {
+  if (!order || isOrderCancelled(order)) return null;
+  if (!hasPaymentMedio(order.medio_pago)) return 'PENDIENTE';
+  if (isMedioCtaCte(order.medio_pago)) return 'CTA CTE';
+  return 'PAGADO';
+};
+
+const COBRO_ESTADO_STYLES = {
+  PENDIENTE: { backgroundColor: '#fee2e2', color: '#b91c1c' },
+  PAGADO: { backgroundColor: '#ccfbf1', color: '#0f766e' },
+  'CTA CTE': { backgroundColor: '#fef3c7', color: '#b45309' },
+};
+
+const isOrderPaid = (order) => isOrderPagado(order) || isOrderCtaCte(order) || isOrderFinalizado(order);
 
 const canCobrarOrder = (order) => {
   if (!order || isOrderCancelled(order)) return false;
@@ -671,10 +698,12 @@ function Clientes({ navigate, profile, accentColor }) {
     setArcaResults([]);
     
     try {
+      await db.getArcaConfig();
+      const arcaConfig = readArcaFromCache(getBusinessId());
       const results = [];
-      const cuitEmisor = localStorage.getItem('arca_cuit') || '';
-      const puntoVenta = localStorage.getItem('arca_punto_venta') || '0001';
-      const isDemo = !isSupabaseConfigured() || !cuitEmisor; // Fallback to demo simulator if not configured
+      const cuitEmisor = arcaConfig.cuit || '';
+      const puntoVenta = arcaConfig.punto_venta || '0001';
+      const isDemo = !isSupabaseConfigured() || !cuitEmisor;
 
       for (let i = 0; i < ordersToInvoice.length; i++) {
         const order = ordersToInvoice[i];
@@ -714,13 +743,6 @@ function Clientes({ navigate, profile, accentColor }) {
 
             console.log(`[Facturación Debug] Iniciando facturación del pedido ID: ${order.id}`);
             const cuitReceptor = client?.cuit ? client.cuit.replace(/[^0-9]/g, '') : '';
-            const supabaseUrl = localStorage.getItem('supabase_url') || '';
-            const supabaseAnonKey = localStorage.getItem('supabase_anon_key') || '';
-
-            console.log(`[Facturación Debug] URL de Supabase: "${supabaseUrl}"`);
-            console.log(`[Facturación Debug] Anon Key (longitud): ${supabaseAnonKey ? supabaseAnonKey.length : 0}`);
-            console.log(`[Facturación Debug] Anon Key (prefijo): "${supabaseAnonKey ? supabaseAnonKey.substring(0, 10) + '...' : 'vacía'}"`);
-            console.log(`[Facturación Debug] CUIT Receptor: "${cuitReceptor}"`);
 
             const requestPayload = {
               orderId: order.id,
@@ -729,52 +751,47 @@ function Clientes({ navigate, profile, accentColor }) {
               total: order.total,
               items: order.items,
               facturaTipo: isRI ? 'A' : 'B',
-              cuitReceptor: cuitReceptor,
-              ambiente: localStorage.getItem('arca_ambiente') || 'homologacion',
-              cert: localStorage.getItem('arca_cert') || '',
-              key: localStorage.getItem('arca_key') || '',
-              accessToken: localStorage.getItem('arca_token') || ''
+              cuitReceptor,
+              ambiente: arcaConfig.ambiente || 'homologacion',
+              cert: arcaConfig.cert || '',
+              key: arcaConfig.private_key || '',
+              accessToken: arcaConfig.token || '',
             };
-            console.log(`[Facturación Debug] Payload a enviar:`, JSON.stringify(requestPayload));
+            console.log(`[Facturación Debug] Payload a enviar:`, JSON.stringify({
+              ...requestPayload,
+              cert: requestPayload.cert ? '[presente]' : '[vacío]',
+              key: requestPayload.key ? '[presente]' : '[vacío]',
+            }));
 
-            console.log(`[Facturación Debug] Realizando petición fetch...`);
-            const response = await fetch(`${supabaseUrl}/functions/v1/arca-invoice`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'apikey': supabaseAnonKey
-              },
-              body: JSON.stringify(requestPayload)
+            if (!supabase?.functions?.invoke) {
+              throw new Error('Supabase no está configurado para invocar la función de facturación.');
+            }
+
+            console.log('[Facturación Debug] Invocando Edge Function arca-invoice...');
+            const { data, error: fnError } = await supabase.functions.invoke('arca-invoice', {
+              body: requestPayload,
             });
 
-            console.log(`[Facturación Debug] Respuesta HTTP recibida. Status code: ${response.status}`);
-
-            if (!response.ok) {
-              let details = `Request failed with status code ${response.status}`;
-              if (response.status === 401) {
-                let hostname = '';
+            if (fnError) {
+              let details = fnError.message || 'Error al invocar la función de facturación.';
+              if (fnError.context && typeof fnError.context.json === 'function') {
                 try {
-                  const urlObj = supabaseUrl ? new URL(supabaseUrl) : null;
-                  if (urlObj) hostname = urlObj.hostname;
+                  const errJson = await fnError.context.json();
+                  if (errJson?.error) details = errJson.error;
                 } catch (_) {}
-                details = `Error 401 (No autorizado): Comprueba que la URL configurada (${hostname || 'sin configurar'}) y la Anon Key correspondan exactamente al proyecto de Supabase donde desplegaste la función.`;
-              } else {
-                try {
-                  const errJson = await response.json();
-                  console.log(`[Facturación Debug] Cuerpo de respuesta de error:`, errJson);
-                  if (errJson && errJson.error) {
-                    details = errJson.error;
-                  }
-                } catch (e) {
-                  console.log(`[Facturación Debug] Error al parsear JSON de respuesta fallida:`, e);
-                }
               }
-              console.error(`[Facturación Debug] Error de facturación: ${details}`);
+              if (String(details).includes('404') || String(details).toLowerCase().includes('not found')) {
+                details = 'La función arca-invoice no está desplegada en Supabase. Ejecutá: supabase functions deploy arca-invoice';
+              }
+              console.error('[Facturación Debug] Error de facturación:', details);
               throw new Error(details);
             }
 
-            const data = await response.json();
-            console.log(`[Facturación Debug] Datos recibidos con éxito:`, JSON.stringify(data));
+            if (data?.error) {
+              throw new Error(data.error);
+            }
+
+            console.log('[Facturación Debug] Datos recibidos con éxito:', JSON.stringify(data));
 
             invoiceData = {
               cae: data.cae,
@@ -2556,15 +2573,16 @@ function Clientes({ navigate, profile, accentColor }) {
   reportOrders.forEach(o => {
     const total = parseFloat(o.total || 0);
 
-    if (isOrderFinalizado(o) || isOrderPagado(o)) {
+    const cobroEstado = getOrderCobroEstado(o);
+    if (cobroEstado === 'PENDIENTE') {
+      salesByMethod.Pendiente += total;
+    } else {
       const method = resolveMedioPagoKey(o.medio_pago);
       if (salesByMethod[method] !== undefined) {
         salesByMethod[method] += total;
       } else {
         salesByMethod.Efectivo += total;
       }
-    } else {
-      salesByMethod.Pendiente += total;
     }
   });
 
@@ -3890,40 +3908,30 @@ function Clientes({ navigate, profile, accentColor }) {
                           </td>
                         )}
                         <td style={{ padding: '12px', textAlign: 'center' }}>
-                          {isOrderCancelled(order) ? (
-                            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>—</span>
-                          ) : isOrderPagado(order) || isFinished ? (
-                            <span 
-                              style={{ 
-                                display: 'inline-block',
-                                padding: '2px 8px', 
-                                borderRadius: '12px', 
-                                fontSize: '0.75rem', 
-                                fontWeight: '700', 
-                                backgroundColor: '#ccfbf1', 
-                                color: '#0f766e',
-                                textTransform: 'uppercase'
-                              }}
-                              title={order.medio_pago || ''}
-                            >
-                              Pagado
-                            </span>
-                          ) : (
-                            <span 
-                              style={{ 
-                                display: 'inline-block',
-                                padding: '2px 8px', 
-                                borderRadius: '12px', 
-                                fontSize: '0.75rem', 
-                                fontWeight: '700', 
-                                backgroundColor: '#fee2e2', 
-                                color: '#b91c1c',
-                                textTransform: 'uppercase'
-                              }}
-                            >
-                              Pendiente
-                            </span>
-                          )}
+                          {(() => {
+                            const cobroEstado = getOrderCobroEstado(order);
+                            if (!cobroEstado) {
+                              return <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>—</span>;
+                            }
+                            const cobroStyle = COBRO_ESTADO_STYLES[cobroEstado];
+                            return (
+                              <span
+                                style={{
+                                  display: 'inline-block',
+                                  padding: '2px 8px',
+                                  borderRadius: '12px',
+                                  fontSize: '0.75rem',
+                                  fontWeight: '700',
+                                  backgroundColor: cobroStyle.backgroundColor,
+                                  color: cobroStyle.color,
+                                  textTransform: 'uppercase',
+                                }}
+                                title={order.medio_pago || ''}
+                              >
+                                {cobroEstado}
+                              </span>
+                            );
+                          })()}
                         </td>
                         <td style={{ padding: '12px', fontSize: '0.8rem' }}>
                           {order.con_envio && order.direccion_envio && (
@@ -4021,7 +4029,7 @@ function Clientes({ navigate, profile, accentColor }) {
                                   margin: 0
                                 }}
                                 onClick={() => handleOpenCobrarOrder(order)}
-                                title={isOrderPagado(order) ? 'Cambiar medio de pago' : (order.con_envio ? 'Rendir / cobrar pedido' : 'Cobrar pedido')}
+                                title={(isOrderPagado(order) || isOrderCtaCte(order)) ? 'Cambiar medio de pago' : (order.con_envio ? 'Rendir / cobrar pedido' : 'Cobrar pedido')}
                               >
                                 <i className="bi bi-cash-coin"></i>
                               </button>
