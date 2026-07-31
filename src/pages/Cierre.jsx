@@ -12,7 +12,7 @@ import {
   isAdelantoMercaderiaConcept,
 } from '../adelantoConcepts'
 
-function Cierre({ navigate, accentColor }) {
+function Cierre({ navigate, navState, accentColor }) {
   const isSameLocalDate = (isoString, localDateString) => {
     if (!isoString) return false;
     const d = new Date(isoString);
@@ -42,13 +42,17 @@ function Cierre({ navigate, accentColor }) {
 
   // Main form states
   const [fecha, setFecha] = useState(() => {
+    if (navState?.cierrePrefill?.fecha) return navState.cierrePrefill.fecha;
     const today = new Date();
     const year = today.getFullYear();
     const month = String(today.getMonth() + 1).padStart(2, '0');
     const day = String(today.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
   });
-  const [turno, setTurno] = useState('Mañana');
+  const [turno, setTurno] = useState(() => navState?.cierrePrefill?.turno || 'Mañana');
+  const [prefillFromPedidos, setPrefillFromPedidos] = useState(
+    () => navState?.cierrePrefill?.fromPedidosTipo || null
+  );
   
   // Sales concepts (manual inputs) — 15 slots, medio_01 = Efectivo
   const [medioValues, setMedioValues] = useState({});
@@ -56,6 +60,7 @@ function Cierre({ navigate, accentColor }) {
   // Pending lists loaded from backend
   const [pendingCompras, setPendingCompras] = useState([]);
   const [pendingAdelantos, setPendingAdelantos] = useState([]);
+  const [pendingPedidos, setPendingPedidos] = useState([]);
   const [empleados, setEmpleados] = useState([]);
   const [ultimosCierres, setUltimosCierres] = useState([]);
   const [cierreSortField, setCierreSortField] = useState('fecha');
@@ -103,9 +108,17 @@ function Cierre({ navigate, accentColor }) {
   const [savingEfec, setSavingEfec] = useState(false);
 
   useEffect(() => {
+    const prefill = navState?.cierrePrefill;
+    if (!prefill) return;
+    if (prefill.fecha) setFecha(prefill.fecha);
+    if (prefill.turno) setTurno(prefill.turno);
+    if (prefill.fromPedidosTipo) setPrefillFromPedidos(prefill.fromPedidosTipo);
+  }, [navState]);
+
+  useEffect(() => {
     const loadConfig = async () => {
       const [activeTurnos, activeConcepts, activeFormas] = await Promise.all([
-        db.getCierreTurnos(),
+        db.getCierreTurnoNames(),
         db.getCierreConceptos(),
         db.getComprasFormasPago()
       ]);
@@ -229,19 +242,36 @@ function Cierre({ navigate, accentColor }) {
   const loadData = async () => {
     setLoadingLists(true);
     try {
-      const [compras, adelantos, emps, cierres, concepts] = await Promise.all([
+      const [compras, adelantos, emps, cierres, concepts, pedidos] = await Promise.all([
         db.getPendingCompras(),
         db.getPendingAdelantos(),
         db.getEmpleados(),
         db.getUltimosCierres(),
         db.getCierreConceptos(),
+        turno ? db.getPendingPedidosForCierre(fecha, turno) : Promise.resolve([]),
       ]);
       setPendingCompras(compras);
       setPendingAdelantos(adelantos);
+      setPendingPedidos(pedidos || []);
       const empNames = (emps || []).map(e => e.nombre);
       setEmpleados(empNames);
       setUltimosCierres(cierres);
       setCierreConceptos(concepts);
+
+      const importedMedios = db.aggregatePedidosForCierre(pedidos || [], concepts);
+      setMedioValues(() => {
+        const next = {};
+        getActiveMedios(concepts).forEach((medio) => {
+          next[medio.id] = importedMedios[medio.id] || 0;
+        });
+        if (navState?.cierrePrefill?.medioValues) {
+          Object.entries(navState.cierrePrefill.medioValues).forEach(([id, value]) => {
+            if (next[id] !== undefined) next[id] = value;
+          });
+        }
+        return next;
+      });
+
       if (empNames.length > 0) {
         setNewMercEmpleado(empNames[0]);
         setNewEfecEmpleado(empNames[0]);
@@ -280,6 +310,8 @@ function Cierre({ navigate, accentColor }) {
   const adelantosMercSum = adelantosFiltered
     .filter((ad) => isAdelantoMercaderiaConcept(ad.concepto))
     .reduce((acc, curr) => acc + parseFloat(curr.monto || 0), 0);
+
+  const pedidosSum = pendingPedidos.reduce((acc, curr) => acc + parseFloat(curr.total || 0), 0);
 
   // Final total shift sales revenue
   const totalSum = 
@@ -428,7 +460,7 @@ function Cierre({ navigate, accentColor }) {
         adelantos_merc: adelantosMercSum,
         compras: comprasSum,
         total: totalSum
-      }, comprasFiltered.map(c => c.id), adelantosFiltered.map(ad => ad.id));
+      }, comprasFiltered.map(c => c.id), adelantosFiltered.map(ad => ad.id), pendingPedidos.map(p => p.id));
 
       if (res.success) {
         setSaveStatus('success');
@@ -471,6 +503,25 @@ function Cierre({ navigate, accentColor }) {
         <h2 className="page-title text-dark">
           <i className="bi bi-currency-dollar text-primary"></i> Cerrar Caja
         </h2>
+
+        {prefillFromPedidos && (
+          <div
+            className="alert-box"
+            style={{
+              backgroundColor: '#ecfdf5',
+              borderColor: '#a7f3d0',
+              color: '#065f46',
+              marginBottom: '15px',
+              fontSize: '0.85rem',
+            }}
+          >
+            <i className="bi bi-info-circle-fill"></i>
+            <div>
+              Cierre iniciado desde pedidos <strong>{prefillFromPedidos === 'local' ? 'LOCAL' : 'DELIVERY'}</strong>.
+              Revisá fecha, caja y medios de pago antes de confirmar.
+            </div>
+          </div>
+        )}
 
         <form onSubmit={handleSubmitCierre} noValidate style={{ marginTop: '20px' }}>
           
@@ -517,6 +568,26 @@ function Cierre({ navigate, accentColor }) {
           <h4 style={{ fontSize: '0.85rem', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-color)', paddingBottom: '6px', marginBottom: '15px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
             Conceptos de Ventas e Ingresos
           </h4>
+
+          {pendingPedidos.length > 0 && (
+            <div style={{ marginBottom: '15px', padding: '12px', backgroundColor: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: '8px' }}>
+              <div className="fw-bold small text-success mb-2">
+                <i className="bi bi-receipt-cutoff me-1"></i>
+                {pendingPedidos.length} pedido(s) del turno <strong>{turno}</strong> — total $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(pedidosSum)}
+              </div>
+              <div style={{ maxHeight: '140px', overflowY: 'auto', fontSize: '0.82rem' }}>
+                {pendingPedidos.map((p) => (
+                  <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', padding: '3px 0', borderBottom: '1px dashed #bbf7d0' }}>
+                    <span>{p.cliente_nombre || 'Cliente'} · #{String(p.id).substring(0, 6)}</span>
+                    <span><strong>{p.medio_pago || 'Sin medio'}</strong> · $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(p.total || 0)}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="small text-muted mt-2">
+                Los importes se cargaron automáticamente por medio de pago. Podés ajustarlos manualmente si hace falta.
+              </div>
+            </div>
+          )}
 
           {/* Grid of Concept Inputs */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '20px' }}>

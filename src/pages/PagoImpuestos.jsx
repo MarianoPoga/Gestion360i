@@ -62,7 +62,7 @@ function PagoImpuestos({ navigate, navState, accentColor }) {
     }
 
     const setupShifts = async () => {
-      const shifts = loadedConfig.cajas_posibles.length > 0 ? loadedConfig.cajas_posibles : await db.getCierreTurnos();
+      const shifts = loadedConfig.cajas_posibles.length > 0 ? loadedConfig.cajas_posibles : await db.getCierreTurnoNames();
       setShiftsAvailableState(shifts || []);
       const loadedRendConfig = JSON.parse(
         localStorage.getItem('rendiciones_config') ||

@@ -67,7 +67,7 @@ function Pagos({ navigate, modules, accentColor }) {
     }
 
     const setupShifts = async () => {
-      const shifts = loadedConfig.cajas_posibles.length > 0 ? loadedConfig.cajas_posibles : await db.getCierreTurnos();
+      const shifts = loadedConfig.cajas_posibles.length > 0 ? loadedConfig.cajas_posibles : await db.getCierreTurnoNames();
       setShiftsAvailableState(shifts || []);
       const loadedRendConfig = JSON.parse(localStorage.getItem('rendiciones_config') || `{"caja_nombre":"${DEFAULT_CAJA_FUERTE_NAME}","allow_pagos":true}`);
       setRendConfig(loadedRendConfig);

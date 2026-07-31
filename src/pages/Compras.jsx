@@ -385,7 +385,7 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
         setTipo((prev) => (cats.some((c) => c.name === prev) ? prev : cats[0].name));
       }
 
-      const turnos = await db.getCierreTurnos();
+      const turnos = await db.getCierreTurnoNames();
       setCierreTurnos(turnos || ["Mañana", "Tarde", "Delivery", "Noche"]);
       if (turnos && turnos.length > 0) {
         setTurnoAsignado(turnos[0]);

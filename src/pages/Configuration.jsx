@@ -19,6 +19,19 @@ import {
   canDeleteMedio,
   canToggleMedio,
 } from '../cierreMedios'
+import {
+  DEFAULT_CIERRE_TURNOS,
+  normalizeCierreTurnos,
+  getTurnoName,
+  getCierreTurnoNames,
+} from '../cierreTurnos'
+import {
+  normalizePedidosCajasConfig,
+  togglePedidosCajaFlag,
+  initPedidosCajaAssignment,
+  normalizeCajaAssignment,
+  localPedidosManagedExternally,
+} from '../pedidosCajas'
 
 const formatCuit = (val) => {
   if (!val) return '';
@@ -102,12 +115,12 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   const [supabaseAnonKey, setSupabaseAnonKey] = useState('');
   const [geminiApiKey, setGeminiApiKey] = useState('');
   
-  // WhatsApp settings
+  // Pedidos — mensaje WhatsApp para reparto
   const [whatsappTemplate, setWhatsappTemplate] = useState('Hola! Estoy por llegar con su pedido 🛵 🍔. Gracias!!');
-  const [deliveryFee, setDeliveryFee] = useState('1000');
   
   // Cierre settings
   const [turnosList, setTurnosList] = useState([]);
+  const [pedidosCajasConfig, setPedidosCajasConfig] = useState({ assignments: {} });
   const [conceptsList, setConceptsList] = useState([]);
   const [newTurnoInput, setNewTurnoInput] = useState('');
   const [newConceptInput, setNewConceptInput] = useState('');
@@ -160,10 +173,6 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   const [saveErrorMessage, setSaveErrorMessage] = useState('');
   const [testStatus, setTestStatus] = useState(''); // 'testing', 'success', 'error', ''
   const [testError, setTestError] = useState('');
-  const [clearStatus, setClearStatus] = useState(''); // 'clearing', 'success', 'error', ''
-  const [resetSaldosStatus, setResetSaldosStatus] = useState('');
-  const [syncCCStatus, setSyncCCStatus] = useState('');
-  const [syncCCMessage, setSyncCCMessage] = useState('');
   const [syncStatus, setSyncStatus] = useState('');
   const [syncMessage, setSyncMessage] = useState('');
   const [supabaseFromEnv, setSupabaseFromEnv] = useState(false);
@@ -174,9 +183,10 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   useEffect(() => {
     async function initConfig() {
       try {
-        const [m, t, c, cc, cco, cp, rp, arca] = await Promise.all([
+        const [m, t, pc, c, cc, cco, cp, rp, arca] = await Promise.all([
           db.getModules(),
           db.getCierreTurnos(),
+          db.getPedidosCajasConfig(),
           db.getCierreConceptos(),
           db.getComprasCategorias(),
           db.getComprasConceptos(),
@@ -187,7 +197,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
         
         setModules(m || {});
         setTurnosList(t || []);
-        setConceptsList(c || []);
+        setPedidosCajasConfig(pc || { assignments: {} });
         
         const formattedCats = (cc || []).map(cat => {
           if (typeof cat === 'string') return { name: cat, details: [] };
@@ -252,7 +262,6 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       setSupabaseAnonKey(localStorage.getItem('supabase_anon_key') || envKey || '');
       setGeminiApiKey(localStorage.getItem('gemini_api_key') || '');
       setWhatsappTemplate(localStorage.getItem('whatsapp_template') || 'Hola! Estoy por llegar con su pedido 🛵 🍔. Gracias!!');
-      setDeliveryFee(localStorage.getItem('delivery_fee') || '1000');
 
       const rConf = JSON.parse(localStorage.getItem('rendiciones_config') || `{"caja_nombre":"${DEFAULT_CAJA_FUERTE_NAME}","allow_adelantos":true,"allow_compras":true,"allow_pagos":true}`);
       setRendicionCajaNombre(rConf.caja_nombre || DEFAULT_CAJA_FUERTE_NAME);
@@ -323,22 +332,38 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   };
 
   const handleToggleCajaPosible = (shift) => {
+    const shiftName = String(shift || '').trim();
     setCajasPosibles(prev =>
-      prev.includes(shift) ? prev.filter(s => s !== shift) : [...prev, shift]
+      prev.includes(shiftName) ? prev.filter(s => s !== shiftName) : [...prev, shiftName]
     );
   };
 
   const handleAddTurnoTag = (e) => {
     if (e) e.preventDefault();
     const val = newTurnoInput.trim();
-    if (val && !turnosList.includes(val)) {
-      setTurnosList(prev => [...prev, val]);
+    if (!val) return;
+    const exists = turnosList.some((t) => String(t).trim().toLowerCase() === val.toLowerCase());
+    if (!exists) {
+      setTurnosList((prev) => [...prev, val]);
+      setPedidosCajasConfig((prev) => initPedidosCajaAssignment(prev, val));
       setNewTurnoInput('');
     }
   };
 
   const handleRemoveTurnoTag = (index) => {
-    setTurnosList(prev => prev.filter((_, i) => i !== index));
+    const removed = turnosList[index];
+    setTurnosList((prev) => prev.filter((_, i) => i !== index));
+    if (removed) {
+      setPedidosCajasConfig((prev) => {
+        const next = { ...(prev || {}), assignments: { ...(prev?.assignments || {}) } };
+        delete next.assignments[String(removed).trim()];
+        return next;
+      });
+    }
+  };
+
+  const handlePedidosCajaToggle = (turnoName, field, checked) => {
+    setPedidosCajasConfig((prev) => togglePedidosCajaFlag(prev, turnoName, field, checked));
   };
 
   const handleAddConceptTag = (e) => {
@@ -501,13 +526,15 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
 
       // Save Cierre configurations list
       const cleanTurnos = turnosList
-        .map(t => t.trim())
-        .filter(t => t.length > 0);
+        .map((t) => String(t).trim())
+        .filter((t) => t.length > 0);
+      const pedidosCajasToSave = normalizePedidosCajasConfig(cleanTurnos, pedidosCajasConfig);
 
       // Save all database settings concurrently and await them
       const saveResults = await Promise.all([
         db.saveModules(modulesWithColors),
-        db.saveCierreTurnos(cleanTurnos.length > 0 ? cleanTurnos : ["Mañana", "Tarde", "Delivery", "Noche"]),
+        db.saveCierreTurnos(cleanTurnos.length > 0 ? cleanTurnos : getCierreTurnoNames(DEFAULT_CIERRE_TURNOS)),
+        db.savePedidosCajasConfig(pedidosCajasToSave),
         db.saveCierreConceptos(conceptsList),
         db.saveComprasCategorias(comprasCategoriasList),
         db.saveComprasConceptos(comprasConceptosList),
@@ -533,9 +560,8 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
         throw new Error(failedSave.error || 'No se pudo guardar la configuración');
       }
 
-      // Save WhatsApp and Compras settings to localStorage
+      // Save Pedidos / Compras settings to localStorage
       localStorage.setItem('whatsapp_template', whatsappTemplate);
-      localStorage.setItem('delivery_fee', String(parseFloat(deliveryFee) || 0));
       localStorage.setItem('compras_wa_reclaim_template', comprasWaReclaimTemplate);
 
       // Save Adelantos configurations
@@ -632,7 +658,6 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       localStorage.removeItem('compras_conceptos');
       localStorage.removeItem('compras_formas_pago');
       localStorage.removeItem('whatsapp_template');
-      localStorage.removeItem('delivery_fee');
       localStorage.removeItem('cierre_turnos');
       localStorage.removeItem('cierre_conceptos');
       localStorage.removeItem('cierre_medios_used');
@@ -655,7 +680,6 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       setSupabaseAnonKey('');
       setGeminiApiKey('');
       setWhatsappTemplate('Hola! Estoy por llegar con su pedido 🛵 🍔. Gracias!!');
-      setDeliveryFee('1000');
       setArcaCuit('');
       setArcaRazonSocial('');
       setArcaNombreComercial('');
@@ -665,7 +689,8 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       setArcaCert('');
       setArcaKey('');
       setArcaToken('');
-      setTurnosList(["Mañana", "Tarde", "Delivery", "Noche"]);
+      setTurnosList(getCierreTurnoNames(DEFAULT_CIERRE_TURNOS));
+      setPedidosCajasConfig(normalizePedidosCajasConfig(getCierreTurnoNames(DEFAULT_CIERRE_TURNOS), null));
       setConceptsList(createDefaultCierreMedios());
       setComprasCategoriasList(DEFAULT_COMPRAS_CATEGORIES.map((cat) => ({ ...cat, details: [...(cat.details || [])] })));
       setComprasConceptosList([
@@ -706,90 +731,6 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
         setSaveStatus('');
         navigate('dashboard');
       }, 1500);
-    }
-  };
-
-  const handleResetClientSaldos = async () => {
-    if (window.confirm('¿Restablecer todos los saldos de clientes a $0?\n\nSe eliminarán los movimientos de cuenta corriente pero los pedidos se mantienen.')) {
-      setResetSaldosStatus('clearing');
-      try {
-        await db.resetAllClientSaldos();
-        setResetSaldosStatus('success');
-        setTimeout(() => {
-          setResetSaldosStatus('');
-        }, 3000);
-      } catch (err) {
-        console.error(err);
-        setResetSaldosStatus('error');
-        setTimeout(() => {
-          setResetSaldosStatus('');
-        }, 3000);
-      }
-    }
-  };
-
-  const handleSyncCuentaCorriente = async () => {
-    if (!window.confirm('¿Sincronizar cuenta corriente con pedidos finalizados?\n\nSe crearán los movimientos faltantes y se recalcularán los saldos de todos los clientes.')) {
-      return;
-    }
-
-    setSyncCCStatus('clearing');
-    setSyncCCMessage('');
-    try {
-      const result = await db.syncCuentaCorrienteFromFinalizedOrders();
-      setSyncCCStatus('success');
-      setSyncCCMessage(
-        `Procesados: ${result.processed}. Corregidos: ${result.fixed}. Ya estaban OK: ${result.alreadyOk}. Clientes recalculados: ${result.updatedClients}.`
-      );
-      setTimeout(() => {
-        setSyncCCStatus('');
-      }, 6000);
-    } catch (err) {
-      console.error(err);
-      setSyncCCStatus('error');
-      setSyncCCMessage(err.message || 'Error al sincronizar cuenta corriente.');
-      setTimeout(() => {
-        setSyncCCStatus('');
-        setSyncCCMessage('');
-      }, 6000);
-    }
-  };
-
-  const handleClearPedidos = async () => {
-    if (window.confirm('¿Seguro que deseas eliminar todos los pedidos actuales? Esto vaciará el listado de pedidos y recalculará los saldos de clientes correspondientes. Esta acción no se puede deshacer.')) {
-      setClearStatus('clearing');
-      try {
-        await db.clearAllPedidos();
-        setClearStatus('success');
-        setTimeout(() => {
-          setClearStatus('');
-        }, 3000);
-      } catch (err) {
-        console.error(err);
-        setClearStatus('error');
-        setTimeout(() => {
-          setClearStatus('');
-        }, 3000);
-      }
-    }
-  };
-
-  const handleClearCompras = async () => {
-    if (window.confirm('¿Seguro que deseas eliminar todo el historial de compras? Esta acción no se puede deshacer.')) {
-      setClearComprasStatus('clearing');
-      try {
-        await db.clearAllCompras();
-        setClearComprasStatus('success');
-        setTimeout(() => {
-          setClearComprasStatus('');
-        }, 3000);
-      } catch (err) {
-        console.error(err);
-        setClearComprasStatus('error');
-        setTimeout(() => {
-          setClearComprasStatus('');
-        }, 3000);
-      }
     }
   };
 
@@ -848,7 +789,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   };
 
   const renderModuleHeader = (moduleKey, label, desc, iconClass, colorClass) => {
-    const hasDetails = ['cierre', 'compras', 'adelantos', 'rendiciones'].includes(moduleKey);
+    const hasDetails = ['cierre', 'compras', 'adelantos', 'rendiciones', 'clientes'].includes(moduleKey);
     const isExpanded = hasDetails && expandedModule === moduleKey;
     const isEnabled = modules[moduleKey] !== false;
 
@@ -1278,200 +1219,6 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                 )}
               </div>
 
-              {/* Config: Acciones de Datos */}
-              <div style={{ display: 'flex', flexDirection: 'column', paddingBottom: expandedModule === 'datos' ? '15px' : '0' }}>
-                <div className="toggle-item" style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: expandedModule === 'datos' ? '10px' : '15px' }}>
-                  <div 
-                    className="toggle-info" 
-                    onClick={() => setExpandedModule(expandedModule === 'datos' ? null : 'datos')} 
-                    style={{ 
-                      cursor: 'pointer', 
-                      flex: 1, 
-                      display: 'flex', 
-                      alignItems: 'center' 
-                    }}
-                  >
-                    <i 
-                      className={`bi bi-chevron-${expandedModule === 'datos' ? 'down' : 'right'}`} 
-                      style={{ 
-                        fontSize: '1.25rem', 
-                        color: 'var(--text-dark)', 
-                        marginRight: '12px',
-                        fontWeight: 'bold',
-                        WebkitTextStroke: '0.8px',
-                        cursor: 'pointer',
-                        display: 'inline-block',
-                        width: '16px',
-                        textAlign: 'center'
-                      }}
-                    ></i>
-                    <span className="toggle-icon" style={{ background: 'linear-gradient(135deg, #ef4444 0%, #991b1b 100%)' }}><i className="bi bi-trash-fill"></i></span>
-                    <div>
-                      <div className="toggle-label">Acciones de Datos</div>
-                      <div className="toggle-desc">Vaciar historial de pedidos o compras del sistema local/nube.</div>
-                    </div>
-                  </div>
-                </div>
-
-                {expandedModule === 'datos' && (
-                  <div style={{ 
-                    padding: '15px 20px', 
-                    backgroundColor: '#fff', 
-                    borderRadius: '8px', 
-                    border: '1px solid #cbd5e1',
-                    marginLeft: '55px',
-                    marginTop: '4px',
-                    marginBottom: '5px'
-                  }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                      <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                        Permite vaciar las tablas de pedidos y restablecer los saldos deudores de las cuentas corrientes de los clientes correspondientes.
-                      </div>
-                      <button
-                        type="button"
-                        className="btn-nav-back"
-                        style={{
-                          padding: '10px 16px',
-                          fontSize: '0.85rem',
-                          color: '#ffffff',
-                          backgroundColor: '#f59e0b',
-                          border: 'none',
-                          alignSelf: 'flex-start',
-                          cursor: 'pointer',
-                          borderRadius: '6px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '8px',
-                        }}
-                        onClick={handleResetClientSaldos}
-                        disabled={resetSaldosStatus === 'clearing'}
-                      >
-                        <i className="bi bi-arrow-counterclockwise"></i>
-                        {resetSaldosStatus === 'clearing' ? 'Restableciendo...' : 'Poner saldos de clientes en $0'}
-                      </button>
-                      {resetSaldosStatus === 'success' && (
-                        <div className="alert-box-success" style={{ marginTop: '10px' }}>
-                          <i className="bi bi-check-circle-fill"></i>
-                          <div>Todos los saldos de clientes quedaron en $0. Los pedidos no se modificaron.</div>
-                        </div>
-                      )}
-                      {resetSaldosStatus === 'error' && (
-                        <div className="alert-box" style={{ marginTop: '10px', backgroundColor: '#fee2e2', borderColor: '#fecaca', color: '#991b1b' }}>
-                          <i className="bi bi-exclamation-triangle-fill"></i>
-                          <div>Error al restablecer los saldos de clientes.</div>
-                        </div>
-                      )}
-                      <button
-                        type="button"
-                        className="btn-nav-back"
-                        style={{
-                          padding: '10px 16px',
-                          fontSize: '0.85rem',
-                          color: '#ffffff',
-                          backgroundColor: '#059669',
-                          border: 'none',
-                          alignSelf: 'flex-start',
-                          cursor: 'pointer',
-                          borderRadius: '6px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '8px',
-                        }}
-                        onClick={handleSyncCuentaCorriente}
-                        disabled={syncCCStatus === 'clearing'}
-                      >
-                        <i className="bi bi-arrow-repeat"></i>
-                        {syncCCStatus === 'clearing' ? 'Sincronizando...' : 'Sincronizar CC con pedidos finalizados'}
-                      </button>
-                      {syncCCStatus === 'success' && (
-                        <div className="alert-box-success" style={{ marginTop: '10px' }}>
-                          <i className="bi bi-check-circle-fill"></i>
-                          <div>{syncCCMessage || 'Cuenta corriente sincronizada correctamente.'}</div>
-                        </div>
-                      )}
-                      {syncCCStatus === 'error' && (
-                        <div className="alert-box" style={{ marginTop: '10px', backgroundColor: '#fee2e2', borderColor: '#fecaca', color: '#991b1b' }}>
-                          <i className="bi bi-exclamation-triangle-fill"></i>
-                          <div>{syncCCMessage || 'Error al sincronizar cuenta corriente.'}</div>
-                        </div>
-                      )}
-                      <button 
-                        type="button" 
-                        className="btn-nav-back" 
-                        style={{ 
-                          padding: '10px 16px', 
-                          fontSize: '0.85rem', 
-                          color: '#ffffff', 
-                          backgroundColor: '#ef4444', 
-                          border: 'none',
-                          alignSelf: 'flex-start',
-                          cursor: 'pointer',
-                          borderRadius: '6px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '8px'
-                        }}
-                        onClick={handleClearPedidos}
-                        disabled={clearStatus === 'clearing'}
-                      >
-                        <i className="bi bi-trash-fill"></i>
-                        {clearStatus === 'clearing' ? 'Eliminando...' : 'Eliminar todos los pedidos actuales'}
-                      </button>
-                      {clearStatus === 'success' && (
-                        <div className="alert-box-success" style={{ marginTop: '10px' }}>
-                          <i className="bi bi-check-circle-fill"></i>
-                          <div>Todos los pedidos han sido eliminados y los saldos de clientes restablecidos.</div>
-                        </div>
-                      )}
-                      {clearStatus === 'error' && (
-                        <div className="alert-box" style={{ marginTop: '10px', backgroundColor: '#fee2e2', borderColor: '#fecaca', color: '#991b1b' }}>
-                          <i className="bi bi-exclamation-triangle-fill"></i>
-                          <div>Error al intentar eliminar los pedidos del sistema.</div>
-                        </div>
-                      )}
-
-                      <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '20px', borderTop: '1px dashed var(--border-color)', paddingTop: '15px' }}>
-                        Permite vaciar todo el historial de compras registradas en el sistema.
-                      </div>
-                      <button 
-                        type="button" 
-                        className="btn-nav-back" 
-                        style={{ 
-                          padding: '10px 16px', 
-                          fontSize: '0.85rem', 
-                          color: '#ffffff', 
-                          backgroundColor: '#ef4444', 
-                          border: 'none',
-                          alignSelf: 'flex-start',
-                          cursor: 'pointer',
-                          borderRadius: '6px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '8px'
-                        }}
-                        onClick={handleClearCompras}
-                        disabled={clearComprasStatus === 'clearing'}
-                      >
-                        <i className="bi bi-trash-fill"></i>
-                        {clearComprasStatus === 'clearing' ? 'Eliminando...' : 'Eliminar historial de compras'}
-                      </button>
-                      {clearComprasStatus === 'success' && (
-                        <div className="alert-box-success" style={{ marginTop: '10px' }}>
-                          <i className="bi bi-check-circle-fill"></i>
-                          <div>Todo el historial de compras ha sido eliminado del sistema.</div>
-                        </div>
-                      )}
-                      {clearComprasStatus === 'error' && (
-                        <div className="alert-box" style={{ marginTop: '10px', backgroundColor: '#fee2e2', borderColor: '#fecaca', color: '#991b1b' }}>
-                          <i className="bi bi-exclamation-triangle-fill"></i>
-                          <div>Error al intentar eliminar el historial de compras del sistema.</div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-
               {/* Config: Permisos por Rol */}
               <div style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--border-color)', paddingBottom: expandedModule === 'role_perms' ? '15px' : '0' }}>
                 <div className="toggle-item" style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: expandedModule === 'role_perms' ? '10px' : '15px' }}>
@@ -1555,63 +1302,6 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                           ))}
                         </tbody>
                       </table>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Config: WhatsApp */}
-              <div style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--border-color)', paddingBottom: expandedModule === 'whatsapp' ? '15px' : '0' }}>
-                <div className="toggle-item" style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: expandedModule === 'whatsapp' ? '10px' : '15px' }}>
-                  <div 
-                    className="toggle-info" 
-                    onClick={() => setExpandedModule(expandedModule === 'whatsapp' ? null : 'whatsapp')} 
-                    style={{ cursor: 'pointer', flex: 1, display: 'flex', alignItems: 'center' }}
-                  >
-                    <i 
-                      className={`bi bi-chevron-${expandedModule === 'whatsapp' ? 'down' : 'right'}`} 
-                      style={{ fontSize: '1.25rem', color: 'var(--text-dark)', marginRight: '12px', fontWeight: 'bold', WebkitTextStroke: '0.8px', width: '16px', textAlign: 'center' }}
-                    ></i>
-                    <span className="toggle-icon bg-success"><i className="bi bi-whatsapp"></i></span>
-                    <div>
-                      <div className="toggle-label">WhatsApp</div>
-                      <div className="toggle-desc">Personalizar mensajes de envío de pedidos.</div>
-                    </div>
-                  </div>
-                </div>
-
-                {expandedModule === 'whatsapp' && (
-                  <div style={{ padding: '15px 20px 15px 55px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '15px', flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: '0.8rem', fontWeight: 'bold', color: 'var(--text-muted)', minWidth: '150px' }}>
-                        Mensaje WhatsApp:
-                      </span>
-                      <input
-                        type="text"
-                        className="form-input"
-                        placeholder="Mensaje de WhatsApp..."
-                        value={whatsappTemplate}
-                        onChange={(e) => setWhatsappTemplate(e.target.value)}
-                        style={{ fontSize: '0.85rem', padding: '6px 10px', flex: '1 1 250px', height: '34px', margin: 0 }}
-                      />
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '15px', flexWrap: 'wrap' }}>
-                      <span style={{ fontSize: '0.8rem', fontWeight: 'bold', color: 'var(--text-muted)', minWidth: '150px' }}>
-                        Precio de envío:
-                      </span>
-                      <input
-                        type="number"
-                        className="form-input input-no-spinner"
-                        placeholder="0.00"
-                        min="0"
-                        step="any"
-                        value={deliveryFee}
-                        onChange={(e) => setDeliveryFee(e.target.value)}
-                        style={{ fontSize: '0.85rem', padding: '6px 10px', width: '140px', height: '34px', margin: 0 }}
-                      />
-                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                        Respaldo si no existe el producto &quot;Envio&quot; en inventario.
-                      </span>
                     </div>
                   </div>
                 )}
@@ -1759,8 +1449,8 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                         <label className="small d-flex align-items-center gap-1 cursor-pointer">
                           <input type="checkbox" checked={rendicionAllowAdelantos} onChange={e => setRendicionAllowAdelantos(e.target.checked)} /> {rendicionCajaNombre}
                         </label>
-                        {turnosList.map(t => (
-                          <label key={t} className="small d-flex align-items-center gap-1 cursor-pointer">
+                        {turnosList.map((t, idx) => (
+                          <label key={`${t}_${idx}`} className="small d-flex align-items-center gap-1 cursor-pointer">
                             <input type="checkbox" checked={cajasPosibles.includes(t)} onChange={() => handleToggleCajaPosible(t)} /> {t}
                           </label>
                         ))}
@@ -1810,6 +1500,95 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
 
               {/* Clientes / Pedidos */}
               {renderModuleHeader('clientes', MODULE_LABELS.clientes, MODULE_DESCRIPTIONS.clientes, 'bi-journal-text', 'bg-clientes')}
+              {modules.clientes && expandedModule === 'clientes' && (
+                <div style={{ padding: '5px 20px 10px 48px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                  <div style={{ backgroundColor: '#fff', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                    <div className="d-flex align-items-center gap-2 mb-2">
+                      <i className="bi bi-whatsapp text-success" style={{ fontSize: '1.1rem' }}></i>
+                      <span className="fw-bold small text-muted">WhatsApp — mensaje de reparto</span>
+                    </div>
+                    <label className="form-label fw-bold small text-muted mb-1">
+                      Personalizar mensajes de envío de pedidos
+                    </label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      placeholder="Hola! Estoy por llegar con su pedido..."
+                      value={whatsappTemplate}
+                      onChange={(e) => setWhatsappTemplate(e.target.value)}
+                      style={{ fontSize: '0.85rem', padding: '8px 10px', height: '36px', margin: 0 }}
+                    />
+                    <small style={{ color: 'var(--text-muted)', fontSize: '0.75rem', display: 'block', marginTop: '6px' }}>
+                      Se usa en el QR de WhatsApp al imprimir comandas de delivery.
+                    </small>
+                  </div>
+                  <div style={{ backgroundColor: '#fff', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                    <div className="d-flex align-items-center gap-2 mb-2">
+                      <i className="bi bi-cash-stack text-primary"></i>
+                      <span className="fw-bold small text-muted">Cajas para pedidos (Delivery / Local)</span>
+                    </div>
+                    <div className="small text-muted mb-3">
+                      Las cajas se crean en <strong>Cierre → Turnos / Cajas</strong>. Marcá <strong>Delivery</strong> y/o <strong>Local</strong> según corresponda (podés marcar ambos en la misma caja). Las que no usen pedidos dejalas sin marcar.
+                    </div>
+                    {turnosList.length === 0 ? (
+                      <div className="small text-muted">Primero creá cajas en el módulo Cierre.</div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {turnosList.map((turnoName) => {
+                          const flags = normalizeCajaAssignment(pedidosCajasConfig?.assignments?.[turnoName]);
+                          return (
+                            <div key={turnoName} className="d-flex align-items-center justify-content-between gap-3 flex-wrap py-1 border-bottom">
+                              <strong className="small">{turnoName}</strong>
+                              <div className="d-flex align-items-center gap-3 flex-wrap">
+                                <label className="small d-flex align-items-center gap-1 mb-0 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={flags.delivery}
+                                    onChange={(e) => handlePedidosCajaToggle(turnoName, 'delivery', e.target.checked)}
+                                  />
+                                  Delivery
+                                </label>
+                                <label className="small d-flex align-items-center gap-1 mb-0 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={flags.local}
+                                    onChange={(e) => handlePedidosCajaToggle(turnoName, 'local', e.target.checked)}
+                                  />
+                                  Local
+                                </label>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {turnosList.length > 0 && localPedidosManagedExternally(pedidosCajasConfig, turnosList) && (
+                      <div
+                        className="small mt-3"
+                        style={{
+                          padding: '10px 12px',
+                          borderRadius: '8px',
+                          backgroundColor: '#eff6ff',
+                          border: '1px solid #bfdbfe',
+                          color: '#1e40af',
+                        }}
+                      >
+                        <i className="bi bi-info-circle me-1"></i>
+                        Los pedidos <strong>LOCAL</strong> los gestiona otra caja. Al cobrarlos verás todos los medios excepto <strong>Tarjeta</strong>; el efectivo aparece como <strong>Pagado en caja</strong>.
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ backgroundColor: '#fff', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                    <div className="d-flex align-items-center gap-2 mb-1">
+                      <i className="bi bi-truck text-primary"></i>
+                      <span className="fw-bold small text-muted">Precio de envío</span>
+                    </div>
+                    <small style={{ color: 'var(--text-muted)', fontSize: '0.75rem', display: 'block' }}>
+                      Se toma del producto <strong>Envio</strong> o <strong>Envío</strong> en el inventario de Pedidos. Creá o editá ese producto para cambiar el valor.
+                    </small>
+                  </div>
+                </div>
+              )}
 
               {/* Pago Proveedores */}
               {renderModuleHeader('pago-proveedores', MODULE_LABELS['pago-proveedores'], MODULE_DESCRIPTIONS['pago-proveedores'], 'bi-wallet2', 'bg-success')}

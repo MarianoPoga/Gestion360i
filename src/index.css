@@ -561,29 +561,6 @@ h1, h2, h3, h4, h5, h6 {
   box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
 }
 
-.floating-menu-btn {
-  position: fixed;
-  top: 24px;
-  right: 24px;
-  z-index: 1100;
-  height: 44px;
-  padding: 0 18px;
-  border: none;
-  border-radius: 999px;
-  color: #fff;
-  font-size: 0.8rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
-  cursor: pointer;
-  transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-}
-
-.floating-menu-btn:hover {
-  transform: scale(1.06);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
-}
 
 .modal-title {
   font-size: 1.15rem;
@@ -924,34 +901,53 @@ input:checked + .slider:before {
   margin-bottom: 20px;
 }
 
-/* Floating Configuration Gear Icon on Dashboard */
-.floating-config-btn {
-  position: fixed;
-  bottom: 25px;
-  right: 25px;
+/* Floating action bubbles (Config, Volver) */
+.floating-action-btn__label {
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.floating-config-btn,
+.floating-back-btn {
   min-width: 56px;
   height: 56px;
   padding: 0 16px;
   gap: 8px;
   border-radius: 999px;
-  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
   color: white;
   border: 2px solid rgba(255, 255, 255, 0.9);
-  box-shadow: 0 6px 24px rgba(37, 99, 235, 0.55), 0 0 0 4px rgba(37, 99, 235, 0.18);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-size: 1.35rem;
   cursor: pointer;
-  z-index: 1000;
   transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
 
-.floating-config-btn__label {
-  font-size: 0.78rem;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+.floating-config-btn {
+  position: fixed;
+  bottom: 25px;
+  right: 25px;
+  z-index: 1000;
+  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+  box-shadow: 0 6px 24px rgba(37, 99, 235, 0.55), 0 0 0 4px rgba(37, 99, 235, 0.18);
+}
+
+.floating-back-btn {
+  position: fixed;
+  bottom: 25px;
+  right: 25px;
+  z-index: 1000;
+  background: linear-gradient(
+    135deg,
+    var(--floating-btn-color, #64748b) 0%,
+    color-mix(in srgb, var(--floating-btn-color, #64748b) 72%, #000) 100%
+  );
+  box-shadow:
+    0 6px 24px color-mix(in srgb, var(--floating-btn-color, #64748b) 55%, transparent),
+    0 0 0 4px color-mix(in srgb, var(--floating-btn-color, #64748b) 18%, transparent);
 }
 
 .admin-floating-actions {
@@ -976,6 +972,13 @@ input:checked + .slider:before {
 .floating-config-btn:hover {
   transform: scale(1.08);
   box-shadow: 0 8px 28px rgba(37, 99, 235, 0.65), 0 0 0 5px rgba(37, 99, 235, 0.22);
+}
+
+.floating-back-btn:hover {
+  transform: scale(1.08);
+  box-shadow:
+    0 8px 28px color-mix(in srgb, var(--floating-btn-color, #64748b) 65%, transparent),
+    0 0 0 5px color-mix(in srgb, var(--floating-btn-color, #64748b) 22%, transparent);
 }
 
 /* Empty message */
@@ -1081,21 +1084,15 @@ input:checked + .slider:before {
     line-height: 1.12;
     letter-spacing: -0.02em;
   }
-  .floating-config-btn {
+  .floating-config-btn,
+  .floating-back-btn {
     bottom: 18px;
     right: 16px;
     min-width: 52px;
     height: 52px;
     padding: 0 14px;
   }
-  .floating-config-btn__label {
-    font-size: 0.72rem;
-  }
-  .floating-menu-btn {
-    top: 16px;
-    right: 16px;
-    height: 40px;
-    padding: 0 14px;
+  .floating-action-btn__label {
     font-size: 0.72rem;
   }
 }

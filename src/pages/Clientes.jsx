@@ -4,6 +4,36 @@ import { db, isSupabaseConfigured, supabase, getBusinessId } from '../supabaseCl
 import { readArcaFromCache } from '../arcaConfig'
 import { CSV_IMPORT_HELP, IMPORT_FIELDS, analyzeCsvImport, getColumnLabel, normalizeIva } from '../clientesImport'
 import { getMedioIcon } from '../cierreMedios'
+import {
+  findRubroPriceSiblings,
+  getClientPriceListId,
+  getDefaultPriceList,
+  resolveProductPrice,
+  sameBasePrice,
+} from '../priceLists'
+import {
+  PAGADO_EN_CAJA_OPTION,
+  PEDIDOS_CAJA_TIPOS,
+  getCajasForPedidosTipo,
+  getDefaultCajaForPedidosTipo,
+  usesSeparateLocalCobroCaja,
+  localPedidosManagedExternally,
+  resolvePedidoTurnoCaja,
+} from '../pedidosCajas'
+import {
+  autoOpenCajaFromOrders,
+  canCloseCaja,
+  closeCaja,
+  countNonFinalizedOrdersForCaja,
+  getDeliveryOpenBlockReason,
+  getOpenCajaName,
+  getTodayOrdersForCaja,
+  openCaja,
+  resolveCajaForNewPedido,
+  resolveDeliveryCajaForNewPedido,
+  syncOpenCajaWithConfig,
+} from '../pedidosCajaSession'
+import { getTodayLocalDateString } from '../dateUtils'
 
 const cleanAddressText = (str) => {
   if (!str) return '';
@@ -42,13 +72,6 @@ const getGmapsUrl = (str) => {
 };
 
 const DELIVERY_ITEM_ID = '__delivery_item__';
-const DEFAULT_DELIVERY_FEE = 1000;
-
-const readDeliveryFee = () => {
-  const parsed = parseFloat(localStorage.getItem('delivery_fee'));
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_DELIVERY_FEE;
-};
-
 const findEnvioProduct = (products) =>
   (products || []).find((p) => {
     const name = String(p.nombre || '').trim().toLowerCase();
@@ -57,11 +80,9 @@ const findEnvioProduct = (products) =>
 
 const resolveDeliveryFee = (products) => {
   const envioProduct = findEnvioProduct(products);
-  if (envioProduct) {
-    const price = parseFloat(envioProduct.precio);
-    if (Number.isFinite(price) && price >= 0) return price;
-  }
-  return readDeliveryFee();
+  if (!envioProduct) return 0;
+  const price = parseFloat(envioProduct.precio);
+  return Number.isFinite(price) && price >= 0 ? price : 0;
 };
 
 const isDeliveryItem = (item) =>
@@ -93,6 +114,26 @@ const isMedioCtaCte = (medio) => {
   return normalized === 'cta cte'
     || normalized === 'cuenta corriente (deuda)'
     || normalized === 'cuenta corriente';
+};
+
+const isMedioTarjeta = (medioOrConcept) => {
+  if (medioOrConcept && typeof medioOrConcept === 'object') {
+    const value = String(medioOrConcept.id || '').toLowerCase();
+    if (value === 'medio_03' || value === 'tarjeta') return true;
+    const label = String(medioOrConcept.label || '').toLowerCase();
+    return label.includes('tarjeta');
+  }
+  const normalized = String(medioOrConcept || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized === 'tarjeta'
+    || normalized.includes('tarjeta')
+    || normalized.includes('crédito/débito')
+    || normalized.includes('credito/debito');
+};
+
+const isMedioEfectivo = (medio) => {
+  const normalized = String(medio || '').trim().toLowerCase();
+  return !normalized || normalized === 'efectivo';
 };
 
 const normalizeOrderEstado = (order) => (order?.estado || '').toLowerCase().trim();
@@ -208,7 +249,13 @@ function Clientes({ navigate, profile, accentColor }) {
   const [refundAmount, setRefundAmount] = useState('');
   const [refundMethod, setRefundMethod] = useState('Efectivo');
   const [submittingRefund, setSubmittingRefund] = useState(false);
+  const [paymentModal, setPaymentModal] = useState(false);
+  const [paymentAmount, setPaymentAmount] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState('Efectivo');
+  const [paymentObs, setPaymentObs] = useState('');
+  const [submittingPayment, setSubmittingPayment] = useState(false);
   const [dailyRefunds, setDailyRefunds] = useState([]);
+  const [dailyClientPayments, setDailyClientPayments] = useState([]);
 
   // Product management states
   const [productSearchQuery, setProductSearchQuery] = useState('');
@@ -216,10 +263,18 @@ function Clientes({ navigate, profile, accentColor }) {
   const [editingProduct, setEditingProduct] = useState(null);
   const [prodNombre, setProdNombre] = useState('');
   const [prodRubro, setProdRubro] = useState('');
-  const [prodPrecio, setProdPrecio] = useState('');
+  const [prodListPrices, setProdListPrices] = useState({});
+  const [editingProductPriceSnapshot, setEditingProductPriceSnapshot] = useState(null);
   const [prodStock, setProdStock] = useState('');
   const [prodIva, setProdIva] = useState(21.00);
   const [savingProduct, setSavingProduct] = useState(false);
+  const [rubroPriceConfirm, setRubroPriceConfirm] = useState(null);
+
+  const [priceLists, setPriceLists] = useState([]);
+  const [priceListItems, setPriceListItems] = useState({});
+
+  const [newClientListaPrecio, setNewClientListaPrecio] = useState('');
+  const [editClientListaPrecio, setEditClientListaPrecio] = useState('');
 
   const [activePaymentMethods, setActivePaymentMethods] = useState([]);
 
@@ -241,7 +296,7 @@ function Clientes({ navigate, profile, accentColor }) {
 
   // Delivery states (Register View)
   const [conEnvio, setConEnvio] = useState(false);
-  const [deliveryFee, setDeliveryFee] = useState(DEFAULT_DELIVERY_FEE);
+  const [deliveryFee, setDeliveryFee] = useState(0);
   const [addresses, setAddresses] = useState([]);
   const [selectedAddress, setSelectedAddress] = useState('');
   const [newAddressOpen, setNewAddressOpen] = useState(false);
@@ -849,6 +904,23 @@ function Clientes({ navigate, profile, accentColor }) {
   const [bulkRepartidorName, setBulkRepartidorName] = useState('');
   const [bulkPaymentModal, setBulkPaymentModal] = useState(false);
   const [bulkOrdersPayments, setBulkOrdersPayments] = useState({}); // orderId -> paymentMethod mapping
+  const [bulkOrdersCajas, setBulkOrdersCajas] = useState({});
+  const [bulkOrdersRealMedio, setBulkOrdersRealMedio] = useState({});
+  const [pedidosCajasConfig, setPedidosCajasConfig] = useState({ assignments: {} });
+  const [turnoNames, setTurnoNames] = useState([]);
+  const [openCajas, setOpenCajas] = useState({
+    [PEDIDOS_CAJA_TIPOS.DELIVERY]: getOpenCajaName(PEDIDOS_CAJA_TIPOS.DELIVERY),
+    [PEDIDOS_CAJA_TIPOS.LOCAL]: getOpenCajaName(PEDIDOS_CAJA_TIPOS.LOCAL),
+  });
+  const [selectedCajaToOpen, setSelectedCajaToOpen] = useState({
+    [PEDIDOS_CAJA_TIPOS.DELIVERY]: '',
+    [PEDIDOS_CAJA_TIPOS.LOCAL]: '',
+  });
+  const [cajaNotices, setCajaNotices] = useState({
+    [PEDIDOS_CAJA_TIPOS.DELIVERY]: null,
+    [PEDIDOS_CAJA_TIPOS.LOCAL]: null,
+  });
+  const [closeCajaModal, setCloseCajaModal] = useState(null);
   const [cancelMotiveModal, setCancelMotiveModal] = useState(false);
   const [cancelMotiveText, setCancelMotiveText] = useState('');
 
@@ -920,6 +992,12 @@ function Clientes({ navigate, profile, accentColor }) {
     }
   }, [selectedClient]);
 
+  useEffect(() => {
+    if (selectedProduct && selectedClient) {
+      setItemPrice(resolvePriceForProduct(selectedProduct, selectedClient));
+    }
+  }, [selectedClient, selectedProduct, priceLists, priceListItems]);
+
   // Load orders list when viewMode changes to 'orders'
   useEffect(() => {
     if (viewMode === 'orders') {
@@ -952,6 +1030,43 @@ function Clientes({ navigate, profile, accentColor }) {
     }
   }, [viewMode, products]);
 
+  useEffect(() => {
+    const syncTipoCaja = (tipo) => {
+      const cajas = getCajasForPedidosTipo(pedidosCajasConfig, turnoNames, tipo);
+      if (!cajas.length) return '';
+      const synced = syncOpenCajaWithConfig(tipo, cajas);
+      if (synced) return synced;
+      if (tipo === PEDIDOS_CAJA_TIPOS.DELIVERY) {
+        const localCajasList = getCajasForPedidosTipo(
+          pedidosCajasConfig,
+          turnoNames,
+          PEDIDOS_CAJA_TIPOS.LOCAL
+        );
+        if (getDeliveryOpenBlockReason(orders, localCajasList)) return '';
+      }
+      return autoOpenCajaFromOrders(orders, tipo, cajas) || '';
+    };
+
+    const deliveryOpen = syncTipoCaja(PEDIDOS_CAJA_TIPOS.DELIVERY);
+    const localOpen = syncTipoCaja(PEDIDOS_CAJA_TIPOS.LOCAL);
+
+    setOpenCajas({
+      [PEDIDOS_CAJA_TIPOS.DELIVERY]: deliveryOpen,
+      [PEDIDOS_CAJA_TIPOS.LOCAL]: localOpen,
+    });
+
+    setSelectedCajaToOpen((prev) => ({
+      [PEDIDOS_CAJA_TIPOS.DELIVERY]: deliveryOpen
+        || (prev[PEDIDOS_CAJA_TIPOS.DELIVERY] && getCajasForPedidosTipo(pedidosCajasConfig, turnoNames, PEDIDOS_CAJA_TIPOS.DELIVERY).includes(prev[PEDIDOS_CAJA_TIPOS.DELIVERY])
+          ? prev[PEDIDOS_CAJA_TIPOS.DELIVERY]
+          : getCajasForPedidosTipo(pedidosCajasConfig, turnoNames, PEDIDOS_CAJA_TIPOS.DELIVERY)[0] || ''),
+      [PEDIDOS_CAJA_TIPOS.LOCAL]: localOpen
+        || (prev[PEDIDOS_CAJA_TIPOS.LOCAL] && getCajasForPedidosTipo(pedidosCajasConfig, turnoNames, PEDIDOS_CAJA_TIPOS.LOCAL).includes(prev[PEDIDOS_CAJA_TIPOS.LOCAL])
+          ? prev[PEDIDOS_CAJA_TIPOS.LOCAL]
+          : getCajasForPedidosTipo(pedidosCajasConfig, turnoNames, PEDIDOS_CAJA_TIPOS.LOCAL)[0] || ''),
+    }));
+  }, [orders, pedidosCajasConfig, turnoNames]);
+
   // Clear selections when changing active order filters
   useEffect(() => {
     setSelectedOrderIds([]);
@@ -967,9 +1082,9 @@ function Clientes({ navigate, profile, accentColor }) {
     }
   }, [clientes, selectedClient]);
 
-  // Load daily refunds when date filters change
+  // Load daily refunds and CC payments when date filters change
   useEffect(() => {
-    const fetchDailyRefunds = async () => {
+    const fetchDailyCashMovements = async () => {
       let startStr = '1970-01-01T00:00:00.000Z';
       let endStr = '2999-12-31T23:59:59.999Z';
       
@@ -994,14 +1109,18 @@ function Clientes({ navigate, profile, accentColor }) {
       }
       
       try {
-        const refunds = await db.getDailyRefunds(startStr, endStr);
+        const [refunds, payments] = await Promise.all([
+          db.getDailyRefunds(startStr, endStr),
+          db.getDailyClientPayments(startStr, endStr),
+        ]);
         setDailyRefunds(refunds);
+        setDailyClientPayments(payments);
       } catch (err) {
-        console.error("Error loading daily refunds:", err);
+        console.error("Error loading daily cash movements:", err);
       }
     };
     
-    fetchDailyRefunds();
+    fetchDailyCashMovements();
   }, [dateFilter, customDate, orders]);
 
   const getPaymentMethodValue = (concept) => {
@@ -1016,6 +1135,41 @@ function Clientes({ navigate, profile, accentColor }) {
   };
 
   const enabledPaymentMethods = activePaymentMethods.filter((c) => c.enabled && c.label?.trim());
+  const collectionPaymentMethods = enabledPaymentMethods.filter((concept) => {
+    const key = getPaymentMethodValue(concept);
+    return key !== 'Cta Cte' && !isMedioCtaCte(concept.label);
+  });
+
+  const getCtaCtePaymentLabel = () => {
+    const concept = enabledPaymentMethods.find(
+      (c) => isMedioCtaCte(getPaymentMethodValue(c)) || isMedioCtaCte(c.label)
+    );
+    return concept ? getPaymentMethodValue(concept) : 'Cuenta Corriente (Deuda)';
+  };
+
+  const resolveExternalLocalPaymentSelection = (medioPago, ctaCteLabel) => {
+    const method = resolveMedioPagoKey(medioPago);
+    if (isMedioCtaCte(method) || isMedioCtaCte(medioPago)) return ctaCteLabel;
+    if (
+      method === PAGADO_EN_CAJA_OPTION
+      || isMedioEfectivo(method)
+      || isMedioTarjeta(method)
+      || !hasPaymentMedio(method)
+    ) {
+      return PAGADO_EN_CAJA_OPTION;
+    }
+    return method;
+  };
+
+  const getExternalLocalPaymentConcepts = () =>
+    enabledPaymentMethods.filter((concept) => {
+      const valueName = getPaymentMethodValue(concept);
+      return valueName !== 'Efectivo'
+        && !isMedioTarjeta(concept)
+        && !isMedioTarjeta(valueName)
+        && !isMedioCtaCte(valueName)
+        && !isMedioCtaCte(concept.label);
+    });
 
   const resolveMedioPagoKey = (medioPago) => {
     const method = String(medioPago || 'Efectivo').trim();
@@ -1066,18 +1220,59 @@ function Clientes({ navigate, profile, accentColor }) {
 
   const loadInitialData = async () => {
     try {
-      const cl = await db.getClientes();
+      const [cl, pr, lists, itemsMap] = await Promise.all([
+        db.getClientes(),
+        db.getProducts(),
+        db.getPriceLists(),
+        db.getPriceListItemsMap(),
+      ]);
       setClientes(cl);
-      const pr = await db.getProducts();
       setProducts(pr);
+      setPriceLists(lists || []);
+      setPriceListItems(itemsMap || {});
       const reps = await db.getRepartidores();
       setRepartidores(reps || []);
+      const [turnos, pedidosCajas] = await Promise.all([
+        db.getCierreTurnos(),
+        db.getPedidosCajasConfig(),
+      ]);
+      setTurnoNames(turnos || []);
+      setPedidosCajasConfig(pedidosCajas || { assignments: {} });
       loadOrders();
       const concepts = await db.getCierreConceptos() || [];
       setActivePaymentMethods(concepts);
     } catch (e) {
       console.error("Error loading initial data:", e);
     }
+  };
+
+  const defaultPriceList = getDefaultPriceList(priceLists);
+
+  const resolvePriceForProduct = (product, client = selectedClient) => {
+    const listaId = getClientPriceListId(client, priceLists);
+    const lista = priceLists.find((l) => l.id === listaId) || defaultPriceList;
+    return resolveProductPrice(product, lista, priceListItems);
+  };
+
+  const getClientForOrder = (order) => {
+    if (!order) return selectedClient;
+    return clientes.find((c) => c.id === order.cliente_id) || selectedClient;
+  };
+
+  const getListPriceForProduct = (product, lista) => {
+    if (!product || !lista) return 0;
+    return resolveProductPrice(product, lista, priceListItems);
+  };
+
+  const reloadPriceListData = async () => {
+    const [lists, itemsMap, pr] = await Promise.all([
+      db.getPriceLists(),
+      db.getPriceListItemsMap(),
+      db.getProducts(),
+    ]);
+    setPriceLists(lists || []);
+    setPriceListItems(itemsMap || {});
+    setProducts(pr);
   };
 
   const loadOrders = async () => {
@@ -1098,6 +1293,23 @@ function Clientes({ navigate, profile, accentColor }) {
       setRepartidores(reps || []);
     } catch (e) {
       console.error('Error loading repartidores:', e);
+    }
+  };
+
+  const refreshPedidosCajasConfig = async () => {
+    try {
+      const [turnos, pedidosCajas] = await Promise.all([
+        db.getCierreTurnos(),
+        db.getPedidosCajasConfig(),
+      ]);
+      const nextTurnos = turnos || [];
+      const nextConfig = pedidosCajas || { assignments: {} };
+      setTurnoNames(nextTurnos);
+      setPedidosCajasConfig(nextConfig);
+      return { turnoNames: nextTurnos, pedidosCajasConfig: nextConfig };
+    } catch (e) {
+      console.error('Error refreshing pedidos cajas config:', e);
+      return { turnoNames, pedidosCajasConfig };
     }
   };
 
@@ -1535,7 +1747,8 @@ function Clientes({ navigate, profile, accentColor }) {
         razon_social: newClientRazon.trim() || newClientName.trim(),
         cuit: newClientCuit.replace(/[^0-9]/g, '') || 'N/A',
         telefono: newClientTelefono.trim(),
-        condicion_iva: newClientCondicionIva
+        condicion_iva: newClientCondicionIva,
+        lista_precio_id: newClientListaPrecio || null,
       });
 
       if (res.success && res.data) {
@@ -1561,6 +1774,7 @@ function Clientes({ navigate, profile, accentColor }) {
         setNewClientTelefono('');
         setNewClientAddress('');
         setNewClientCondicionIva('Consumidor Final');
+        setNewClientListaPrecio('');
         setNewClientModal(false);
       }
     } catch (err) {
@@ -1585,6 +1799,7 @@ function Clientes({ navigate, profile, accentColor }) {
     setEditClientCuit(formatCuit(client.cuit) || '');
     setEditClientCondicionIva(client.condicion_iva || 'Consumidor Final');
     setEditClientTelefono(client.telefono || '');
+    setEditClientListaPrecio(client.lista_precio_id || '');
     setNewEditAddressText('');
     setEditClientModal(true);
     
@@ -1610,7 +1825,8 @@ function Clientes({ navigate, profile, accentColor }) {
         razon_social: editClientRazonSocial.trim() || editClientNombre.trim(),
         cuit: editClientCuit.replace(/[^0-9]/g, '') || 'N/A',
         condicion_iva: editClientCondicionIva,
-        telefono: editClientTelefono.trim()
+        telefono: editClientTelefono.trim(),
+        lista_precio_id: editClientListaPrecio || null,
       });
       if (res.success) {
         const cl = await db.getClientes();
@@ -1670,6 +1886,68 @@ function Clientes({ navigate, profile, accentColor }) {
     setRefundModal(true);
   };
 
+  const handleOpenPaymentModal = () => {
+    if (!selectedClient || parseFloat(selectedClient.saldo || 0) <= 0) return;
+    setPaymentAmount(String(parseFloat(selectedClient.saldo || 0)));
+    const defaultMethod = collectionPaymentMethods.find((c) => getPaymentMethodValue(c) === 'Efectivo')
+      || collectionPaymentMethods[0];
+    setPaymentMethod(defaultMethod ? getPaymentMethodValue(defaultMethod) : 'Efectivo');
+    setPaymentObs('');
+    setPaymentModal(true);
+  };
+
+  const handleSubmitPayment = async (e) => {
+    if (e) e.preventDefault();
+    const amt = parseFloat(paymentAmount);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      alert('Ingresá un monto válido mayor a 0.');
+      return;
+    }
+    const maxSaldo = parseFloat(selectedClient.saldo || 0);
+    if (amt > maxSaldo + 0.005) {
+      alert('El monto no puede superar el saldo deudor del cliente.');
+      return;
+    }
+
+    setSubmittingPayment(true);
+    try {
+      const res = await db.registerClientPayment({
+        cliente_id: selectedClient.id,
+        monto: amt,
+        medio_pago: paymentMethod,
+        observacion: paymentObs.trim(),
+      });
+
+      if (!res.success) {
+        alert(res.error || 'No se pudo registrar el pago.');
+        return;
+      }
+
+      const cl = await db.getClientes();
+      setClientes(cl);
+
+      setLoadingMovements(true);
+      const movs = await db.getMovimientos(selectedClient.id);
+      setMovements(movs);
+      setLoadingMovements(false);
+
+      const updatedClient = cl.find((c) => c.id === selectedClient.id);
+      setSelectedClient(updatedClient);
+      setPaymentModal(false);
+
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      const end = new Date();
+      end.setHours(23, 59, 59, 999);
+      const payments = await db.getDailyClientPayments(start.toISOString(), end.toISOString());
+      setDailyClientPayments(payments);
+    } catch (err) {
+      alert(err.message || 'Error al registrar el pago.');
+    } finally {
+      setSubmittingPayment(false);
+    }
+  };
+
   const handleSubmitRefund = async (e) => {
     if (e) e.preventDefault();
     const amt = parseFloat(refundAmount);
@@ -1715,17 +1993,71 @@ function Clientes({ navigate, profile, accentColor }) {
     if (product) {
       setProdNombre(product.nombre);
       setProdRubro(product.rubro || '');
-      setProdPrecio(product.precio);
       setProdStock(product.stock || 0);
       setProdIva(product.iva !== undefined ? product.iva : 21.00);
+      const listPrices = {};
+      priceLists.forEach((lista) => {
+        listPrices[lista.id] = String(getListPriceForProduct(product, lista));
+      });
+      setProdListPrices(listPrices);
+      setEditingProductPriceSnapshot({ ...listPrices });
     } else {
       setProdNombre('');
       setProdRubro('');
-      setProdPrecio('');
       setProdStock('0');
       setProdIva(21.00);
+      const emptyPrices = {};
+      priceLists.forEach((lista) => {
+        emptyPrices[lista.id] = '';
+      });
+      setProdListPrices(emptyPrices);
+      setEditingProductPriceSnapshot(null);
     }
     setNewProductModal(true);
+  };
+
+  const buildListPricesPayload = () => {
+    const payload = {};
+    priceLists.forEach((lista) => {
+      payload[lista.id] = parseFloat(prodListPrices[lista.id]);
+    });
+    return payload;
+  };
+
+  const hasListPricesChanged = () => {
+    if (!editingProduct || !editingProductPriceSnapshot) return false;
+    return priceLists.some(
+      (lista) => !sameBasePrice(editingProductPriceSnapshot[lista.id], prodListPrices[lista.id])
+    );
+  };
+
+  const persistProductWithListPrices = async (prodData, listPricesPayload, targetProductIds) => {
+    const defaultList = getDefaultPriceList(priceLists);
+    const normalPrice = listPricesPayload[defaultList?.id];
+
+    if (prodData.id) {
+      await db.saveProduct({
+        ...prodData,
+        precio: normalPrice,
+      });
+    } else {
+      const res = await db.saveProduct({
+        ...prodData,
+        precio: normalPrice,
+      });
+      if (!res.success || !res.data?.id) {
+        throw new Error('No se pudo guardar el producto.');
+      }
+      prodData.id = res.data.id;
+      targetProductIds = [res.data.id];
+    }
+
+    if (targetProductIds.length > 0) {
+      await db.applyBulkProductListPrices({
+        productIds: targetProductIds,
+        listPrices: listPricesPayload,
+      });
+    }
   };
 
   const handleSaveProduct = async (e) => {
@@ -1734,35 +2066,72 @@ function Clientes({ navigate, profile, accentColor }) {
       alert("El nombre del producto es obligatorio.");
       return;
     }
-    if (prodPrecio === '' || parseFloat(prodPrecio) < 0) {
-      alert("El precio debe ser un número válido mayor o igual a 0.");
+
+    const listPricesPayload = buildListPricesPayload();
+    const defaultList = getDefaultPriceList(priceLists);
+    if (
+      priceLists.some((lista) => !Number.isFinite(listPricesPayload[lista.id]) || listPricesPayload[lista.id] < 0)
+    ) {
+      alert('Ingresá un precio válido (≥ 0) en todas las listas.');
       return;
     }
 
+    const prodData = {
+      nombre: prodNombre.trim(),
+      rubro: prodRubro.trim(),
+      precio: listPricesPayload[defaultList?.id],
+      stock: parseFloat(prodStock || 0),
+      iva: parseFloat(prodIva),
+    };
+    if (editingProduct) {
+      prodData.id = editingProduct.id;
+    }
+
+    if (editingProduct && hasListPricesChanged()) {
+      const originalNormalPrice = parseFloat(editingProduct.precio) || 0;
+      const siblings = findRubroPriceSiblings(products, editingProduct, originalNormalPrice);
+      const otherSiblings = siblings.filter((p) => p.id !== editingProduct.id);
+
+      if (otherSiblings.length > 0) {
+        setRubroPriceConfirm({
+          prodData,
+          listPricesPayload,
+          siblings,
+          rubroLabel: editingProduct.rubro || 'General',
+          formattedOriginal: new Intl.NumberFormat('es-AR', {
+            style: 'currency',
+            currency: 'ARS',
+          }).format(originalNormalPrice),
+        });
+        return;
+      }
+    }
+
+    await finalizeProductSave(prodData, listPricesPayload, editingProduct ? [editingProduct.id] : []);
+  };
+
+  const finalizeProductSave = async (prodData, listPricesPayload, targetProductIds) => {
     setSavingProduct(true);
     try {
-      const prodData = {
-        nombre: prodNombre.trim(),
-        rubro: prodRubro.trim(),
-        precio: parseFloat(prodPrecio),
-        stock: parseFloat(prodStock || 0),
-        iva: parseFloat(prodIva)
-      };
-      if (editingProduct) {
-        prodData.id = editingProduct.id;
-      }
-      const res = await db.saveProduct(prodData);
-      if (res.success) {
-        const pr = await db.getProducts();
-        setProducts(pr);
-        setNewProductModal(false);
-      }
+      await persistProductWithListPrices(prodData, listPricesPayload, targetProductIds);
+      await reloadPriceListData();
+      setRubroPriceConfirm(null);
+      setNewProductModal(false);
     } catch (err) {
       console.error("Error saving product:", err);
-      alert("Ocurrió un error al guardar el producto.");
+      alert(err.message || "Ocurrió un error al guardar el producto.");
     } finally {
       setSavingProduct(false);
     }
+  };
+
+  const handleRubroPriceConfirm = async (applyToAll) => {
+    if (!rubroPriceConfirm) return;
+    const { prodData, listPricesPayload, siblings } = rubroPriceConfirm;
+    const targetProductIds = applyToAll
+      ? siblings.map((p) => p.id)
+      : [prodData.id];
+    await finalizeProductSave(prodData, listPricesPayload, targetProductIds);
   };
 
   const handleDeleteProduct = async (productId) => {
@@ -1784,7 +2153,7 @@ function Clientes({ navigate, profile, accentColor }) {
   const handleSelectProduct = (product) => {
     setSelectedProduct(product);
     setProductSearch(product.nombre);
-    setItemPrice(product.precio);
+    setItemPrice(resolvePriceForProduct(product, selectedClient));
     setShowProductSuggestions(false);
   };
 
@@ -1905,7 +2274,7 @@ function Clientes({ navigate, profile, accentColor }) {
   const handleSelectEditProduct = (product) => {
     setEditSelectedProduct(product);
     setEditProductSearch(product.nombre);
-    setEditItemPrice(product.precio);
+    setEditItemPrice(resolvePriceForProduct(product, getClientForOrder(editingOrder)));
     setEditShowProductSuggestions(false);
   };
 
@@ -2260,13 +2629,63 @@ function Clientes({ navigate, profile, accentColor }) {
 
     const total = orderItems.reduce((sum, item) => sum + (item.cantidad * item.valor), 0);
 
+    const deliveryCajasForOrder = getCajasForPedidosTipo(
+      pedidosCajasConfig,
+      turnoNames,
+      PEDIDOS_CAJA_TIPOS.DELIVERY
+    );
+    const localCajasForOrder = getCajasForPedidosTipo(
+      pedidosCajasConfig,
+      turnoNames,
+      PEDIDOS_CAJA_TIPOS.LOCAL
+    );
+    const separateLocalCobroOnRegister = usesSeparateLocalCobroCaja(pedidosCajasConfig, turnoNames);
+
+    let turnoCaja = null;
+    if (conEnvio) {
+      const resolved = resolveDeliveryCajaForNewPedido({
+        deliveryCajas: deliveryCajasForOrder,
+        selectedCajaToOpen: selectedCajaToOpen[PEDIDOS_CAJA_TIPOS.DELIVERY],
+        orders,
+        localCajas: localCajasForOrder,
+      });
+      if (resolved.error) {
+        setErrorMsg(resolved.error);
+        setLoadingSubmit(false);
+        return;
+      }
+      turnoCaja = resolved.turnoName;
+      setOpenCajas((prev) => ({ ...prev, [PEDIDOS_CAJA_TIPOS.DELIVERY]: turnoCaja }));
+    } else if (localCajasForOrder.length > 0 && !separateLocalCobroOnRegister) {
+      const resolved = resolveCajaForNewPedido({
+        tipo: PEDIDOS_CAJA_TIPOS.LOCAL,
+        cajas: localCajasForOrder,
+        selectedCajaToOpen: selectedCajaToOpen[PEDIDOS_CAJA_TIPOS.LOCAL],
+        tipoLabel: 'Local',
+      });
+      if (resolved.error) {
+        setErrorMsg(resolved.error);
+        setLoadingSubmit(false);
+        return;
+      }
+      turnoCaja = resolved.turnoName;
+      setOpenCajas((prev) => ({ ...prev, [PEDIDOS_CAJA_TIPOS.LOCAL]: turnoCaja }));
+    }
+
     const orderData = {
       cliente_id: selectedClient.id,
       total: total,
       con_envio: conEnvio,
       direccion_envio: conEnvio ? selectedAddress : null,
+      turno_caja: turnoCaja,
       items: orderItems
     };
+
+    if (conEnvio && !orderData.turno_caja) {
+      setErrorMsg('Configurá una caja Delivery en Configuración → Pedidos.');
+      setLoadingSubmit(false);
+      return;
+    }
 
     try {
       const res = await db.savePedido(orderData);
@@ -2432,10 +2851,310 @@ function Clientes({ navigate, profile, accentColor }) {
   const hasDeliverySelected = selectedOrdersData.some(o => o.con_envio === true);
   const hasLocalSelected = selectedOrdersData.some(o => o.con_envio === false);
 
+  const deliveryCajas = getCajasForPedidosTipo(pedidosCajasConfig, turnoNames, PEDIDOS_CAJA_TIPOS.DELIVERY);
+  const localCajas = getCajasForPedidosTipo(pedidosCajasConfig, turnoNames, PEDIDOS_CAJA_TIPOS.LOCAL);
+  const localManagedExternally = localPedidosManagedExternally(pedidosCajasConfig, turnoNames);
+  const separateLocalCobro = usesSeparateLocalCobroCaja(pedidosCajasConfig, turnoNames);
+  const ctaCtePaymentLabel = getCtaCtePaymentLabel();
+
+  const CAJA_TIPO_UI = {
+    [PEDIDOS_CAJA_TIPOS.DELIVERY]: {
+      tag: 'DELIVERY',
+      openColor: '#1d4ed8',
+      borderOpen: '#93c5fd',
+      bgOpen: '#eff6ff',
+      btnOpen: '#2563eb',
+    },
+    [PEDIDOS_CAJA_TIPOS.LOCAL]: {
+      tag: 'LOCAL',
+      openColor: '#0f766e',
+      borderOpen: '#5eead4',
+      bgOpen: '#ecfdf5',
+      btnOpen: '#0d9488',
+    },
+  };
+
+  const showCajaNotice = (tipo, text, type = 'error') => {
+    setCajaNotices((prev) => ({ ...prev, [tipo]: { text, type } }));
+    window.setTimeout(() => {
+      setCajaNotices((prev) => ({ ...prev, [tipo]: null }));
+    }, 6000);
+  };
+
+  const handleOpenCaja = (tipo, cajasList) => {
+    setCajaNotices((prev) => ({ ...prev, [tipo]: null }));
+    const name = cajasList.length === 1
+      ? cajasList[0]
+      : selectedCajaToOpen[tipo];
+    if (!name) {
+      showCajaNotice(tipo, `Seleccioná la caja ${CAJA_TIPO_UI[tipo].tag.toLowerCase()}.`, 'error');
+      return;
+    }
+    if (openCajas[tipo]) {
+      showCajaNotice(tipo, `Ya hay una caja ${CAJA_TIPO_UI[tipo].tag.toLowerCase()} abierta (${openCajas[tipo]}).`, 'error');
+      return;
+    }
+    if (tipo === PEDIDOS_CAJA_TIPOS.DELIVERY) {
+      const blockReason = getDeliveryOpenBlockReason(orders, localCajas);
+      if (blockReason) {
+        showCajaNotice(PEDIDOS_CAJA_TIPOS.DELIVERY, blockReason, 'error');
+        return;
+      }
+    }
+    openCaja(tipo, name);
+    setOpenCajas((prev) => ({ ...prev, [tipo]: name }));
+    showCajaNotice(tipo, `Caja "${name}" abierta.`, 'success');
+  };
+
+  const handleCloseCajaRequest = (tipo) => {
+    const turnoName = openCajas[tipo];
+    if (!turnoName) return;
+    setCajaNotices((prev) => ({ ...prev, [tipo]: null }));
+
+    const pending = countNonFinalizedOrdersForCaja(orders, tipo, turnoName);
+    if (pending > 0 || !canCloseCaja(orders, tipo, turnoName)) {
+      showCajaNotice(
+        tipo,
+        `No podés cerrar la caja "${turnoName}": quedan ${pending} pedido(s) ${CAJA_TIPO_UI[tipo].tag.toLowerCase()} de hoy sin finalizar.`,
+        'error'
+      );
+      return;
+    }
+
+    setCloseCajaModal({ tipo, turnoName });
+  };
+
+  const handleCloseCajaConfirm = async () => {
+    if (!closeCajaModal) return;
+    const { tipo, turnoName } = closeCajaModal;
+
+    const pending = countNonFinalizedOrdersForCaja(orders, tipo, turnoName);
+    if (pending > 0 || !canCloseCaja(orders, tipo, turnoName)) {
+      setCloseCajaModal(null);
+      showCajaNotice(
+        tipo,
+        `No podés cerrar la caja "${turnoName}": quedan ${pending} pedido(s) de hoy sin finalizar.`,
+        'error'
+      );
+      return;
+    }
+
+    closeCaja(tipo);
+    setOpenCajas((prev) => ({ ...prev, [tipo]: '' }));
+    setCloseCajaModal(null);
+
+    const fecha = getTodayLocalDateString();
+    let medioValues = null;
+    try {
+      const [concepts, pedidos] = await Promise.all([
+        db.getCierreConceptos(),
+        db.getPendingPedidosForCierre(fecha, turnoName),
+      ]);
+      medioValues = db.aggregatePedidosForCierre(pedidos || [], concepts || []);
+    } catch (err) {
+      console.error('Error preparing cierre prefill:', err);
+    }
+
+    if (navigate) {
+      navigate('cierre', {
+        cierrePrefill: {
+          fecha,
+          turno: turnoName,
+          fromPedidosTipo: tipo,
+          medioValues,
+        },
+      });
+    }
+  };
+
+  const renderPedidosCajaPanel = (tipo, cajasList) => {
+    if (!cajasList.length) return null;
+    const ui = CAJA_TIPO_UI[tipo];
+    const openName = openCajas[tipo];
+    const isOpen = !!openName;
+    const pendingCount = isOpen
+      ? countNonFinalizedOrdersForCaja(orders, tipo, openName)
+      : 0;
+    const orderCount = isOpen
+      ? getTodayOrdersForCaja(orders, tipo, openName).length
+      : 0;
+    const canClose = isOpen ? canCloseCaja(orders, tipo, openName) : false;
+    const notice = cajaNotices[tipo];
+    const deliveryBlockReason = tipo === PEDIDOS_CAJA_TIPOS.DELIVERY && !isOpen
+      ? getDeliveryOpenBlockReason(orders, localCajas)
+      : '';
+
+    return (
+      <div
+        key={tipo}
+        style={{
+          padding: '6px 10px',
+          borderRadius: '8px',
+          border: `1px solid ${isOpen ? ui.borderOpen : '#e2e8f0'}`,
+          backgroundColor: isOpen ? ui.bgOpen : '#f8fafc',
+        }}
+      >
+        {notice && (
+          <div
+            className={notice.type === 'success' ? 'alert-box-success' : 'alert-box'}
+            style={{
+              marginBottom: '6px',
+              padding: '6px 10px',
+              fontSize: '0.78rem',
+              ...(notice.type === 'success'
+                ? {}
+                : { backgroundColor: '#fee2e2', borderColor: '#fecaca', color: '#991b1b' }),
+            }}
+          >
+            <i className={`bi ${notice.type === 'success' ? 'bi-check-circle-fill' : 'bi-exclamation-circle-fill'}`}></i>
+            <div>{notice.text}</div>
+          </div>
+        )}
+        {deliveryBlockReason && !notice && (
+          <div
+            className="alert-box"
+            style={{
+              marginBottom: '6px',
+              padding: '6px 10px',
+              fontSize: '0.78rem',
+              backgroundColor: '#fffbeb',
+              borderColor: '#fde68a',
+              color: '#92400e',
+            }}
+          >
+            <i className="bi bi-exclamation-triangle-fill"></i>
+            <div>{deliveryBlockReason}</div>
+          </div>
+        )}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', minHeight: '28px' }}>
+            <span style={{ fontSize: '0.65rem', fontWeight: 800, letterSpacing: '0.08em', color: '#94a3b8' }}>
+              {ui.tag}
+            </span>
+            <span
+              style={{
+                fontSize: '0.68rem',
+                fontWeight: 800,
+                letterSpacing: '0.08em',
+                color: isOpen ? ui.openColor : '#64748b',
+              }}
+            >
+              {isOpen ? 'CAJA ABIERTA' : 'CAJA CERRADA'}
+            </span>
+            {isOpen && (
+              <span style={{ fontSize: '0.82rem', fontWeight: 600, color: '#1e293b' }}>
+                {openName}
+              </span>
+            )}
+            {isOpen && pendingCount > 0 && (
+              <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
+                · {pendingCount} pend.
+              </span>
+            )}
+            {!isOpen && cajasList.length > 1 && (
+              <select
+                className="form-select"
+                style={{ minWidth: '120px', fontSize: '0.78rem', padding: '2px 8px', height: '28px' }}
+                value={selectedCajaToOpen[tipo]}
+                onChange={(e) => setSelectedCajaToOpen((prev) => ({ ...prev, [tipo]: e.target.value }))}
+              >
+                {cajasList.map((cajaName) => (
+                  <option key={cajaName} value={cajaName}>{cajaName}</option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          {isOpen ? (
+            <button
+              type="button"
+              className="btn-new-task"
+              style={{
+                margin: 0,
+                backgroundColor: canClose ? '#dc2626' : '#cbd5e1',
+                color: canClose ? 'white' : '#64748b',
+                border: 'none',
+                padding: '4px 10px',
+                fontSize: '0.75rem',
+                cursor: 'pointer',
+              }}
+              onClick={() => handleCloseCajaRequest(tipo)}
+              title={canClose ? 'Cerrar y pasar a Cierre de caja' : 'Hay pedidos de hoy sin finalizar'}
+            >
+              Cerrar
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn-new-task"
+              style={{
+                margin: 0,
+                backgroundColor: ui.btnOpen,
+                color: 'white',
+                border: 'none',
+                padding: '4px 10px',
+                fontSize: '0.75rem',
+              }}
+              onClick={() => handleOpenCaja(tipo, cajasList)}
+            >
+              Abrir
+            </button>
+          )}
+        </div>
+        {isOpen && orderCount > 0 && (
+          <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '4px' }}>
+            {orderCount} pedido(s) de hoy en esta caja
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderPedidosCajasBar = () => {
+    const panels = [
+      renderPedidosCajaPanel(PEDIDOS_CAJA_TIPOS.DELIVERY, deliveryCajas),
+      renderPedidosCajaPanel(PEDIDOS_CAJA_TIPOS.LOCAL, localCajas),
+    ].filter(Boolean);
+    if (!panels.length) return null;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '10px' }}>
+        {panels}
+      </div>
+    );
+  };
+
+  const resolveTurnoCajaForOrder = (order, cobroCajaOverride) =>
+    resolvePedidoTurnoCaja({
+      order,
+      pedidosCajasConfig,
+      turnoNames,
+      cobroCajaOverride,
+    });
+
   const applyBulkStatus = async (updates) => {
     setLoadingSubmit(true);
     try {
-      const res = await db.updatePedidosStatus(selectedOrderIds, updates);
+      let enrichedUpdates = { ...updates };
+      const isFinalize = String(updates.estado || '').toLowerCase() === 'finalizado';
+      if (isFinalize) {
+        if (hasDeliverySelected && !hasLocalSelected) {
+          enrichedUpdates.turno_caja = openCajas[PEDIDOS_CAJA_TIPOS.DELIVERY]
+            || getDefaultCajaForPedidosTipo(
+              pedidosCajasConfig,
+              turnoNames,
+              PEDIDOS_CAJA_TIPOS.DELIVERY
+            );
+        } else if (hasLocalSelected && !hasDeliverySelected && !separateLocalCobro) {
+          enrichedUpdates.turno_caja = openCajas[PEDIDOS_CAJA_TIPOS.LOCAL]
+            || getDefaultCajaForPedidosTipo(
+              pedidosCajasConfig,
+              turnoNames,
+              PEDIDOS_CAJA_TIPOS.LOCAL
+            );
+        }
+      }
+
+      const res = await db.updatePedidosStatus(selectedOrderIds, enrichedUpdates);
       if (res.success) {
         setSelectedOrderIds([]);
         loadOrders(); // Reload orders list
@@ -2477,8 +3196,32 @@ function Clientes({ navigate, profile, accentColor }) {
     try {
       for (const id of selectedOrderIds) {
         const order = orders.find(o => o.id === id);
-        const orderPaymentMethod = bulkOrdersPayments[id] || 'Efectivo';
-        const updates = { medio_pago: orderPaymentMethod };
+        const selectedPayment = bulkOrdersPayments[id] || PAGADO_EN_CAJA_OPTION;
+        const isLocalOrder = !order?.con_envio;
+        const usesExternalLocalPayment = isLocalOrder && localManagedExternally;
+        const usesCobroEnCaja = isLocalOrder && separateLocalCobro && selectedPayment === PAGADO_EN_CAJA_OPTION;
+
+        let orderPaymentMethod = selectedPayment;
+        if (usesCobroEnCaja) {
+          orderPaymentMethod = bulkOrdersRealMedio[id] || 'Efectivo';
+        }
+
+        let turnoCaja = null;
+        if (
+          !usesExternalLocalPayment
+          && !isMedioCtaCte(orderPaymentMethod)
+          && orderPaymentMethod !== PAGADO_EN_CAJA_OPTION
+        ) {
+          turnoCaja = usesCobroEnCaja
+            ? (bulkOrdersCajas[id] || localCajas[0] || null)
+            : resolveTurnoCajaForOrder(order, bulkOrdersCajas[id]);
+        }
+
+        if (isLocalOrder && separateLocalCobro && usesCobroEnCaja && !turnoCaja) {
+          throw new Error('Seleccioná la caja donde se cobró el pedido local.');
+        }
+
+        const updates = { medio_pago: orderPaymentMethod, turno_caja: turnoCaja };
         // Preservar estado de envío; corregir registros legacy con estado "Pagado"
         if (order && normalizeOrderEstado(order) === 'pagado') {
           updates.estado = getOrderShippingEstado(order);
@@ -2499,19 +3242,68 @@ function Clientes({ navigate, profile, accentColor }) {
     }
   };
 
-  const triggerBulkCobrarRendir = () => {
+  const buildBulkPaymentDefaults = ({
+    orderIds,
+    config,
+    turnos,
+    ctaCteLabel,
+  }) => {
+    const managedExternally = localPedidosManagedExternally(config, turnos);
+    const separateLocal = usesSeparateLocalCobroCaja(config, turnos);
+    const localCajasList = getCajasForPedidosTipo(config, turnos, PEDIDOS_CAJA_TIPOS.LOCAL);
     const initialPayments = {};
-    selectedOrderIds.forEach(id => {
-      const order = orders.find(o => o.id === id);
-      initialPayments[id] = order?.medio_pago || 'Efectivo';
+    const initialCajas = {};
+    const initialRealMedios = {};
+
+    orderIds.forEach((id) => {
+      const order = orders.find((o) => o.id === id);
+      const isLocal = !order?.con_envio;
+      if (isLocal && managedExternally) {
+        initialPayments[id] = resolveExternalLocalPaymentSelection(order?.medio_pago, ctaCteLabel);
+      } else if (isLocal && separateLocal) {
+        initialPayments[id] = PAGADO_EN_CAJA_OPTION;
+        initialCajas[id] = order?.turno_caja || localCajasList[0] || '';
+        initialRealMedios[id] = order?.medio_pago || 'Efectivo';
+      } else {
+        initialPayments[id] = order?.medio_pago || 'Efectivo';
+        initialCajas[id] = resolvePedidoTurnoCaja({
+          order,
+          pedidosCajasConfig: config,
+          turnoNames: turnos,
+        });
+        initialRealMedios[id] = order?.medio_pago || 'Efectivo';
+      }
+    });
+
+    return { initialPayments, initialCajas, initialRealMedios };
+  };
+
+  const triggerBulkCobrarRendir = async () => {
+    const { turnoNames: freshTurnos, pedidosCajasConfig: freshConfig } = await refreshPedidosCajasConfig();
+    const { initialPayments, initialCajas, initialRealMedios } = buildBulkPaymentDefaults({
+      orderIds: selectedOrderIds,
+      config: freshConfig,
+      turnos: freshTurnos,
+      ctaCteLabel: getCtaCtePaymentLabel(),
     });
     setBulkOrdersPayments(initialPayments);
+    setBulkOrdersCajas(initialCajas);
+    setBulkOrdersRealMedio(initialRealMedios);
     setBulkPaymentModal(true);
   };
 
-  const handleOpenCobrarOrder = (order) => {
+  const handleOpenCobrarOrder = async (order) => {
     setSelectedOrderIds([order.id]);
-    setBulkOrdersPayments({ [order.id]: order.medio_pago || 'Efectivo' });
+    const { turnoNames: freshTurnos, pedidosCajasConfig: freshConfig } = await refreshPedidosCajasConfig();
+    const { initialPayments, initialCajas, initialRealMedios } = buildBulkPaymentDefaults({
+      orderIds: [order.id],
+      config: freshConfig,
+      turnos: freshTurnos,
+      ctaCteLabel: getCtaCtePaymentLabel(),
+    });
+    setBulkOrdersPayments(initialPayments);
+    setBulkOrdersCajas(initialCajas);
+    setBulkOrdersRealMedio(initialRealMedios);
     setBulkPaymentModal(true);
   };
 
@@ -2599,6 +3391,21 @@ function Clientes({ navigate, profile, accentColor }) {
       salesByMethod[method] -= amt;
     } else {
       salesByMethod.Efectivo -= amt;
+    }
+  });
+
+  dailyClientPayments.forEach((p) => {
+    let method = 'Efectivo';
+    const match = p.concepto.match(/\(([^)]+)\)/);
+    if (match && match[1]) {
+      method = resolveMedioPagoKey(match[1].split('—')[0].trim());
+    }
+
+    const amt = parseFloat(p.haber || 0);
+    if (salesByMethod[method] !== undefined) {
+      salesByMethod[method] += amt;
+    } else {
+      salesByMethod.Efectivo += amt;
     }
   });
 
@@ -2706,6 +3513,7 @@ function Clientes({ navigate, profile, accentColor }) {
       {/* ============================================================== */}
       {viewMode === 'register' && (
         <div>
+          {renderPedidosCajasBar()}
           {/* SEARCH CLIENT & REGISTER CLIENT */}
           <div className="form-group mb-4">
             <label className="form-label">Cliente</label>
@@ -2886,7 +3694,7 @@ function Clientes({ navigate, profile, accentColor }) {
                             );
                             if (matches.length > 0) {
                               setSelectedProduct(matches[0]);
-                              setItemPrice(matches[0].precio);
+                              setItemPrice(resolvePriceForProduct(matches[0], selectedClient));
                             } else {
                               setSelectedProduct(null);
                               setItemPrice(0);
@@ -2950,7 +3758,7 @@ function Clientes({ navigate, profile, accentColor }) {
                                 </span>
                               </div>
                               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginTop: '3px', color: 'var(--text-muted)' }}>
-                                <span>Precio: ${p.precio}</span>
+                                <span>Precio: $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(resolvePriceForProduct(p, selectedClient))}</span>
                                 <span>Stock: {p.stock !== undefined ? p.stock : 'N/A'}</span>
                                 <span>IVA: {p.iva !== undefined ? `${p.iva}%` : '21%'}</span>
                               </div>
@@ -3072,9 +3880,11 @@ function Clientes({ navigate, profile, accentColor }) {
                       />
                       <label className="form-check-label fw-bold text-dark" htmlFor="checkEnvio" style={{ cursor: 'pointer' }}>
                         <i className="bi bi-truck me-1 text-primary"></i> Delivery
-                        <span style={{ fontWeight: '500', color: 'var(--text-muted)', marginLeft: '6px', fontSize: '0.85rem' }}>
-                          (+ $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(deliveryFee)} envío)
-                        </span>
+                        {deliveryFee > 0 && (
+                          <span style={{ fontWeight: '500', color: 'var(--text-muted)', marginLeft: '6px', fontSize: '0.85rem' }}>
+                            (+ $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(deliveryFee)} envío)
+                          </span>
+                        )}
                       </label>
                     </div>
 
@@ -3211,6 +4021,7 @@ function Clientes({ navigate, profile, accentColor }) {
       {/* ============================================================== */}
       {viewMode === 'orders' && (
         <div>
+          {renderPedidosCajasBar()}
           {/* Order State Filters */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginBottom: '20px', backgroundColor: '#f8fafc', padding: '15px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
             {/* Filter Line 1: Fecha y Tipo */}
@@ -4421,6 +5232,21 @@ function Clientes({ navigate, profile, accentColor }) {
                   />
                 </div>
                 <div className="form-group">
+                  <label className="form-label">Lista de precios</label>
+                  <select
+                    className="form-input"
+                    value={newClientListaPrecio}
+                    onChange={(e) => setNewClientListaPrecio(e.target.value)}
+                  >
+                    <option value="">
+                      {defaultPriceList?.nombre || 'Lista Normal'}
+                    </option>
+                    {priceLists.filter((l) => !l.es_default).map((l) => (
+                      <option key={l.id} value={l.id}>{l.nombre}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group">
                   <label className="form-label">Dirección de envío</label>
                   <div className="flex-row-group mb-2" style={{ flexWrap: 'wrap', gap: '8px' }}>
                     <input
@@ -4580,7 +5406,7 @@ function Clientes({ navigate, profile, accentColor }) {
       {/* MODAL: INDIVIDUAL PAYMENTS SELECTOR */}
       {bulkPaymentModal && (
         <div className="modal-overlay">
-          <div className="modal-content-card" style={{ maxWidth: '600px' }}>
+          <div className="modal-content-card" style={{ maxWidth: '760px' }}>
             <div className="modal-header" style={{ backgroundColor: '#10b981' }}>
               <h5 className="modal-title">
                 <i className="bi bi-cash-coin me-2"></i> Registrar Pago / Cobro
@@ -4594,47 +5420,148 @@ function Clientes({ navigate, profile, accentColor }) {
                 <div className="alert-box" style={{ backgroundColor: '#ecfdf5', borderColor: '#a7f3d0', color: '#065f46', fontSize: '0.82rem', marginBottom: '15px' }}>
                   <i className="bi bi-info-circle-fill"></i>
                   <div>
-                    Asigna el medio de pago correspondiente para cada uno de los pedidos seleccionados.
+                    {localManagedExternally
+                      ? 'Pedidos locales: otra caja los cobra en mostrador. Elegí el medio (sin tarjeta); el efectivo figura como Pagado en caja.'
+                      : separateLocalCobro
+                      ? 'Pedidos locales: usá Pagado en caja para indicar en qué mostrador se cobró. Delivery: el repartidor rinde a la caja delivery configurada.'
+                      : 'Asigná el medio de pago. Los pedidos se imputan a la caja configurada en Configuración → Pedidos.'}
                   </div>
                 </div>
                 
-                <div style={{ maxHeight: '280px', overflowY: 'auto', marginBottom: '15px', paddingRight: '5px' }}>
+                <div style={{ maxHeight: '320px', overflowY: 'auto', marginBottom: '15px', paddingRight: '5px' }}>
                   {selectedOrderIds.map(id => {
                     const order = orders.find(o => o.id === id);
                     if (!order) return null;
+                    const isLocal = !order.con_envio;
+                    const restrictLocalPayments = isLocal && localManagedExternally;
+                    const showCobroEnCaja = isLocal && separateLocalCobro;
+                    const selectedPayment = bulkOrdersPayments[id]
+                      || (restrictLocalPayments ? PAGADO_EN_CAJA_OPTION : 'Efectivo');
+                    const usesCobroEnCaja = showCobroEnCaja && selectedPayment === PAGADO_EN_CAJA_OPTION;
+
                     return (
-                      <div key={id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid var(--border-color)' }}>
-                        <div style={{ flex: '1', minWidth: '0', paddingRight: '10px' }}>
-                          <div style={{ fontWeight: '600', fontSize: '0.9rem', color: 'var(--text-dark)' }} className="text-truncate">
-                            {order.cliente_nombre}
-                          </div>
-                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                            Total: <strong>$ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(order.total)}</strong>
-                          </div>
+                      <div key={id} style={{ padding: '10px 0', borderBottom: '1px solid var(--border-color)' }}>
+                        <div style={{ fontWeight: '600', fontSize: '0.9rem', color: 'var(--text-dark)' }} className="text-truncate">
+                          {order.cliente_nombre}
                         </div>
-                        <div style={{ width: '220px' }}>
-                          <select 
-                            className="form-select"
-                            style={{ padding: '6px 10px', fontSize: '0.85rem' }}
-                            value={bulkOrdersPayments[id] || 'Efectivo'}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setBulkOrdersPayments(prev => ({ ...prev, [id]: val }));
-                            }}
-                          >
-                            <option value="Efectivo">Efectivo 💵</option>
-                            {enabledPaymentMethods
-                              .filter((concept) => getPaymentMethodValue(concept) !== 'Efectivo')
-                              .map(concept => {
-                              const valueName = getPaymentMethodValue(concept);
-                              const emoji = getPaymentMethodEmoji(concept.id);
-                              return (
-                                <option key={concept.id} value={valueName}>
-                                  {concept.label} {emoji}
-                                </option>
-                              );
-                            })}
-                          </select>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                          {order.con_envio ? 'Delivery' : 'Local'} · Total: <strong>$ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(order.total)}</strong>
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: usesCobroEnCaja ? '1fr 1fr 1fr' : '1fr', gap: '10px' }}>
+                          <div>
+                            <label className="small text-muted mb-1">Forma de cobro</label>
+                            <select
+                              className="form-select"
+                              style={{ padding: '6px 10px', fontSize: '0.85rem' }}
+                              value={selectedPayment}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setBulkOrdersPayments(prev => ({ ...prev, [id]: val }));
+                              }}
+                            >
+                              {restrictLocalPayments && (
+                                <>
+                                  <option value={PAGADO_EN_CAJA_OPTION}>{PAGADO_EN_CAJA_OPTION} 💵</option>
+                                  {getExternalLocalPaymentConcepts().map((concept) => {
+                                    const valueName = getPaymentMethodValue(concept);
+                                    const emoji = getPaymentMethodEmoji(concept.id);
+                                    return (
+                                      <option key={concept.id} value={valueName}>
+                                        {concept.label} {emoji}
+                                      </option>
+                                    );
+                                  })}
+                                  {enabledPaymentMethods
+                                    .filter((concept) => isMedioCtaCte(getPaymentMethodValue(concept)) || isMedioCtaCte(concept.label))
+                                    .map((concept) => {
+                                      const valueName = getPaymentMethodValue(concept);
+                                      return (
+                                        <option key={concept.id} value={valueName}>
+                                          {concept.label}
+                                        </option>
+                                      );
+                                    })}
+                                </>
+                              )}
+                              {showCobroEnCaja && (
+                                <option value={PAGADO_EN_CAJA_OPTION}>{PAGADO_EN_CAJA_OPTION}</option>
+                              )}
+                              {!restrictLocalPayments && !showCobroEnCaja && (
+                                <>
+                                  <option value="Efectivo">Efectivo 💵</option>
+                                  {enabledPaymentMethods
+                                    .filter((concept) => getPaymentMethodValue(concept) !== 'Efectivo')
+                                    .map(concept => {
+                                    const valueName = getPaymentMethodValue(concept);
+                                    const emoji = getPaymentMethodEmoji(concept.id);
+                                    return (
+                                      <option key={concept.id} value={valueName}>
+                                        {concept.label} {emoji}
+                                      </option>
+                                    );
+                                  })}
+                                </>
+                              )}
+                              {showCobroEnCaja && (
+                                enabledPaymentMethods
+                                  .filter((concept) => isMedioCtaCte(getPaymentMethodValue(concept)) || isMedioCtaCte(concept.label))
+                                  .map(concept => {
+                                    const valueName = getPaymentMethodValue(concept);
+                                    return (
+                                      <option key={concept.id} value={valueName}>
+                                        {concept.label}
+                                      </option>
+                                    );
+                                  })
+                              )}
+                            </select>
+                          </div>
+                          {usesCobroEnCaja && (
+                            <>
+                              <div>
+                                <label className="small text-muted mb-1">Caja</label>
+                                <select
+                                  className="form-select"
+                                  style={{ padding: '6px 10px', fontSize: '0.85rem' }}
+                                  value={bulkOrdersCajas[id] || localCajas[0] || ''}
+                                  onChange={(e) => {
+                                    setBulkOrdersCajas(prev => ({ ...prev, [id]: e.target.value }));
+                                  }}
+                                >
+                                  {localCajas.map((turnoName) => (
+                                    <option key={turnoName} value={turnoName}>{turnoName}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="small text-muted mb-1">Medio</label>
+                                <select
+                                  className="form-select"
+                                  style={{ padding: '6px 10px', fontSize: '0.85rem' }}
+                                  value={bulkOrdersRealMedio[id] || 'Efectivo'}
+                                  onChange={(e) => {
+                                    setBulkOrdersRealMedio(prev => ({ ...prev, [id]: e.target.value }));
+                                  }}
+                                >
+                                  <option value="Efectivo">Efectivo 💵</option>
+                                  {enabledPaymentMethods
+                                    .filter((concept) => {
+                                      const valueName = getPaymentMethodValue(concept);
+                                      return valueName !== 'Efectivo' && !isMedioCtaCte(valueName) && !isMedioCtaCte(concept.label);
+                                    })
+                                    .map(concept => {
+                                      const valueName = getPaymentMethodValue(concept);
+                                      const emoji = getPaymentMethodEmoji(concept.id);
+                                      return (
+                                        <option key={concept.id} value={valueName}>
+                                          {concept.label} {emoji}
+                                        </option>
+                                      );
+                                    })}
+                                </select>
+                              </div>
+                            </>
+                          )}
                         </div>
                       </div>
                     );
@@ -4659,6 +5586,56 @@ function Clientes({ navigate, profile, accentColor }) {
                   </button>
                 </div>
               </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: CERRAR CAJA DELIVERY */}
+      {closeCajaModal && (
+        <div className="modal-overlay">
+          <div className="modal-content-card" style={{ maxWidth: '440px' }}>
+            <div className="modal-header" style={{ backgroundColor: '#dc2626' }}>
+              <h5 className="modal-title">
+                <i className="bi bi-lock-fill me-2"></i>
+                Cerrar caja {closeCajaModal.tipo === PEDIDOS_CAJA_TIPOS.LOCAL ? 'LOCAL' : 'DELIVERY'}
+              </h5>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => setCloseCajaModal(null)}
+              >
+                <i className="bi bi-x-lg"></i>
+              </button>
+            </div>
+            <div className="modal-body">
+              <div className="alert-box" style={{ backgroundColor: '#eff6ff', borderColor: '#bfdbfe', color: '#1e40af', marginBottom: '15px', fontSize: '0.85rem' }}>
+                <i className="bi bi-info-circle-fill"></i>
+                <div>
+                  ¿Cerrar la caja <strong>{closeCajaModal.turnoName}</strong> e ir a <strong>Cerrar Caja</strong>?
+                  <div style={{ marginTop: '6px', fontSize: '0.78rem' }}>
+                    Se cargarán la fecha de hoy, la caja y los medios de pago de los pedidos finalizados.
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button
+                  type="button"
+                  className="btn-submit"
+                  style={{ backgroundColor: '#6b7280', margin: 0 }}
+                  onClick={() => setCloseCajaModal(null)}
+                >
+                  CANCELAR
+                </button>
+                <button
+                  type="button"
+                  className="btn-submit"
+                  style={{ backgroundColor: '#dc2626', margin: 0, flex: 1 }}
+                  onClick={handleCloseCajaConfirm}
+                >
+                  CERRAR E IR A CIERRE
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -4941,7 +5918,7 @@ function Clientes({ navigate, profile, accentColor }) {
                           );
                           if (matches.length > 0) {
                             setEditSelectedProduct(matches[0]);
-                            setEditItemPrice(matches[0].precio);
+                            setEditItemPrice(resolvePriceForProduct(matches[0], getClientForOrder(editingOrder)));
                           } else {
                             setEditSelectedProduct(null);
                             setEditItemPrice(0);
@@ -5170,6 +6147,26 @@ function Clientes({ navigate, profile, accentColor }) {
                     $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(Math.abs(selectedClient.saldo))}
                   </span>
                 </div>
+                {selectedClient.saldo > 0 && (
+                  <button
+                    type="button"
+                    className="btn-submit"
+                    style={{
+                      backgroundColor: '#2563eb',
+                      margin: '10px 0 0 0',
+                      width: '100%',
+                      fontSize: '0.8rem',
+                      padding: '8px 12px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px',
+                    }}
+                    onClick={handleOpenPaymentModal}
+                  >
+                    <i className="bi bi-cash-stack"></i> Registrar pago
+                  </button>
+                )}
                 {selectedClient.saldo < 0 && (
                   <button
                     type="button"
@@ -5264,9 +6261,11 @@ function Clientes({ navigate, profile, accentColor }) {
                       text = text.replace(/Cobro Pedido #/g, 'Cobro Compra #');
                       text = text.replace(/Cancelación Pedido #/g, 'Cancelación Compra #');
                       text = text.replace(/Reversión Cobro Pedido #/g, 'Reversión Cobro Compra #');
-                      text = text.replace(/Anticipo Pedido #/g, 'Anticipo Compra #');
-                      text = text.replace(/Aplicación anticipo Pedido #/g, 'Aplicación anticipo Compra #');
-                      text = text.replace(/Reversión anticipo Pedido #/g, 'Reversión anticipo Compra #');
+                      text = text.replace(/Anticipo Pedido #/g, 'Crédito Compra #');
+                      text = text.replace(/Crédito Pedido #/g, 'Crédito Compra #');
+                      text = text.replace(/Aplicación anticipo Pedido #/g, 'Aplicación crédito Compra #');
+                      text = text.replace(/Reversión anticipo Pedido #/g, 'Reversión crédito Compra #');
+                      text = text.replace(/Reversión crédito Pedido #/g, 'Reversión crédito Compra #');
                       
                       // Strip product details (everything after the first ' - ')
                       if (text.includes(' - ')) {
@@ -5291,10 +6290,26 @@ function Clientes({ navigate, profile, accentColor }) {
                       }
                     });
 
+                    const getMovementSortRank = (concepto, groupHasCredit) => {
+                      const c = String(concepto || '');
+                      if (c.includes('Crédito') || c.includes('Anticipo')) return 0;
+                      if (/^Pedido #/.test(c)) return groupHasCredit ? 1 : 0;
+                      if (c.includes('Cobro Pedido') && !c.includes('Reversión')) return groupHasCredit ? 2 : 1;
+                      return 3;
+                    };
+
                     const sortedGroups = Object.keys(groups).map(orderId => {
                       const groupMovs = groups[orderId];
-                      // Sort movements ascending chronologically (earliest first: debit, then credit)
-                      groupMovs.sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
+                      const groupHasCredit = groupMovs.some((m) => {
+                        const c = m.concepto || '';
+                        return c.includes('Crédito') || c.includes('Anticipo');
+                      });
+                      groupMovs.sort((a, b) => {
+                        const ta = new Date(a.fecha).getTime();
+                        const tb = new Date(b.fecha).getTime();
+                        if (ta !== tb) return ta - tb;
+                        return getMovementSortRank(a.concepto, groupHasCredit) - getMovementSortRank(b.concepto, groupHasCredit);
+                      });
                       const groupDate = new Date(groupMovs[0].fecha).getTime();
 
                       const totalDebe = groupMovs.reduce((sum, m) => sum + parseFloat(m.debe || 0), 0);
@@ -5345,6 +6360,7 @@ function Clientes({ navigate, profile, accentColor }) {
                         }
 
                         const mainMov = group.movements[0];
+                        const mainIsCharge = parseFloat(mainMov.debe || 0) > 0;
 
                         return (
                           <div key={`g_${group.orderId}_${idx}`} style={{
@@ -5374,7 +6390,11 @@ function Clientes({ navigate, profile, accentColor }) {
                                 </span>
                               </div>
                               <div>
-                                <span className="movement-value-debe">+ $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(mainMov.debe)}</span>
+                                {mainIsCharge ? (
+                                  <span className="movement-value-debe">+ $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(mainMov.debe)}</span>
+                                ) : (
+                                  <span className="movement-value-haber">- $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(mainMov.haber)}</span>
+                                )}
                               </div>
                             </div>
 
@@ -5800,6 +6820,22 @@ function Clientes({ navigate, profile, accentColor }) {
                 </div>
               </div>
 
+              <div className="form-group mb-3">
+                <label className="form-label text-dark">Lista de precios</label>
+                <select
+                  className="form-select"
+                  value={editClientListaPrecio}
+                  onChange={(e) => setEditClientListaPrecio(e.target.value)}
+                >
+                  <option value="">
+                    {defaultPriceList?.nombre || 'Lista Normal'}
+                  </option>
+                  {priceLists.filter((l) => !l.es_default).map((l) => (
+                    <option key={l.id} value={l.id}>{l.nombre}</option>
+                  ))}
+                </select>
+              </div>
+
               <button 
                 type="submit" 
                 className="btn-submit"
@@ -5911,6 +6947,109 @@ function Clientes({ navigate, profile, accentColor }) {
                   </div>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: REGISTRAR PAGO CUENTA CORRIENTE */}
+      {paymentModal && selectedClient && (
+        <div className="modal-overlay" style={{ zIndex: 1100 }}>
+          <div className="modal-content-card" style={{ maxWidth: '420px' }}>
+            <div className="modal-header" style={{ backgroundColor: '#2563eb' }}>
+              <h5 className="modal-title">
+                <i className="bi bi-cash-stack me-2"></i>
+                Registrar pago
+              </h5>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => setPaymentModal(false)}
+                disabled={submittingPayment}
+              >
+                <i className="bi bi-x-lg"></i>
+              </button>
+            </div>
+            <div className="modal-body" style={{ padding: '20px' }}>
+              <form onSubmit={handleSubmitPayment}>
+                <div className="alert-box" style={{ backgroundColor: '#eff6ff', borderColor: '#bfdbfe', color: '#1e40af', marginBottom: '15px', fontSize: '0.85rem' }}>
+                  <i className="bi bi-info-circle-fill"></i>
+                  <div>
+                    Saldo deudor:{' '}
+                    <strong>
+                      $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(parseFloat(selectedClient.saldo || 0))}
+                    </strong>
+                    <div style={{ marginTop: '4px', fontSize: '0.78rem' }}>
+                      El pago reduce la cuenta corriente e ingresa en la caja del día según el medio elegido.
+                    </div>
+                  </div>
+                </div>
+
+                <div className="form-group mb-3">
+                  <label className="form-label">Monto a cobrar ($)</label>
+                  <input
+                    type="number"
+                    className="form-input"
+                    value={paymentAmount}
+                    onChange={(e) => setPaymentAmount(e.target.value)}
+                    onKeyDown={handleNumericKeyDown}
+                    step="any"
+                    min="0.01"
+                    max={parseFloat(selectedClient.saldo || 0)}
+                    required
+                  />
+                </div>
+
+                <div className="form-group mb-3">
+                  <label className="form-label">Medio de pago</label>
+                  <select
+                    className="form-select"
+                    value={paymentMethod}
+                    onChange={(e) => setPaymentMethod(e.target.value)}
+                    required
+                  >
+                    {(collectionPaymentMethods.length > 0 ? collectionPaymentMethods : [{ id: 'efectivo', label: 'Efectivo' }]).map((concept) => {
+                      const valueName = getPaymentMethodValue(concept);
+                      return (
+                        <option key={concept.id || valueName} value={valueName}>
+                          {concept.label || valueName}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+
+                <div className="form-group mb-4">
+                  <label className="form-label">Observación (opcional)</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="Ej: Pago parcial, recibo #123..."
+                    value={paymentObs}
+                    onChange={(e) => setPaymentObs(e.target.value)}
+                  />
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                  <button
+                    type="button"
+                    className="btn-cancel"
+                    style={{ padding: '11px', margin: 0 }}
+                    onClick={() => setPaymentModal(false)}
+                    disabled={submittingPayment}
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn-submit"
+                    style={{ backgroundColor: '#2563eb', padding: '11px', margin: 0 }}
+                    disabled={submittingPayment}
+                  >
+                    {submittingPayment ? 'Registrando...' : 'Confirmar pago'}
+                  </button>
+                </div>
+              </form>
             </div>
           </div>
         </div>
@@ -6054,8 +7193,16 @@ function Clientes({ navigate, profile, accentColor }) {
                     style={{ padding: '12px 8px', fontSize: '0.85rem', fontWeight: 'bold', color: 'var(--text-muted)', textAlign: 'right', cursor: 'pointer', userSelect: 'none' }}
                     onClick={() => handleSortProducts('precio')}
                   >
-                    Precio {productSortField === 'precio' && (productSortAsc ? '▴' : '▾')}
+                    {defaultPriceList?.nombre || 'Lista Normal'} {productSortField === 'precio' && (productSortAsc ? '▴' : '▾')}
                   </th>
+                  {priceLists.filter((l) => !l.es_default).map((lista) => (
+                    <th
+                      key={lista.id}
+                      style={{ padding: '12px 8px', fontSize: '0.75rem', fontWeight: 'bold', color: 'var(--text-muted)', textAlign: 'right' }}
+                    >
+                      {lista.nombre}
+                    </th>
+                  ))}
                   <th 
                     style={{ padding: '12px 8px', fontSize: '0.85rem', fontWeight: 'bold', color: 'var(--text-muted)', textAlign: 'right', cursor: 'pointer', userSelect: 'none' }}
                     onClick={() => handleSortProducts('stock')}
@@ -6098,8 +7245,13 @@ function Clientes({ navigate, profile, accentColor }) {
                       <td style={{ padding: '12px 8px', fontWeight: '600' }}>{p.nombre}</td>
                       <td style={{ padding: '12px 8px', color: 'var(--text-muted)' }}>{p.rubro || '-'}</td>
                       <td style={{ padding: '12px 8px', textAlign: 'right', fontWeight: '700' }}>
-                        $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(p.precio)}
+                        $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(getListPriceForProduct(p, defaultPriceList))}
                       </td>
+                      {priceLists.filter((l) => !l.es_default).map((lista) => (
+                        <td key={lista.id} style={{ padding: '12px 8px', textAlign: 'right', fontWeight: '600', color: 'var(--text-muted)' }}>
+                          $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(getListPriceForProduct(p, lista))}
+                        </td>
+                      ))}
                       <td style={{ 
                         padding: '12px 8px', 
                         textAlign: 'right', 
@@ -6146,7 +7298,7 @@ function Clientes({ navigate, profile, accentColor }) {
                   ))}
                 {products.length === 0 && (
                   <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
+                    <td colSpan={6 + Math.max(0, priceLists.filter((l) => !l.es_default).length)} style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
                       No hay productos registrados en el inventario.
                     </td>
                   </tr>
@@ -6157,12 +7309,95 @@ function Clientes({ navigate, profile, accentColor }) {
         </div>
       )}
 
+      {/* MODAL: CONFIRMAR PRECIOS EN RUBRO */}
+      {rubroPriceConfirm && (
+        <div className="modal-overlay" style={{ zIndex: 1100 }}>
+          <div className="modal-content-card" style={{ maxWidth: '480px' }}>
+            <div className="modal-header" style={{ backgroundColor: '#8b5cf6' }}>
+              <h5 className="modal-title">
+                <i className="bi bi-tags-fill me-2"></i>
+                Aplicar precios en el rubro
+              </h5>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => setRubroPriceConfirm(null)}
+                disabled={savingProduct}
+              >
+                <i className="bi bi-x-lg"></i>
+              </button>
+            </div>
+            <div className="modal-body" style={{ padding: '20px' }}>
+              <p style={{ fontSize: '0.92rem', color: 'var(--text-dark)', marginBottom: '12px', lineHeight: 1.5 }}>
+                Hay{' '}
+                <strong>{rubroPriceConfirm.siblings.length - 1}</strong>{' '}
+                producto(s) más en el rubro{' '}
+                <strong>{rubroPriceConfirm.rubroLabel}</strong>{' '}
+                con el mismo precio original ({rubroPriceConfirm.formattedOriginal}).
+              </p>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '14px' }}>
+                ¿Querés aplicar los nuevos precios de todas las listas a todos esos productos?
+              </p>
+
+              <div
+                style={{
+                  maxHeight: '140px',
+                  overflowY: 'auto',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: '8px',
+                  padding: '10px 12px',
+                  backgroundColor: '#f8fafc',
+                  marginBottom: '16px',
+                }}
+              >
+                {rubroPriceConfirm.siblings.map((p) => (
+                  <div
+                    key={p.id}
+                    style={{
+                      fontSize: '0.85rem',
+                      padding: '4px 0',
+                      color: p.id === rubroPriceConfirm.prodData.id ? '#8b5cf6' : 'var(--text-dark)',
+                      fontWeight: p.id === rubroPriceConfirm.prodData.id ? 700 : 500,
+                    }}
+                  >
+                    {p.id === rubroPriceConfirm.prodData.id ? '• ' : '– '}
+                    {p.nombre}
+                    {p.id === rubroPriceConfirm.prodData.id ? ' (este producto)' : ''}
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                <button
+                  type="button"
+                  className="btn-cancel"
+                  style={{ padding: '11px', margin: 0 }}
+                  onClick={() => handleRubroPriceConfirm(false)}
+                  disabled={savingProduct}
+                >
+                  Solo este producto
+                </button>
+                <button
+                  type="button"
+                  className="btn-submit"
+                  style={{ backgroundColor: '#8b5cf6', padding: '11px', margin: 0 }}
+                  onClick={() => handleRubroPriceConfirm(true)}
+                  disabled={savingProduct}
+                >
+                  {savingProduct ? 'Guardando...' : 'Aplicar a todos'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ============================================================== */}
       {/* MODAL: NUEVO / EDITAR PRODUCTO                                 */}
       {/* ============================================================== */}
       {newProductModal && (
         <div className="modal-backdrop" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 1000 }}>
-          <div className="page-card" style={{ width: '90%', maxWidth: '450px', backgroundColor: '#ffffff', borderRadius: '16px', border: '1px solid var(--border-color)', boxShadow: 'var(--shadow-lg)', animation: 'slideUp 0.3s ease-out', position: 'relative' }}>
+          <div className="page-card" style={{ width: '95%', maxWidth: '520px', backgroundColor: '#ffffff', borderRadius: '16px', border: '1px solid var(--border-color)', boxShadow: 'var(--shadow-lg)', animation: 'slideUp 0.3s ease-out', position: 'relative', maxHeight: '90vh', overflowY: 'auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px', marginBottom: '20px' }}>
               <h3 style={{ fontSize: '1.25rem', margin: 0, color: '#8b5cf6' }}>
                 {editingProduct ? 'Editar Producto' : 'Crear Nuevo Producto'}
@@ -6201,35 +7436,47 @@ function Clientes({ navigate, profile, accentColor }) {
                 />
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }} className="mb-3">
-                <div className="form-group mb-0">
-                  <label className="form-label">Precio Final ($)</label>
-                  <input 
-                    type="number" 
-                    className="form-input" 
-                    placeholder="0.00"
-                    step="any"
-                    min="0"
-                    value={prodPrecio}
-                    onChange={(e) => setProdPrecio(e.target.value)}
-                    onKeyDown={handleNumericKeyDown}
-                    required
-                  />
+              <div className="form-group mb-3">
+                <label className="form-label">Precios por lista</label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px' }}>
+                  {priceLists.map((lista) => (
+                    <div key={lista.id}>
+                      <label className="form-label" style={{ fontSize: '0.75rem', marginBottom: '4px' }}>
+                        {lista.nombre}
+                      </label>
+                      <input
+                        type="number"
+                        className="form-input"
+                        placeholder="0.00"
+                        step="any"
+                        min="0"
+                        value={prodListPrices[lista.id] ?? ''}
+                        onChange={(e) => setProdListPrices((prev) => ({ ...prev, [lista.id]: e.target.value }))}
+                        onKeyDown={handleNumericKeyDown}
+                        required
+                      />
+                    </div>
+                  ))}
                 </div>
-                
-                <div className="form-group mb-0">
-                  <label className="form-label">Stock</label>
-                  <input 
-                    type="number" 
-                    className="form-input" 
-                    placeholder="0"
-                    step="any"
-                    value={prodStock}
-                    onChange={(e) => setProdStock(e.target.value)}
-                    onKeyDown={handleNumericKeyDown}
-                    required
-                  />
-                </div>
+                {editingProduct && (
+                  <small className="text-muted" style={{ display: 'block', marginTop: '6px' }}>
+                    Si cambiás algún precio, podés aplicarlo a otros productos del mismo rubro con igual valor original.
+                  </small>
+                )}
+              </div>
+
+              <div className="form-group mb-3">
+                <label className="form-label">Stock</label>
+                <input 
+                  type="number" 
+                  className="form-input" 
+                  placeholder="0"
+                  step="any"
+                  value={prodStock}
+                  onChange={(e) => setProdStock(e.target.value)}
+                  onKeyDown={handleNumericKeyDown}
+                  required
+                />
               </div>
 
               <div className="form-group mb-4">

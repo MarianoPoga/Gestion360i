@@ -148,7 +148,7 @@ function App() {
       case 'results':
         return <Results navigate={navigate} accentColor={getActiveModuleColor('results')} />;
       case 'cierre':
-        return <Cierre navigate={navigate} accentColor={getActiveModuleColor('cierre')} />;
+        return <Cierre navigate={navigate} navState={navState} accentColor={getActiveModuleColor('cierre')} />;
       case 'compras':
         return <Compras navigate={navigate} refreshModules={refreshModules} modules={modules} navState={navState} accentColor={getActiveModuleColor('compras')} />;
       case 'adelantos':
@@ -200,12 +200,14 @@ function App() {
       {currentPage !== 'dashboard' && (
         <button
           type="button"
-          className="floating-menu-btn"
-          style={{ backgroundColor: getActiveModuleColor(currentPage) }}
+          className="floating-back-btn"
+          style={{ '--floating-btn-color': getActiveModuleColor(currentPage) }}
           onClick={() => navigate('dashboard')}
           title="Volver al Menú"
+          aria-label="Volver al Menú"
         >
-          Volver
+          <i className="bi bi-arrow-left-circle-fill"></i>
+          <span className="floating-action-btn__label">Volver</span>
         </button>
       )}
 
@@ -224,7 +226,7 @@ function App() {
             aria-label="Configuración del Sistema"
           >
             <i className="bi bi-gear-fill"></i>
-            <span className="floating-config-btn__label">Config</span>
+            <span className="floating-action-btn__label">Config</span>
           </button>
         </div>
       )}

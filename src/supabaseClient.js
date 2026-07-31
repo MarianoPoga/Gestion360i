@@ -21,13 +21,21 @@ import {
   normalizeComprasCategories,
 } from './expenseTypes'
 import {
-  BUSINESS_FISCAL_CONFIG_KEY,
-  DEFAULT_PERIODIC_CONCEPTS,
-  buildFullSubgroup,
-  buildPeriodicPaymentFromConcept,
-  findExistingPeriodicItem,
-  normalizePeriodicPayment,
-} from './periodicPaymentsDefaults'
+  DEFAULT_PRICE_LIST_NAMES,
+  buildPriceListItemKey,
+} from './priceLists'
+import {
+  DEFAULT_CIERRE_TURNOS,
+  normalizeCierreTurnos,
+  getCierreTurnoNames,
+  getTurnoName,
+  buildCajaCierreLabel,
+  aggregatePedidosMediosForCierre,
+  isFinalizedPedidoEstado,
+} from './cierreTurnos'
+import {
+  normalizePedidosCajasConfig,
+} from './pedidosCajas'
 
 const resolveLegacyShippingEstadoUpdate = (order, updates) => {
   if (updates.estado !== undefined || updates.medio_pago === undefined) return updates;
@@ -86,6 +94,33 @@ const isMedioCtaCte = (medio) => {
 
 const getOrderMovementRef = (orderId) => String(orderId).substring(0, 6);
 
+const movementConcept = {
+  pedido: (ref) => `Pedido #${ref}`,
+  reversionPedido: (ref) => `Reversión Pedido #${ref}`,
+  credito: (ref, medio) => `Crédito Pedido #${ref} (${medio})`,
+  reversionCredito: (ref) => `Reversión crédito Pedido #${ref}`,
+  cobro: (ref, medio) => `Cobro Pedido #${ref} (${medio})`,
+  reversionCobro: (ref) => `Reversión Cobro Pedido #${ref}`,
+  cancelacion: (ref, motivo) => (
+    motivo
+      ? `Cancelación Pedido #${ref} (Motivo: ${motivo})`
+      : `Cancelación Pedido #${ref}`
+  ),
+};
+
+const isCreditoPedidoConcept = (concepto, orderRef) => {
+  const text = String(concepto || '');
+  return text.includes(`Crédito Pedido #${orderRef}`)
+    || text.includes(`Anticipo Pedido #${orderRef}`);
+};
+
+const isCobroPedidoConcept = (concepto, orderRef) => {
+  const text = String(concepto || '');
+  return text.includes(`Cobro Pedido #${orderRef}`) && !text.includes('Reversión');
+};
+
+const isPedidoDeudaConcept = (concepto) => /^Pedido #/.test(String(concepto || ''));
+
 const isFinalizadoEstadoValue = (estado) => {
   const est = (estado || '').toLowerCase();
   return est === 'finalizado' || est === 'cobrado';
@@ -96,6 +131,15 @@ const isCancelledEstadoValue = (estado) => {
   return est === 'cancelado' || est === 'cancelada' || est === 'cancelled';
 };
 
+const hasPreFinalizeCredit = (estado, medio) =>
+  !isFinalizadoEstadoValue(estado) && hasPaymentMedio(medio) && !isMedioCtaCte(medio);
+
+const buildOrderCCFlags = (movements, orderRef) => ({
+  hasPedido: (movements || []).some((m) => isPedidoDeudaConcept(m.concepto) && m.concepto.includes(`#${orderRef}`)),
+  hasCredit: (movements || []).some((m) => isCreditoPedidoConcept(m.concepto, orderRef)),
+  hasCobro: (movements || []).some((m) => isCobroPedidoConcept(m.concepto, orderRef)),
+});
+
 const getOrderRelatedMovements = (movements, orderRef) =>
   (movements || []).filter((m) => m.concepto && m.concepto.includes(`#${orderRef}`));
 
@@ -104,16 +148,11 @@ const isFinalizedOrderCCComplete = (order, relatedMovements) => {
   const medio = order.medio_pago || '';
   const hasMedio = hasPaymentMedio(medio);
   const isCtaCte = isMedioCtaCte(medio);
+  const ccFlags = buildOrderCCFlags(relatedMovements, orderRef);
 
-  const hasPedido = relatedMovements.some((m) => /^Pedido #/.test(m.concepto));
-  const hasAnticipo = relatedMovements.some((m) => m.concepto.includes(`Anticipo Pedido #${orderRef}`));
-  const hasAplicacion = relatedMovements.some((m) => m.concepto.includes(`Aplicación anticipo Pedido #${orderRef}`));
-  const hasCobro = relatedMovements.some((m) => m.concepto.includes(`Cobro Pedido #${orderRef}`));
-
-  if (!hasPedido) return false;
-  if (hasAnticipo) return hasAplicacion;
-  if (isCtaCte || !hasMedio) return true;
-  return hasCobro;
+  if (!ccFlags.hasPedido) return false;
+  if (ccFlags.hasCredit || isCtaCte || !hasMedio) return true;
+  return ccFlags.hasCobro;
 };
 
 const buildMissingFinalizeMovements = (order, relatedMovements) => {
@@ -122,25 +161,90 @@ const buildMissingFinalizeMovements = (order, relatedMovements) => {
   const medio = order.medio_pago || '';
   const hasMedio = hasPaymentMedio(medio);
   const isCtaCte = isMedioCtaCte(medio);
-  const fecha = order.updated_at || order.created_at || new Date().toISOString();
-
-  const hasPedido = relatedMovements.some((m) => /^Pedido #/.test(m.concepto));
-  const hasAnticipo = relatedMovements.some((m) => m.concepto.includes(`Anticipo Pedido #${orderRef}`));
-  const hasAplicacion = relatedMovements.some((m) => m.concepto.includes(`Aplicación anticipo Pedido #${orderRef}`));
-  const hasCobro = relatedMovements.some((m) => m.concepto.includes(`Cobro Pedido #${orderRef}`));
+  const fecha = order.fecha || order.created_at || new Date().toISOString();
+  const ccFlags = buildOrderCCFlags(relatedMovements, orderRef);
 
   const inserts = [];
 
-  if (!hasPedido) {
-    inserts.push({ concepto: `Pedido #${orderRef}`, debe: total, haber: 0, fecha });
+  if (!ccFlags.hasPedido) {
+    inserts.push({ concepto: movementConcept.pedido(orderRef), debe: total, haber: 0, fecha });
   }
-  if (hasAnticipo && !hasAplicacion) {
-    inserts.push({ concepto: `Aplicación anticipo Pedido #${orderRef}`, debe: 0, haber: total, fecha });
-  } else if (!hasAnticipo && hasMedio && !isCtaCte && !hasCobro) {
-    inserts.push({ concepto: `Cobro Pedido #${orderRef} (${medio})`, debe: 0, haber: total, fecha });
+  if (!ccFlags.hasCredit && hasMedio && !isCtaCte && !ccFlags.hasCobro) {
+    inserts.push({ concepto: movementConcept.cobro(orderRef, medio), debe: 0, haber: total, fecha });
   }
 
   return inserts;
+};
+
+const getArgentinaDayBounds = (dateInput) => {
+  const date = dateInput ? new Date(dateInput) : new Date();
+  const dayStr = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+  const startUtc = new Date(`${dayStr}T03:00:00.000Z`);
+  const endUtc = new Date(startUtc);
+  endUtc.setUTCDate(endUtc.getUTCDate() + 1);
+  return { dayStr, startIso: startUtc.toISOString(), endIso: endUtc.toISOString() };
+};
+
+const isOrderWithinBounds = (order, startIso, endIso) => {
+  const start = new Date(startIso).getTime();
+  const end = new Date(endIso).getTime();
+  const timestamps = [order.fecha, order.created_at].filter(Boolean);
+  return timestamps.some((ts) => {
+    const t = new Date(ts).getTime();
+    return t >= start && t < end;
+  });
+};
+
+const applyCuentaCorrienteSyncForOrders = async ({
+  finalizedOrders,
+  businessId,
+  movementsByClient,
+  insertMovement,
+}) => {
+  let processed = 0;
+  let fixed = 0;
+  let alreadyOk = 0;
+  const details = [];
+
+  for (const order of finalizedOrders) {
+    processed += 1;
+    const orderRef = getOrderMovementRef(order.id);
+    const clientMovements = movementsByClient[order.cliente_id] || [];
+    const relatedMovements = getOrderRelatedMovements(clientMovements, orderRef);
+
+    if (isFinalizedOrderCCComplete(order, relatedMovements)) {
+      alreadyOk += 1;
+      continue;
+    }
+
+    const inserts = buildMissingFinalizeMovements(order, relatedMovements);
+    if (!inserts.length) {
+      alreadyOk += 1;
+      continue;
+    }
+
+    for (const mov of inserts) {
+      await insertMovement(order, mov);
+      if (!movementsByClient[order.cliente_id]) movementsByClient[order.cliente_id] = [];
+      movementsByClient[order.cliente_id].push(mov);
+    }
+
+    fixed += 1;
+    details.push({
+      orderId: order.id,
+      orderRef,
+      clienteId: order.cliente_id,
+      total: order.total,
+      inserts: inserts.map((m) => m.concepto),
+    });
+  }
+
+  return { processed, fixed, alreadyOk, details };
 };
 
 // --- IDENTITY HELPERS (For Multi-tenancy) ---
@@ -416,6 +520,7 @@ const BUSINESS_CONFIG = {
   CIERRE_CONCEPTOS: 'cierre_conceptos',
   CIERRE_MEDIOS_USED: 'cierre_medios_used',
   REPARTIDORES: 'repartidores',
+  PEDIDOS_CAJAS: 'pedidos_cajas',
 };
 
 const OPERATIONAL_CONFIG_KEYS = new Set([
@@ -977,7 +1082,6 @@ export const db = {
 
   // --- CIERRE CONFIGURATIONS (SHIFTS & CONCEPTS) ---
   getCierreTurnos: async () => {
-    const defaultTurnos = ['Mañana', 'Tarde', 'Delivery', 'Noche'];
     const businessId = await ensureBusinessContext();
 
     if (isSupabaseConfigured() && supabase && businessId) {
@@ -985,22 +1089,72 @@ export const db = {
         let turnos =
           (await getBusinessConfig(BUSINESS_CONFIG.CIERRE_TURNOS)) ||
           (await migrateLegacyTerminalConfig(businessId, BUSINESS_CONFIG.CIERRE_TURNOS));
-        if (turnos) return turnos;
+        if (turnos) return getCierreTurnoNames(normalizeCierreTurnos(turnos));
       } catch (err) {
         console.warn('Supabase getCierreTurnos failed:', err);
       }
     }
 
     const stored = localStorage.getItem('cierre_turnos');
-    return stored ? JSON.parse(stored) : defaultTurnos;
+    return getCierreTurnoNames(
+      normalizeCierreTurnos(stored ? JSON.parse(stored) : DEFAULT_CIERRE_TURNOS)
+    );
   },
 
+  getCierreTurnoNames: async () => db.getCierreTurnos(),
+
   saveCierreTurnos: async (turnos) => {
+    const names = (turnos || [])
+      .map((item) => (typeof item === 'string' ? item.trim() : getTurnoName(item)))
+      .filter((name) => name.length > 0);
+    const payload = names.length > 0
+      ? names
+      : getCierreTurnoNames(DEFAULT_CIERRE_TURNOS);
     const result = isSupabaseConfigured() && supabase
-      ? await saveBusinessConfig(BUSINESS_CONFIG.CIERRE_TURNOS, turnos)
+      ? await saveBusinessConfig(BUSINESS_CONFIG.CIERRE_TURNOS, payload)
       : { ok: true };
     if (!result.ok) return { success: false, error: result.error };
-    localStorage.setItem('cierre_turnos', JSON.stringify(turnos));
+    localStorage.setItem('cierre_turnos', JSON.stringify(payload));
+    return { success: true };
+  },
+
+  getPedidosCajasConfig: async () => {
+    const businessId = await ensureBusinessContext();
+    const turnoNames = await db.getCierreTurnos();
+
+    if (isSupabaseConfigured() && supabase && businessId) {
+      try {
+        const stored =
+          (await getBusinessConfig(BUSINESS_CONFIG.PEDIDOS_CAJAS)) ||
+          (await migrateLegacyTerminalConfig(businessId, BUSINESS_CONFIG.PEDIDOS_CAJAS));
+        if (stored?.assignments) {
+          return normalizePedidosCajasConfig(turnoNames, stored);
+        }
+      } catch (err) {
+        console.warn('Supabase getPedidosCajasConfig failed:', err);
+      }
+    }
+
+    const stored = localStorage.getItem('pedidos_cajas');
+    if (stored) {
+      try {
+        return normalizePedidosCajasConfig(turnoNames, JSON.parse(stored));
+      } catch {
+        // ignore invalid cache
+      }
+    }
+
+    return normalizePedidosCajasConfig(turnoNames, null);
+  },
+
+  savePedidosCajasConfig: async (config) => {
+    const turnoNames = await db.getCierreTurnos();
+    const normalized = normalizePedidosCajasConfig(turnoNames, config);
+    const result = isSupabaseConfigured() && supabase
+      ? await saveBusinessConfig(BUSINESS_CONFIG.PEDIDOS_CAJAS, normalized)
+      : { ok: true };
+    if (!result.ok) return { success: false, error: result.error };
+    localStorage.setItem('pedidos_cajas', JSON.stringify(normalized));
     return { success: true };
   },
 
@@ -1265,6 +1419,9 @@ export const db = {
         if (cliente.direccion_predeterminada) {
           insertData.direccion_predeterminada = cliente.direccion_predeterminada;
         }
+        if (cliente.lista_precio_id) {
+          insertData.lista_precio_id = cliente.lista_precio_id;
+        }
         const { data, error } = await supabase
           .from('gst_clientes')
           .insert([insertData])
@@ -1290,6 +1447,7 @@ export const db = {
       telefono: cliente.telefono || '',
       saldo: cliente.saldo ?? 0,
       direccion_predeterminada: cliente.direccion_predeterminada || null,
+      lista_precio_id: cliente.lista_precio_id || null,
     };
     clientes.push(newCliente);
     localStorage.setItem('mock_clientes', JSON.stringify(clientes));
@@ -1628,6 +1786,50 @@ export const db = {
     return { success: true, data: newMov };
   },
 
+  registerClientPayment: async ({ cliente_id, monto, medio_pago, observacion = '' }) => {
+    const amount = parseFloat(monto);
+    if (!cliente_id || !Number.isFinite(amount) || amount <= 0) {
+      return { success: false, error: 'Monto inválido.' };
+    }
+    const medio = String(medio_pago || '').trim();
+    if (!medio) {
+      return { success: false, error: 'Seleccioná un medio de pago.' };
+    }
+
+    const note = String(observacion || '').trim();
+    const concepto = note
+      ? `Pago cuenta corriente (${medio}) — ${note}`
+      : `Pago cuenta corriente (${medio})`;
+
+    const clientes = await db.getClientes();
+    const client = clientes.find((c) => c.id === cliente_id);
+    if (!client) {
+      return { success: false, error: 'Cliente no encontrado.' };
+    }
+
+    const currentSaldo = parseFloat(client.saldo || 0);
+    if (currentSaldo <= 0) {
+      return { success: false, error: 'El cliente no tiene saldo deudor para imputar un pago.' };
+    }
+    if (amount > currentSaldo + 0.005) {
+      return { success: false, error: 'El monto supera el saldo deudor del cliente.' };
+    }
+
+    const resMov = await db.saveMovement({
+      cliente_id,
+      concepto,
+      debe: 0,
+      haber: amount,
+    });
+    if (!resMov.success) {
+      return { success: false, error: 'No se pudo registrar el movimiento.' };
+    }
+
+    const newSaldo = Math.round((currentSaldo - amount + Number.EPSILON) * 100) / 100;
+    await db.updateClienteSaldo(cliente_id, newSaldo);
+    return { success: true, data: { movement: resMov.data, saldo: newSaldo } };
+  },
+
   updateClienteSaldo: async (clienteId, newSaldo) => {
     const businessId = getBusinessId();
     if (isSupabaseConfigured() && supabase) {
@@ -1685,6 +1887,33 @@ export const db = {
     });
   },
 
+  getDailyClientPayments: async (startDate, endDate) => {
+    const businessId = getBusinessId();
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('gst_cliente_movimientos')
+          .select('*')
+          .eq('business_id', businessId)
+          .gte('fecha', startDate)
+          .lte('fecha', endDate)
+          .like('concepto', 'Pago cuenta corriente%');
+        if (!error) return data || [];
+        console.warn('Supabase getDailyClientPayments failed, falling back to mock:', error);
+      } catch (err) {
+        console.warn('Supabase getDailyClientPayments error, falling back to mock:', err);
+      }
+    }
+
+    const stored = localStorage.getItem('mock_movimientos');
+    const movements = stored ? JSON.parse(stored) : [];
+    return movements.filter((m) => {
+      const withinDate = m.fecha >= startDate && m.fecha <= endDate;
+      const isPayment = m.concepto && m.concepto.startsWith('Pago cuenta corriente');
+      return withinDate && isPayment;
+    });
+  },
+
   savePedido: async (pedido) => {
     const businessId = getBusinessId();
     const terminalId = getTerminalId();
@@ -1700,6 +1929,7 @@ export const db = {
             total: pedido.total,
             con_envio: pedido.con_envio,
             direccion_envio: pedido.direccion_envio,
+            turno_caja: pedido.turno_caja || null,
             estado: 'Pendiente'
           }])
           .select()
@@ -1784,6 +2014,8 @@ export const db = {
       estado: 'Pendiente',
       repartidor: null,
       medio_pago: null,
+      turno_caja: pedido.turno_caja || null,
+      caja_cierre: null,
       items: pedido.items
     };
     orders.unshift(newOrder);
@@ -2005,6 +2237,54 @@ export const db = {
     });
   },
 
+  getPendingPedidosForCierre: async (fechaLocal, turnoName) => {
+    const businessId = getBusinessId();
+    const turno = String(turnoName || '').trim();
+    if (!fechaLocal || !turno) return [];
+
+    const { startIso, endIso } = getArgentinaDayBounds(fechaLocal);
+
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('gst_pedidos')
+          .select('*, gst_clientes(nombre)')
+          .eq('business_id', businessId)
+          .eq('turno_caja', turno)
+          .is('caja_cierre', null)
+          .gte('fecha', startIso)
+          .lt('fecha', endIso)
+          .order('fecha', { ascending: true });
+
+        if (error) throw error;
+
+        return (data || [])
+          .filter((p) => isFinalizedPedidoEstado(p.estado))
+          .map((p) => ({
+            ...p,
+            cliente_nombre: p.gst_clientes?.nombre || 'Cliente',
+          }));
+      } catch (err) {
+        console.warn('getPendingPedidosForCierre failed:', err);
+      }
+    }
+
+    const stored = localStorage.getItem('mock_pedidos');
+    const orders = stored ? JSON.parse(stored) : [];
+    const start = new Date(startIso).getTime();
+    const end = new Date(endIso).getTime();
+
+    return orders.filter((p) => {
+      if (p.turno_caja !== turno || p.caja_cierre) return false;
+      if (!isFinalizedPedidoEstado(p.estado)) return false;
+      const t = new Date(p.fecha).getTime();
+      return t >= start && t < end;
+    });
+  },
+
+  aggregatePedidosForCierre: (pedidos, cierreConceptos) =>
+    aggregatePedidosMediosForCierre(pedidos, cierreConceptos),
+
   updatePedidosStatus: async (ids, updates) => {
     const businessId = await ensureBusinessContext();
     // updates: { estado, repartidor, medio_pago, con_envio }
@@ -2052,6 +2332,7 @@ export const db = {
         if (effectiveUpdates.estado !== undefined) fieldsToUpdate.estado = effectiveUpdates.estado;
         if (effectiveUpdates.repartidor !== undefined) fieldsToUpdate.repartidor = effectiveUpdates.repartidor;
         if (effectiveUpdates.medio_pago !== undefined) fieldsToUpdate.medio_pago = effectiveUpdates.medio_pago;
+        if (effectiveUpdates.turno_caja !== undefined) fieldsToUpdate.turno_caja = effectiveUpdates.turno_caja;
         if (effectiveUpdates.motivo_cancelacion !== undefined) fieldsToUpdate.motivo_cancelacion = effectiveUpdates.motivo_cancelacion;
         if (effectiveUpdates.con_envio !== undefined) {
           fieldsToUpdate.con_envio = effectiveUpdates.con_envio;
@@ -2114,20 +2395,20 @@ export const db = {
         const nextEstado = (effectiveUpdates.estado !== undefined ? effectiveUpdates.estado : order.estado || '').toLowerCase();
         const prevConEnvio = order.con_envio;
         
-        const hasAnticipo = (estado, medio) => !isFinalizadoEstadoValue(estado) && hasPaymentMedio(medio) && !isMedioCtaCte(medio);
-
         const prevMedio = order.medio_pago || '';
         const nextMedio = effectiveUpdates.medio_pago !== undefined ? effectiveUpdates.medio_pago : prevMedio;
         const isPrevCtaCte = isMedioCtaCte(prevMedio);
         const isNextCtaCte = isMedioCtaCte(nextMedio);
 
-        const prevHadAnticipo = hasAnticipo(prevEstado, prevMedio);
-        const nextHadAnticipo = hasAnticipo(nextEstado, nextMedio);
+        const prevHadCredit = hasPreFinalizeCredit(prevEstado, prevMedio);
+        const nextHadCredit = hasPreFinalizeCredit(nextEstado, nextMedio);
         const prevFinalized = isFinalizadoEstadoValue(prevEstado);
         const nextFinalized = isFinalizadoEstadoValue(nextEstado);
 
-        const orderRef = String(order.id).split('_')[1] || order.id;
+        const orderRef = getOrderMovementRef(order.id);
         const total = parseFloat(order.total);
+        const clientMovements = movements.filter((m) => m.cliente_id === order.cliente_id);
+        const ccFlags = buildOrderCCFlags(getOrderRelatedMovements(clientMovements, orderRef), orderRef);
 
         const adjustMockSaldo = (delta) => {
           clientes = clientes.map(c => {
@@ -2152,70 +2433,61 @@ export const db = {
         // A. Cancel
         if (nextEstado === 'cancelado' && prevEstado !== 'cancelado') {
           cancelledOrderItemsList.push(order.items || []);
-          if (prevHadAnticipo) {
+          if (prevHadCredit) {
             adjustMockSaldo(total);
-            pushMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
+            pushMovement(movementConcept.reversionCredito(orderRef), total, 0);
           } else if (prevFinalized) {
-            if (!isMedioCtaCte(prevMedio)) {
+            if (ccFlags.hasCobro) {
               adjustMockSaldo(total);
-              pushMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
+              pushMovement(movementConcept.reversionCobro(orderRef), total, 0);
             }
             adjustMockSaldo(-total);
-            const cancellationConcept = effectiveUpdates.motivo_cancelacion
-              ? `Cancelación Pedido #${orderRef} (Motivo: ${effectiveUpdates.motivo_cancelacion})`
-              : `Cancelación Pedido #${orderRef}`;
-            pushMovement(cancellationConcept, 0, total);
+            pushMovement(movementConcept.cancelacion(orderRef, effectiveUpdates.motivo_cancelacion), 0, total);
           }
         }
 
-        // B. Register anticipo
-        else if (nextHadAnticipo && !prevHadAnticipo) {
+        // B. Register pre-finalize credit
+        else if (nextHadCredit && !prevHadCredit) {
           adjustMockSaldo(-total);
-          pushMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
+          pushMovement(movementConcept.credito(orderRef, nextMedio), 0, total);
         }
 
-        // C. Reverse anticipo
-        else if (prevHadAnticipo && !nextHadAnticipo && !nextFinalized) {
+        // C. Reverse credit before finalize
+        else if (prevHadCredit && !nextHadCredit && !nextFinalized) {
           adjustMockSaldo(total);
-          pushMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
+          pushMovement(movementConcept.reversionCredito(orderRef), total, 0);
         }
 
-        // D. Finalize
+        // D. Finalize — charge debt only; cobro if paid at finalize without prior credit
         else if (nextFinalized && !prevFinalized) {
-          adjustMockSaldo(total);
-          pushMovement(`Pedido #${orderRef}`, total, 0);
+          if (!ccFlags.hasPedido) {
+            adjustMockSaldo(total);
+            pushMovement(movementConcept.pedido(orderRef), total, 0);
+          }
 
-          if (prevHadAnticipo) {
+          if (!ccFlags.hasCredit && hasPaymentMedio(nextMedio) && !isMedioCtaCte(nextMedio) && !ccFlags.hasCobro) {
             adjustMockSaldo(-total);
-            pushMovement(`Aplicación anticipo Pedido #${orderRef}`, 0, total);
-          } else if (hasPaymentMedio(nextMedio) && !isMedioCtaCte(nextMedio)) {
-            adjustMockSaldo(-total);
-            pushMovement(`Cobro Pedido #${orderRef} (${nextMedio})`, 0, total);
+            pushMovement(movementConcept.cobro(orderRef, nextMedio), 0, total);
           }
         }
 
         // E. Revert finalize
         else if (prevFinalized && !nextFinalized && nextEstado !== 'cancelado') {
           adjustMockSaldo(-total);
-          pushMovement(`Reversión Pedido #${orderRef}`, 0, total);
+          pushMovement(movementConcept.reversionPedido(orderRef), 0, total);
 
-          if (!isMedioCtaCte(prevMedio) && hasPaymentMedio(prevMedio)) {
-            if (nextHadAnticipo) {
-              adjustMockSaldo(-total);
-              pushMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
-            } else {
-              adjustMockSaldo(total);
-              pushMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
-            }
+          if (ccFlags.hasCobro) {
+            adjustMockSaldo(total);
+            pushMovement(movementConcept.reversionCobro(orderRef), total, 0);
           }
         }
 
-        // F. Change payment on Pagado
-        else if (prevHadAnticipo && nextHadAnticipo && prevMedio !== nextMedio) {
+        // F. Change payment before finalize
+        else if (prevHadCredit && nextHadCredit && prevMedio !== nextMedio) {
           adjustMockSaldo(total);
-          pushMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
+          pushMovement(movementConcept.reversionCredito(orderRef), total, 0);
           adjustMockSaldo(-total);
-          pushMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
+          pushMovement(movementConcept.credito(orderRef, nextMedio), 0, total);
         }
 
         // G. Change payment on Finalizado
@@ -2231,7 +2503,7 @@ export const db = {
               id: "m_p_" + Date.now() + Math.random(),
               cliente_id: order.cliente_id,
               fecha: new Date().toISOString(),
-              concepto: `Cobro Pedido #${String(order.id).split('_')[1] || order.id} (${nextMedio})`,
+              concepto: movementConcept.cobro(orderRef, nextMedio),
               debe: 0.00,
               haber: parseFloat(order.total)
             });
@@ -2246,7 +2518,7 @@ export const db = {
               id: "m_r_" + Date.now() + Math.random(),
               cliente_id: order.cliente_id,
               fecha: new Date().toISOString(),
-              concepto: `Reversión Cobro Pedido #${String(order.id).split('_')[1] || order.id}`,
+              concepto: movementConcept.reversionCobro(orderRef),
               debe: parseFloat(order.total),
               haber: 0.00
             });
@@ -2258,6 +2530,7 @@ export const db = {
         if (effectiveUpdates.estado !== undefined) updatedOrder.estado = effectiveUpdates.estado;
         if (effectiveUpdates.repartidor !== undefined) updatedOrder.repartidor = effectiveUpdates.repartidor;
         if (effectiveUpdates.medio_pago !== undefined) updatedOrder.medio_pago = effectiveUpdates.medio_pago;
+        if (effectiveUpdates.turno_caja !== undefined) updatedOrder.turno_caja = effectiveUpdates.turno_caja;
         if (effectiveUpdates.motivo_cancelacion !== undefined) updatedOrder.motivo_cancelacion = effectiveUpdates.motivo_cancelacion;
         if (effectiveUpdates.con_envio !== undefined) {
           updatedOrder.con_envio = effectiveUpdates.con_envio;
@@ -2334,17 +2607,26 @@ export const db = {
     const total = parseFloat(order.total || 0);
     const orderRef = getOrderMovementRef(order.id);
 
-    const hasAnticipo = (estado, medio) => !isFinalizadoEstadoValue(estado) && hasPaymentMedio(medio) && !isMedioCtaCte(medio);
-
     const prevMedio = order.medio_pago || '';
     const nextMedio = updates.medio_pago !== undefined ? updates.medio_pago : prevMedio;
     const isPrevCtaCte = isMedioCtaCte(prevMedio);
     const isNextCtaCte = isMedioCtaCte(nextMedio);
 
-    const prevHadAnticipo = hasAnticipo(prevEstado, prevMedio);
-    const nextHadAnticipo = hasAnticipo(nextEstado, nextMedio);
+    const prevHadCredit = hasPreFinalizeCredit(prevEstado, prevMedio);
+    const nextHadCredit = hasPreFinalizeCredit(nextEstado, nextMedio);
     const prevFinalized = isFinalizadoEstadoValue(prevEstado);
     const nextFinalized = isFinalizadoEstadoValue(nextEstado);
+
+    let ccFlags = { hasPedido: false, hasCredit: false, hasCobro: false };
+    if (isSupabaseConfigured() && supabase) {
+      const { data: relatedMovements } = await supabase
+        .from('gst_cliente_movimientos')
+        .select('concepto, debe, haber')
+        .eq('business_id', businessId)
+        .eq('cliente_id', order.cliente_id)
+        .ilike('concepto', `%#${orderRef}%`);
+      ccFlags = buildOrderCCFlags(relatedMovements || [], orderRef);
+    }
 
     const adjustClientSaldo = async (delta) => {
       const { data: client } = await supabase
@@ -2374,71 +2656,62 @@ export const db = {
 
     // A. Cancel
     if (nextEstado === 'cancelado' && prevEstado !== 'cancelado') {
-      if (prevHadAnticipo) {
+      if (prevHadCredit) {
         await adjustClientSaldo(total);
-        await insertMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
+        await insertMovement(movementConcept.reversionCredito(orderRef), total, 0);
       } else if (prevFinalized) {
-        if (!isMedioCtaCte(prevMedio)) {
+        if (ccFlags.hasCobro) {
           await adjustClientSaldo(total);
-          await insertMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
+          await insertMovement(movementConcept.reversionCobro(orderRef), total, 0);
         }
         await adjustClientSaldo(-total);
-        const cancellationConcept = updates.motivo_cancelacion
-          ? `Cancelación Pedido #${orderRef} (Motivo: ${updates.motivo_cancelacion})`
-          : `Cancelación Pedido #${orderRef}`;
-        await insertMovement(cancellationConcept, 0, total);
+        await insertMovement(movementConcept.cancelacion(orderRef, updates.motivo_cancelacion), 0, total);
       }
       return;
     }
 
-    // B. Register anticipo (payment → Pagado)
-    if (nextHadAnticipo && !prevHadAnticipo) {
+    // B. Register pre-finalize payment as credit (no debt yet)
+    if (nextHadCredit && !prevHadCredit) {
       await adjustClientSaldo(-total);
-      await insertMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
+      await insertMovement(movementConcept.credito(orderRef, nextMedio), 0, total);
     }
 
-    // C. Reverse anticipo (leave Pagado without finalizing)
-    else if (prevHadAnticipo && !nextHadAnticipo && !nextFinalized) {
+    // C. Reverse credit before order is finalized
+    else if (prevHadCredit && !nextHadCredit && !nextFinalized) {
       await adjustClientSaldo(total);
-      await insertMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
+      await insertMovement(movementConcept.reversionCredito(orderRef), total, 0);
     }
 
-    // D. Finalize order
+    // D. Finalize order — charge debt; apply cobro only if there was no prior credit
     else if (nextFinalized && !prevFinalized) {
-      await adjustClientSaldo(total);
-      await insertMovement(`Pedido #${orderRef}`, total, 0);
+      if (!ccFlags.hasPedido) {
+        await adjustClientSaldo(total);
+        await insertMovement(movementConcept.pedido(orderRef), total, 0);
+      }
 
-      if (prevHadAnticipo) {
+      if (!ccFlags.hasCredit && hasPaymentMedio(nextMedio) && !isMedioCtaCte(nextMedio) && !ccFlags.hasCobro) {
         await adjustClientSaldo(-total);
-        await insertMovement(`Aplicación anticipo Pedido #${orderRef}`, 0, total);
-      } else if (hasPaymentMedio(nextMedio) && !isMedioCtaCte(nextMedio)) {
-        await adjustClientSaldo(-total);
-        await insertMovement(`Cobro Pedido #${orderRef} (${nextMedio})`, 0, total);
+        await insertMovement(movementConcept.cobro(orderRef, nextMedio), 0, total);
       }
     }
 
-    // E. Revert finalize
+    // E. Revert finalize — undo debt; undo cobro-at-finalize only (keep existing credit)
     else if (prevFinalized && !nextFinalized && nextEstado !== 'cancelado') {
       await adjustClientSaldo(-total);
-      await insertMovement(`Reversión Pedido #${orderRef}`, 0, total);
+      await insertMovement(movementConcept.reversionPedido(orderRef), 0, total);
 
-      if (!isMedioCtaCte(prevMedio) && hasPaymentMedio(prevMedio)) {
-        if (nextHadAnticipo) {
-          await adjustClientSaldo(-total);
-          await insertMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
-        } else {
-          await adjustClientSaldo(total);
-          await insertMovement(`Reversión Cobro Pedido #${orderRef}`, total, 0);
-        }
+      if (ccFlags.hasCobro) {
+        await adjustClientSaldo(total);
+        await insertMovement(movementConcept.reversionCobro(orderRef), total, 0);
       }
     }
 
-    // F. Change payment on Pagado (swap anticipo)
-    else if (prevHadAnticipo && nextHadAnticipo && prevMedio !== nextMedio) {
+    // F. Change payment before finalize (swap credit)
+    else if (prevHadCredit && nextHadCredit && prevMedio !== nextMedio) {
       await adjustClientSaldo(total);
-      await insertMovement(`Reversión anticipo Pedido #${orderRef}`, total, 0);
+      await insertMovement(movementConcept.reversionCredito(orderRef), total, 0);
       await adjustClientSaldo(-total);
-      await insertMovement(`Anticipo Pedido #${orderRef} (${nextMedio})`, 0, total);
+      await insertMovement(movementConcept.credito(orderRef, nextMedio), 0, total);
     }
 
     // G. Change payment on Finalizado
@@ -2451,7 +2724,7 @@ export const db = {
         await supabase.from('gst_cliente_movimientos').insert([{
           business_id: businessId,
           cliente_id: order.cliente_id,
-          concepto: `Cobro Pedido #${String(order.id).substring(0,6)} (${nextMedio})`,
+          concepto: movementConcept.cobro(orderRef, nextMedio),
           debe: 0.00,
           haber: order.total
         }]);
@@ -2463,7 +2736,7 @@ export const db = {
         await supabase.from('gst_cliente_movimientos').insert([{
           business_id: businessId,
           cliente_id: order.cliente_id,
-          concepto: `Reversión Cobro Pedido #${String(order.id).substring(0,6)}`,
+          concepto: movementConcept.reversionCobro(orderRef),
           debe: order.total,
           haber: 0.00
         }]);
@@ -3523,7 +3796,7 @@ export const db = {
   },
 
 
-  saveCierre: async (cierre, selectedGastoIds = [], selectedAdelantoIds = []) => {
+  saveCierre: async (cierre, selectedGastoIds = [], selectedAdelantoIds = [], selectedPedidoIds = []) => {
     const businessId = getBusinessId();
     const labelTurno = cierre.turno;
     const medioValues = cierre.medioValues || {};
@@ -3540,11 +3813,7 @@ export const db = {
     } else {
       dateObj = new Date();
     }
-    const day = String(dateObj.getDate()).padStart(2, '0');
-    const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-    const year = dateObj.getFullYear();
-    const shiftLetter = labelTurno && labelTurno.trim().length > 0 ? labelTurno.trim().charAt(0).toUpperCase() : "M";
-    const labelCaja = `Caja ${day}/${month}/${year} ${shiftLetter}`;
+    const labelCaja = buildCajaCierreLabel(cierre.fecha, labelTurno);
 
     const baseRow = {
       business_id: businessId,
@@ -3604,6 +3873,14 @@ export const db = {
             .eq('business_id', businessId);
         }
 
+        if (selectedPedidoIds.length > 0) {
+          await supabase
+            .from('gst_pedidos')
+            .update({ caja_cierre: labelCaja })
+            .in('id', selectedPedidoIds)
+            .eq('business_id', businessId);
+        }
+
         return { success: true };
       } catch (err) {
         console.warn("Supabase saveCierre failed:", err);
@@ -3649,6 +3926,15 @@ export const db = {
       localStorage.setItem('mock_empleado_movimientos', JSON.stringify(updated));
     }
 
+    if (selectedPedidoIds.length > 0) {
+      const storedPedidos = localStorage.getItem('mock_pedidos') || '[]';
+      const pedidos = JSON.parse(storedPedidos);
+      const updatedPedidos = pedidos.map((p) => (
+        selectedPedidoIds.includes(p.id) ? { ...p, caja_cierre: labelCaja } : p
+      ));
+      localStorage.setItem('mock_pedidos', JSON.stringify(updatedPedidos));
+    }
+
     await db.saveCierreMediosUsed(applyUsedMedioFlags(medios, medioValues));
 
     return { success: true };
@@ -3671,6 +3957,301 @@ export const db = {
     }
     const stored = localStorage.getItem('mock_cierres') || '[]';
     return JSON.parse(stored).sort((a,b) => new Date(b.fecha) - new Date(a.fecha));
+  },
+
+  // --- PRICE LISTS ---
+  _readMockPriceLists: () => {
+    const stored = localStorage.getItem('mock_listas_precios');
+    return stored ? JSON.parse(stored) : [];
+  },
+
+  _writeMockPriceLists: (lists) => {
+    localStorage.setItem('mock_listas_precios', JSON.stringify(lists));
+  },
+
+  _readMockPriceListItems: () => {
+    const stored = localStorage.getItem('mock_lista_precio_items');
+    return stored ? JSON.parse(stored) : [];
+  },
+
+  _writeMockPriceListItems: (items) => {
+    localStorage.setItem('mock_lista_precio_items', JSON.stringify(items));
+  },
+
+  ensureDefaultPriceLists: async () => {
+    const businessId = await ensureBusinessContext();
+    const names = [
+      { nombre: DEFAULT_PRICE_LIST_NAMES.normal, es_default: true, orden: 1 },
+      { nombre: DEFAULT_PRICE_LIST_NAMES.empresas, es_default: false, orden: 2 },
+      { nombre: DEFAULT_PRICE_LIST_NAMES.efectivo, es_default: false, orden: 3 },
+    ];
+
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { data: existing } = await supabase
+          .from('gst_listas_precios')
+          .select('*')
+          .eq('business_id', businessId)
+          .order('orden', { ascending: true });
+
+        const byName = Object.fromEntries((existing || []).map((l) => [l.nombre, l]));
+        const created = [];
+
+        for (const spec of names) {
+          if (byName[spec.nombre]) {
+            created.push(byName[spec.nombre]);
+            continue;
+          }
+          const { data, error } = await supabase
+            .from('gst_listas_precios')
+            .insert([{
+              business_id: businessId,
+              nombre: spec.nombre,
+              es_default: spec.es_default,
+              activa: true,
+              orden: spec.orden,
+            }])
+            .select()
+            .single();
+          if (error) throw error;
+          created.push(data);
+        }
+
+        const products = await db.getProducts();
+        const nonDefault = created.filter((l) => !l.es_default);
+        for (const lista of nonDefault) {
+          const rows = (products || []).map((p) => ({
+            business_id: businessId,
+            lista_id: lista.id,
+            producto_id: p.id,
+            precio: parseFloat(p.precio) || 0,
+          }));
+          if (rows.length === 0) continue;
+          const { error: upsertErr } = await supabase
+            .from('gst_lista_precio_items')
+            .upsert(rows, { onConflict: 'lista_id,producto_id' });
+          if (upsertErr) throw upsertErr;
+        }
+
+        return created.sort((a, b) => (a.orden || 0) - (b.orden || 0));
+      } catch (err) {
+        console.warn('ensureDefaultPriceLists Supabase error:', err);
+      }
+    }
+
+    let lists = db._readMockPriceLists().filter((l) => l.business_id === businessId);
+    if (lists.length === 0) {
+      lists = names.map((spec, idx) => ({
+        id: `pl_${businessId}_${idx + 1}`,
+        business_id: businessId,
+        ...spec,
+        activa: true,
+      }));
+      db._writeMockPriceLists(lists);
+    }
+
+    const products = await db.getProducts();
+    let items = db._readMockPriceListItems();
+    const nonDefault = lists.filter((l) => !l.es_default);
+    for (const lista of nonDefault) {
+      for (const p of products || []) {
+        const key = buildPriceListItemKey(lista.id, p.id);
+        if (!items.some((it) => buildPriceListItemKey(it.lista_id, it.producto_id) === key)) {
+          items.push({
+            id: `pli_${Date.now()}_${Math.random()}`,
+            business_id: businessId,
+            lista_id: lista.id,
+            producto_id: p.id,
+            precio: parseFloat(p.precio) || 0,
+          });
+        }
+      }
+    }
+    db._writeMockPriceListItems(items);
+    return lists.sort((a, b) => (a.orden || 0) - (b.orden || 0));
+  },
+
+  getPriceLists: async () => {
+    const businessId = await ensureBusinessContext();
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('gst_listas_precios')
+          .select('*')
+          .eq('business_id', businessId)
+          .eq('activa', true)
+          .order('orden', { ascending: true });
+        if (!error && data?.length) return data;
+        if (!error && data?.length === 0) return db.ensureDefaultPriceLists();
+      } catch (err) {
+        console.warn('getPriceLists Supabase error:', err);
+      }
+    }
+
+    let lists = db._readMockPriceLists().filter((l) => l.business_id === businessId && l.activa !== false);
+    if (lists.length === 0) {
+      lists = await db.ensureDefaultPriceLists();
+    }
+    return lists;
+  },
+
+  getPriceListItemsMap: async () => {
+    const businessId = await ensureBusinessContext();
+    const map = {};
+
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('gst_lista_precio_items')
+          .select('lista_id, producto_id, precio')
+          .eq('business_id', businessId);
+        if (!error && data) {
+          data.forEach((row) => {
+            map[buildPriceListItemKey(row.lista_id, row.producto_id)] = parseFloat(row.precio) || 0;
+          });
+          return map;
+        }
+      } catch (err) {
+        console.warn('getPriceListItemsMap Supabase error:', err);
+      }
+    }
+
+    db._readMockPriceListItems()
+      .filter((row) => row.business_id === businessId)
+      .forEach((row) => {
+        map[buildPriceListItemKey(row.lista_id, row.producto_id)] = parseFloat(row.precio) || 0;
+      });
+    return map;
+  },
+
+  syncProductPriceListItems: async (productId, precio) => {
+    const businessId = getBusinessId();
+    const lists = await db.getPriceLists();
+    const nonDefault = lists.filter((l) => !l.es_default);
+    const price = parseFloat(precio) || 0;
+
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const rows = nonDefault.map((lista) => ({
+          business_id: businessId,
+          lista_id: lista.id,
+          producto_id: productId,
+          precio: price,
+        }));
+        if (rows.length === 0) return { success: true };
+        const { error } = await supabase
+          .from('gst_lista_precio_items')
+          .upsert(rows, { onConflict: 'lista_id,producto_id' });
+        if (error) throw error;
+        return { success: true };
+      } catch (err) {
+        console.warn('syncProductPriceListItems Supabase error:', err);
+      }
+    }
+
+    let items = db._readMockPriceListItems();
+    for (const lista of nonDefault) {
+      const key = buildPriceListItemKey(lista.id, productId);
+      const idx = items.findIndex(
+        (it) => buildPriceListItemKey(it.lista_id, it.producto_id) === key
+      );
+      if (idx >= 0) {
+        items[idx] = { ...items[idx], precio: price };
+      } else {
+        items.push({
+          id: `pli_${Date.now()}_${Math.random()}`,
+          business_id: businessId,
+          lista_id: lista.id,
+          producto_id: productId,
+          precio: price,
+        });
+      }
+    }
+    db._writeMockPriceListItems(items);
+    return { success: true };
+  },
+
+  applyBulkProductListPrices: async ({
+    productIds,
+    listPrices,
+  }) => {
+    const businessId = getBusinessId();
+    const lists = await db.getPriceLists();
+    const defaultList = lists.find((l) => l.es_default) || lists[0];
+    const normalPrice = parseFloat(listPrices[defaultList?.id]) || 0;
+
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        for (const productId of productIds) {
+          const { error: prodErr } = await supabase
+            .from('gst_productos')
+            .update({ precio: normalPrice })
+            .eq('id', productId)
+            .eq('business_id', businessId);
+          if (prodErr) throw prodErr;
+        }
+
+        const rows = [];
+        for (const lista of lists) {
+          if (lista.es_default) continue;
+          const price = parseFloat(listPrices[lista.id]);
+          if (!Number.isFinite(price)) continue;
+          for (const productId of productIds) {
+            rows.push({
+              business_id: businessId,
+              lista_id: lista.id,
+              producto_id: productId,
+              precio: price,
+            });
+          }
+        }
+
+        if (rows.length > 0) {
+          const { error: itemErr } = await supabase
+            .from('gst_lista_precio_items')
+            .upsert(rows, { onConflict: 'lista_id,producto_id' });
+          if (itemErr) throw itemErr;
+        }
+
+        return { success: true, updated: productIds.length };
+      } catch (err) {
+        console.warn('applyBulkProductListPrices Supabase error:', err);
+        throw err;
+      }
+    }
+
+    const stored = localStorage.getItem('mock_productos');
+    let products = stored ? JSON.parse(stored) : [];
+    products = products.map((p) =>
+      productIds.includes(p.id) ? { ...p, precio: normalPrice } : p
+    );
+    localStorage.setItem('mock_productos', JSON.stringify(products));
+
+    let items = db._readMockPriceListItems();
+    for (const lista of lists) {
+      if (lista.es_default) continue;
+      const price = parseFloat(listPrices[lista.id]);
+      if (!Number.isFinite(price)) continue;
+      for (const productId of productIds) {
+        const key = buildPriceListItemKey(lista.id, productId);
+        const idx = items.findIndex(
+          (it) => buildPriceListItemKey(it.lista_id, it.producto_id) === key
+        );
+        if (idx >= 0) {
+          items[idx] = { ...items[idx], precio: price };
+        } else {
+          items.push({
+            id: `pli_${Date.now()}_${Math.random()}`,
+            business_id: businessId,
+            lista_id: lista.id,
+            producto_id: productId,
+            precio: price,
+          });
+        }
+      }
+    }
+    db._writeMockPriceListItems(items);
+    return { success: true, updated: productIds.length };
   },
 
   // --- PRODUCTS INVENTORY ---
@@ -3741,6 +4322,7 @@ export const db = {
             .select()
             .single();
           if (error) throw error;
+          await db.syncProductPriceListItems(data.id, insertData.precio);
           return { success: true, data };
         }
       } catch (err) {
@@ -3759,6 +4341,7 @@ export const db = {
       products.push(savedProduct);
     }
     localStorage.setItem('mock_productos', JSON.stringify(products));
+    await db.syncProductPriceListItems(savedProduct.id, savedProduct.precio);
     return { success: true, data: savedProduct };
   },
 
@@ -3846,25 +4429,32 @@ export const db = {
     return { success: true, updatedClients: clientes.length };
   },
 
-  syncCuentaCorrienteFromFinalizedOrders: async () => {
+  syncCuentaCorrienteFromFinalizedOrders: async (options = {}) => {
     const adminCheck = await requireBusinessAdmin();
     if (!adminCheck.ok) throw new Error(adminCheck.error);
 
     const businessId = await ensureBusinessContext();
-    let processed = 0;
-    let fixed = 0;
-    let alreadyOk = 0;
+    const { from, to, dayLabel } = options;
 
     if (isSupabaseConfigured() && supabase) {
+      await supabase
+        .from('gst_cliente_movimientos')
+        .delete()
+        .eq('business_id', businessId)
+        .ilike('concepto', 'Aplicación anticipo Pedido #%');
+
       const { data: orders, error: ordersErr } = await supabase
         .from('gst_pedidos')
         .select('*')
         .eq('business_id', businessId);
       if (ordersErr) throw ordersErr;
 
-      const finalizedOrders = (orders || []).filter(
+      let finalizedOrders = (orders || []).filter(
         (order) => isFinalizadoEstadoValue(order.estado) && !isCancelledEstadoValue(order.estado)
       );
+      if (from && to) {
+        finalizedOrders = finalizedOrders.filter((order) => isOrderWithinBounds(order, from, to));
+      }
 
       const { data: allMovements, error: movsErr } = await supabase
         .from('gst_cliente_movimientos')
@@ -3878,24 +4468,11 @@ export const db = {
         movementsByClient[mov.cliente_id].push(mov);
       }
 
-      for (const order of finalizedOrders) {
-        processed += 1;
-        const orderRef = getOrderMovementRef(order.id);
-        const clientMovements = movementsByClient[order.cliente_id] || [];
-        const relatedMovements = getOrderRelatedMovements(clientMovements, orderRef);
-
-        if (isFinalizedOrderCCComplete(order, relatedMovements)) {
-          alreadyOk += 1;
-          continue;
-        }
-
-        const inserts = buildMissingFinalizeMovements(order, relatedMovements);
-        if (!inserts.length) {
-          alreadyOk += 1;
-          continue;
-        }
-
-        for (const mov of inserts) {
+      const syncResult = await applyCuentaCorrienteSyncForOrders({
+        finalizedOrders,
+        businessId,
+        movementsByClient,
+        insertMovement: async (order, mov) => {
           const { error: insertErr } = await supabase.from('gst_cliente_movimientos').insert([{
             business_id: businessId,
             cliente_id: order.cliente_id,
@@ -3905,20 +4482,14 @@ export const db = {
             fecha: mov.fecha,
           }]);
           if (insertErr) throw insertErr;
-
-          if (!movementsByClient[order.cliente_id]) movementsByClient[order.cliente_id] = [];
-          movementsByClient[order.cliente_id].push(mov);
-        }
-
-        fixed += 1;
-      }
+        },
+      });
 
       const recalc = await db.recalculateClientSaldosFromMovements();
       return {
         success: true,
-        processed,
-        fixed,
-        alreadyOk,
+        day: dayLabel || null,
+        ...syncResult,
         updatedClients: recalc.updatedClients || 0,
       };
     }
@@ -3927,29 +4498,26 @@ export const db = {
     const storedMovs = localStorage.getItem('mock_movimientos');
     let orders = storedOrders ? JSON.parse(storedOrders) : [];
     let movements = storedMovs ? JSON.parse(storedMovs) : [];
+    movements = movements.filter((m) => !String(m.concepto || '').startsWith('Aplicación anticipo Pedido #'));
 
-    const finalizedOrders = orders.filter(
+    let finalizedOrders = orders.filter(
       (order) => isFinalizadoEstadoValue(order.estado) && !isCancelledEstadoValue(order.estado)
     );
+    if (from && to) {
+      finalizedOrders = finalizedOrders.filter((order) => isOrderWithinBounds(order, from, to));
+    }
 
-    for (const order of finalizedOrders) {
-      processed += 1;
-      const orderRef = getOrderMovementRef(order.id);
-      const clientMovements = movements.filter((m) => m.cliente_id === order.cliente_id);
-      const relatedMovements = getOrderRelatedMovements(clientMovements, orderRef);
+    const movementsByClient = {};
+    for (const mov of movements) {
+      if (!movementsByClient[mov.cliente_id]) movementsByClient[mov.cliente_id] = [];
+      movementsByClient[mov.cliente_id].push(mov);
+    }
 
-      if (isFinalizedOrderCCComplete(order, relatedMovements)) {
-        alreadyOk += 1;
-        continue;
-      }
-
-      const inserts = buildMissingFinalizeMovements(order, relatedMovements);
-      if (!inserts.length) {
-        alreadyOk += 1;
-        continue;
-      }
-
-      for (const mov of inserts) {
+    const syncResult = await applyCuentaCorrienteSyncForOrders({
+      finalizedOrders,
+      businessId,
+      movementsByClient,
+      insertMovement: async (order, mov) => {
         movements.push({
           id: `m_sync_${Date.now()}_${Math.random()}`,
           cliente_id: order.cliente_id,
@@ -3958,20 +4526,27 @@ export const db = {
           debe: mov.debe,
           haber: mov.haber,
         });
-      }
-      fixed += 1;
-    }
+      },
+    });
 
     localStorage.setItem('mock_movimientos', JSON.stringify(movements));
     const recalc = await db.recalculateClientSaldosFromMovements();
 
     return {
       success: true,
-      processed,
-      fixed,
-      alreadyOk,
+      day: dayLabel || null,
+      ...syncResult,
       updatedClients: recalc.updatedClients || 0,
     };
+  },
+
+  syncCuentaCorrienteForToday: async () => {
+    const { dayStr, startIso, endIso } = getArgentinaDayBounds();
+    return db.syncCuentaCorrienteFromFinalizedOrders({
+      from: startIso,
+      to: endIso,
+      dayLabel: dayStr,
+    });
   },
 
   clearAllPedidos: async () => {

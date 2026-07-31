@@ -43,7 +43,7 @@ function Employees() {
       const [e, p, c, rp] = await Promise.all([
         db.getEmpleados(),
         db.getProfiles(),
-        db.getCierreTurnos(),
+        db.getCierreTurnoNames(),
         db.getRolePermissions()
       ]);
       setEmployees(e || []);
