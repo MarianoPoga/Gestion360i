@@ -6,6 +6,7 @@ import { CSV_IMPORT_HELP, IMPORT_FIELDS, analyzeCsvImport, getColumnLabel, norma
 import { getMedioIcon } from '../cierreMedios'
 import {
   findRubroPriceSiblings,
+  formatPriceListShortLabel,
   getClientPriceListId,
   getDefaultPriceList,
   resolveProductPrice,
@@ -176,6 +177,13 @@ const getOrderCobroEstado = (order) => {
   if (!hasPaymentMedio(order.medio_pago)) return 'PENDIENTE';
   if (isMedioCtaCte(order.medio_pago)) return 'CTA CTE';
   return 'PAGADO';
+};
+
+const getOrderCobroLabel = (order) => {
+  const estado = getOrderCobroEstado(order);
+  if (!estado) return null;
+  if (estado === 'PENDIENTE') return 'PENDIENTE';
+  return String(order.medio_pago || estado).trim() || estado;
 };
 
 const COBRO_ESTADO_STYLES = {
@@ -1840,6 +1848,33 @@ function Clientes({ navigate, profile, accentColor }) {
     }
   };
 
+  const handleDeleteClient = async (client) => {
+    if (!window.confirm(`¿Seguro que deseas eliminar al cliente "${client.nombre}"? Se eliminarán también sus direcciones y movimientos de cuenta corriente.`)) {
+      return;
+    }
+    try {
+      const res = await db.deleteCliente(client.id);
+      if (res.success) {
+        const cl = await db.getClientes();
+        setClientes(cl);
+        if (selectedClient?.id === client.id) {
+          setSelectedClient(null);
+          setShowDrawer(false);
+          setMovements([]);
+        }
+        if (editingClient?.id === client.id) {
+          setEditClientModal(false);
+          setEditingClient(null);
+        }
+      } else {
+        alert(res.error || 'No se pudo eliminar el cliente.');
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Error de red al intentar eliminar el cliente.');
+    }
+  };
+
   const handleAddEditAddress = async (e) => {
     if (e) e.preventDefault();
     if (!newEditAddressText.trim()) return;
@@ -2817,8 +2852,8 @@ function Clientes({ navigate, profile, accentColor }) {
     } else if (orderSortField === 'estado') {
       comparison = getOrderShippingEstadoLower(a).localeCompare(getOrderShippingEstadoLower(b));
     } else if (orderSortField === 'detalles') {
-      const aDet = (a.direccion_envio || '') + (a.repartidor || '') + (a.medio_pago || '');
-      const bDet = (b.direccion_envio || '') + (b.repartidor || '') + (b.medio_pago || '');
+      const aDet = (a.repartidor || '') + (a.direccion_envio || '');
+      const bDet = (b.repartidor || '') + (b.direccion_envio || '');
       comparison = aDet.localeCompare(bDet);
     } else if (orderSortField === 'total') {
       comparison = parseFloat(a.total || 0) - parseFloat(b.total || 0);
@@ -4625,7 +4660,7 @@ function Clientes({ navigate, profile, accentColor }) {
                       style={{ padding: '12px', cursor: 'pointer', userSelect: 'none' }}
                       onClick={() => handleSortOrders('detalles')}
                     >
-                      Detalles / Reparto {orderSortField === 'detalles' && (orderSortAsc ? '▴' : '▾')}
+                      Repartidor / Detalles {orderSortField === 'detalles' && (orderSortAsc ? '▴' : '▾')}
                     </th>
                     <th 
                       style={{ padding: '12px', textAlign: 'right', cursor: 'pointer', userSelect: 'none' }}
@@ -4721,7 +4756,8 @@ function Clientes({ navigate, profile, accentColor }) {
                         <td style={{ padding: '12px', textAlign: 'center' }}>
                           {(() => {
                             const cobroEstado = getOrderCobroEstado(order);
-                            if (!cobroEstado) {
+                            const cobroLabel = getOrderCobroLabel(order);
+                            if (!cobroEstado || !cobroLabel) {
                               return <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>—</span>;
                             }
                             const cobroStyle = COBRO_ESTADO_STYLES[cobroEstado];
@@ -4735,29 +4771,28 @@ function Clientes({ navigate, profile, accentColor }) {
                                   fontWeight: '700',
                                   backgroundColor: cobroStyle.backgroundColor,
                                   color: cobroStyle.color,
-                                  textTransform: 'uppercase',
+                                  textTransform: cobroEstado === 'PENDIENTE' ? 'uppercase' : 'none',
+                                  maxWidth: '120px',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
                                 }}
-                                title={order.medio_pago || ''}
+                                title={cobroLabel}
                               >
-                                {cobroEstado}
+                                {cobroLabel}
                               </span>
                             );
                           })()}
                         </td>
                         <td style={{ padding: '12px', fontSize: '0.8rem' }}>
-                          {order.con_envio && order.direccion_envio && (
-                            <div className="text-truncate" style={{ maxWidth: '140px' }} title={cleanAddressText(order.direccion_envio)}>
-                              <strong>Dir:</strong> {cleanAddressText(order.direccion_envio)}
-                            </div>
-                          )}
                           {order.repartidor && (
-                            <div style={{ color: '#9a3412', fontWeight: '500' }}>
-                              <strong>Repartidor:</strong> {order.repartidor}
+                            <div style={{ color: '#9a3412', fontWeight: '600' }}>
+                              {order.repartidor}
                             </div>
                           )}
-                          {hasPaymentMedio(order.medio_pago) && (
-                            <div style={{ color: '#065f46', fontWeight: '500' }}>
-                              <strong>Pago:</strong> {order.medio_pago}
+                          {order.con_envio && order.direccion_envio && (
+                            <div className="text-truncate" style={{ maxWidth: '140px', color: 'var(--text-muted)' }} title={cleanAddressText(order.direccion_envio)}>
+                              {cleanAddressText(order.direccion_envio)}
                             </div>
                           )}
                           {order.cae && (
@@ -6640,6 +6675,15 @@ function Clientes({ navigate, profile, accentColor }) {
                             >
                               <i className="bi bi-pencil-fill"></i>
                             </button>
+                            <button
+                              type="button"
+                              className="btn-nav-back"
+                              style={{ padding: '4px 8px', minWidth: 'auto', border: '1px solid #fecaca', color: '#ef4444' }}
+                              onClick={() => handleDeleteClient(c)}
+                              title="Eliminar cliente"
+                            >
+                              <i className="bi bi-trash-fill"></i>
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -7199,8 +7243,9 @@ function Clientes({ navigate, profile, accentColor }) {
                     <th
                       key={lista.id}
                       style={{ padding: '12px 8px', fontSize: '0.75rem', fontWeight: 'bold', color: 'var(--text-muted)', textAlign: 'right' }}
+                      title={lista.nombre}
                     >
-                      {lista.nombre}
+                      {formatPriceListShortLabel(lista.nombre)}
                     </th>
                   ))}
                   <th 
@@ -7397,7 +7442,7 @@ function Clientes({ navigate, profile, accentColor }) {
       {/* ============================================================== */}
       {newProductModal && (
         <div className="modal-backdrop" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 1000 }}>
-          <div className="page-card" style={{ width: '95%', maxWidth: '520px', backgroundColor: '#ffffff', borderRadius: '16px', border: '1px solid var(--border-color)', boxShadow: 'var(--shadow-lg)', animation: 'slideUp 0.3s ease-out', position: 'relative', maxHeight: '90vh', overflowY: 'auto' }}>
+          <div className="page-card" style={{ width: '95%', maxWidth: '580px', backgroundColor: '#ffffff', borderRadius: '16px', border: '1px solid var(--border-color)', boxShadow: 'var(--shadow-lg)', animation: 'slideUp 0.3s ease-out', position: 'relative', maxHeight: '90vh', overflowY: 'auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px', marginBottom: '20px' }}>
               <h3 style={{ fontSize: '1.25rem', margin: 0, color: '#8b5cf6' }}>
                 {editingProduct ? 'Editar Producto' : 'Crear Nuevo Producto'}
@@ -7438,15 +7483,40 @@ function Clientes({ navigate, profile, accentColor }) {
 
               <div className="form-group mb-3">
                 <label className="form-label">Precios por lista</label>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px' }}>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                    gap: '12px',
+                    padding: '12px',
+                    backgroundColor: '#f8fafc',
+                    borderRadius: '10px',
+                    border: '1px solid var(--border-color)',
+                  }}
+                >
                   {priceLists.map((lista) => (
                     <div key={lista.id}>
-                      <label className="form-label" style={{ fontSize: '0.75rem', marginBottom: '4px' }}>
-                        {lista.nombre}
+                      <label
+                        className="form-label"
+                        style={{
+                          fontSize: '0.78rem',
+                          marginBottom: '4px',
+                          textTransform: 'none',
+                          letterSpacing: 0,
+                          fontWeight: 700,
+                          lineHeight: 1.2,
+                          minHeight: '2.4em',
+                          display: 'flex',
+                          alignItems: 'flex-end',
+                        }}
+                        title={lista.nombre}
+                      >
+                        {formatPriceListShortLabel(lista.nombre)}
                       </label>
                       <input
                         type="number"
                         className="form-input"
+                        style={{ margin: 0, padding: '8px 10px', fontSize: '0.9rem' }}
                         placeholder="0.00"
                         step="any"
                         min="0"

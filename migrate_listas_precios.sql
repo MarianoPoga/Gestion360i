@@ -56,13 +56,14 @@ CREATE POLICY gst_tenant_all ON public.gst_lista_precio_items
   WITH CHECK (business_id = public.gst_current_business_id());
 
 -- ---------------------------------------------------------------------------
--- 3. Seed: Lista Normal, Lista Empresas, Lista Efectivo (mismos precios base)
+-- 3. Seed: Lista Normal, Empresas por Producto, Empresas por Viandas, Lista Efectivo
 -- ---------------------------------------------------------------------------
 DO $$
 DECLARE
   biz record;
   lista_normal_id uuid;
-  lista_empresas_id uuid;
+  lista_empresas_producto_id uuid;
+  lista_empresas_viandas_id uuid;
   lista_efectivo_id uuid;
 BEGIN
   FOR biz IN SELECT id FROM public.gst_businesses LOOP
@@ -81,15 +82,31 @@ BEGIN
       WHERE id = lista_normal_id;
     END IF;
 
-    SELECT id INTO lista_empresas_id
+    SELECT id INTO lista_empresas_producto_id
     FROM public.gst_listas_precios
-    WHERE business_id = biz.id AND nombre = 'Lista Empresas'
+    WHERE business_id = biz.id AND nombre IN ('Empresas por Producto', 'Lista Empresas')
+    ORDER BY CASE WHEN nombre = 'Empresas por Producto' THEN 0 ELSE 1 END
     LIMIT 1;
 
-    IF lista_empresas_id IS NULL THEN
+    IF lista_empresas_producto_id IS NULL THEN
       INSERT INTO public.gst_listas_precios (business_id, nombre, es_default, activa, orden)
-      VALUES (biz.id, 'Lista Empresas', false, true, 2)
-      RETURNING id INTO lista_empresas_id;
+      VALUES (biz.id, 'Empresas por Producto', false, true, 2)
+      RETURNING id INTO lista_empresas_producto_id;
+    ELSE
+      UPDATE public.gst_listas_precios
+      SET nombre = 'Empresas por Producto', activa = true, orden = 2
+      WHERE id = lista_empresas_producto_id;
+    END IF;
+
+    SELECT id INTO lista_empresas_viandas_id
+    FROM public.gst_listas_precios
+    WHERE business_id = biz.id AND nombre = 'Empresas por Viandas'
+    LIMIT 1;
+
+    IF lista_empresas_viandas_id IS NULL THEN
+      INSERT INTO public.gst_listas_precios (business_id, nombre, es_default, activa, orden)
+      VALUES (biz.id, 'Empresas por Viandas', false, true, 3)
+      RETURNING id INTO lista_empresas_viandas_id;
     END IF;
 
     SELECT id INTO lista_efectivo_id
@@ -99,14 +116,24 @@ BEGIN
 
     IF lista_efectivo_id IS NULL THEN
       INSERT INTO public.gst_listas_precios (business_id, nombre, es_default, activa, orden)
-      VALUES (biz.id, 'Lista Efectivo', false, true, 3)
+      VALUES (biz.id, 'Lista Efectivo', false, true, 4)
       RETURNING id INTO lista_efectivo_id;
+    ELSE
+      UPDATE public.gst_listas_precios
+      SET activa = true, orden = 4
+      WHERE id = lista_efectivo_id;
     END IF;
 
     -- Lista Normal usa gst_productos.precio (sin filas en items).
-    -- Empresas y Efectivo: copiar precio base de cada producto.
+    -- Las demás: copiar precio base de cada producto.
     INSERT INTO public.gst_lista_precio_items (business_id, lista_id, producto_id, precio)
-    SELECT biz.id, lista_empresas_id, p.id, p.precio
+    SELECT biz.id, lista_empresas_producto_id, p.id, p.precio
+    FROM public.gst_productos p
+    WHERE p.business_id = biz.id
+    ON CONFLICT (lista_id, producto_id) DO UPDATE SET precio = EXCLUDED.precio;
+
+    INSERT INTO public.gst_lista_precio_items (business_id, lista_id, producto_id, precio)
+    SELECT biz.id, lista_empresas_viandas_id, p.id, p.precio
     FROM public.gst_productos p
     WHERE p.business_id = biz.id
     ON CONFLICT (lista_id, producto_id) DO UPDATE SET precio = EXCLUDED.precio;

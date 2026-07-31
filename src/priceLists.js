@@ -1,7 +1,24 @@
 export const DEFAULT_PRICE_LIST_NAMES = {
   normal: 'Lista Normal',
-  empresas: 'Lista Empresas',
+  empresas: 'Empresas por Producto',
+  viandas: 'Empresas por Viandas',
   efectivo: 'Lista Efectivo',
+};
+
+export const LEGACY_PRICE_LIST_NAMES = {
+  empresas: 'Lista Empresas',
+};
+
+export const formatPriceListShortLabel = (nombre) => {
+  const n = String(nombre || '').trim();
+  const labels = {
+    [DEFAULT_PRICE_LIST_NAMES.normal]: 'Normal',
+    [DEFAULT_PRICE_LIST_NAMES.empresas]: 'Emp. Producto',
+    [DEFAULT_PRICE_LIST_NAMES.viandas]: 'Emp. Viandas',
+    [DEFAULT_PRICE_LIST_NAMES.efectivo]: 'Efectivo',
+    [LEGACY_PRICE_LIST_NAMES.empresas]: 'Emp. Producto',
+  };
+  return labels[n] || n.replace(/^Lista\s+/i, '');
 };
 
 export const buildPriceListItemKey = (listaId, productoId) => `${listaId}:${productoId}`;

@@ -22,6 +22,7 @@ import {
 } from './expenseTypes'
 import {
   DEFAULT_PRICE_LIST_NAMES,
+  LEGACY_PRICE_LIST_NAMES,
   buildPriceListItemKey,
 } from './priceLists'
 import {
@@ -1646,6 +1647,54 @@ export const db = {
     });
     localStorage.setItem('mock_clientes', JSON.stringify(clientes));
     return { success: true, data: updatedCliente };
+  },
+
+  deleteCliente: async (id) => {
+    const businessId = getBusinessId();
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        const { error } = await supabase
+          .from('gst_clientes')
+          .delete()
+          .eq('id', id)
+          .eq('business_id', businessId);
+        if (error) throw error;
+        return { success: true };
+      } catch (err) {
+        console.warn("Supabase deleteCliente failed, falling back to mock:", err);
+        return { success: false, error: err.message || 'No se pudo eliminar el cliente.' };
+      }
+    }
+
+    const stored = localStorage.getItem('mock_clientes');
+    const clientes = stored ? JSON.parse(stored) : [];
+    if (!clientes.some((c) => c.id === id)) {
+      return { success: false, error: 'Cliente no encontrado' };
+    }
+
+    localStorage.setItem('mock_clientes', JSON.stringify(clientes.filter((c) => c.id !== id)));
+
+    const storedDirs = localStorage.getItem('mock_direcciones');
+    if (storedDirs) {
+      const direcciones = JSON.parse(storedDirs).filter((d) => d.cliente_id !== id);
+      localStorage.setItem('mock_direcciones', JSON.stringify(direcciones));
+    }
+
+    const storedMovs = localStorage.getItem('mock_movimientos');
+    if (storedMovs) {
+      const movements = JSON.parse(storedMovs).filter((m) => m.cliente_id !== id);
+      localStorage.setItem('mock_movimientos', JSON.stringify(movements));
+    }
+
+    const storedPedidos = localStorage.getItem('mock_pedidos');
+    if (storedPedidos) {
+      const pedidos = JSON.parse(storedPedidos).map((p) =>
+        p.cliente_id === id ? { ...p, cliente_id: null } : p
+      );
+      localStorage.setItem('mock_pedidos', JSON.stringify(pedidos));
+    }
+
+    return { success: true };
   },
 
   getDirecciones: async (clienteId) => {
@@ -3981,10 +4030,70 @@ export const db = {
   ensureDefaultPriceLists: async () => {
     const businessId = await ensureBusinessContext();
     const names = [
-      { nombre: DEFAULT_PRICE_LIST_NAMES.normal, es_default: true, orden: 1 },
-      { nombre: DEFAULT_PRICE_LIST_NAMES.empresas, es_default: false, orden: 2 },
-      { nombre: DEFAULT_PRICE_LIST_NAMES.efectivo, es_default: false, orden: 3 },
+      { nombre: DEFAULT_PRICE_LIST_NAMES.normal, es_default: true, orden: 1, legacyNames: [] },
+      { nombre: DEFAULT_PRICE_LIST_NAMES.empresas, es_default: false, orden: 2, legacyNames: [LEGACY_PRICE_LIST_NAMES.empresas] },
+      { nombre: DEFAULT_PRICE_LIST_NAMES.viandas, es_default: false, orden: 3, legacyNames: [] },
+      { nombre: DEFAULT_PRICE_LIST_NAMES.efectivo, es_default: false, orden: 4, legacyNames: [] },
     ];
+
+    const seedNonDefaultListItems = async (lists) => {
+      const products = await db.getProducts();
+      const nonDefault = lists.filter((l) => !l.es_default);
+      if (nonDefault.length === 0) return;
+
+      if (isSupabaseConfigured() && supabase) {
+        const listaIds = nonDefault.map((l) => l.id);
+        const { data: existingItems, error: fetchErr } = await supabase
+          .from('gst_lista_precio_items')
+          .select('lista_id, producto_id')
+          .eq('business_id', businessId)
+          .in('lista_id', listaIds);
+        if (fetchErr) throw fetchErr;
+
+        const existingKeys = new Set(
+          (existingItems || []).map((row) => buildPriceListItemKey(row.lista_id, row.producto_id))
+        );
+
+        const rowsToInsert = [];
+        for (const lista of nonDefault) {
+          for (const p of products || []) {
+            const key = buildPriceListItemKey(lista.id, p.id);
+            if (existingKeys.has(key)) continue;
+            rowsToInsert.push({
+              business_id: businessId,
+              lista_id: lista.id,
+              producto_id: p.id,
+              precio: parseFloat(p.precio) || 0,
+            });
+          }
+        }
+
+        if (rowsToInsert.length > 0) {
+          const { error: insertErr } = await supabase
+            .from('gst_lista_precio_items')
+            .insert(rowsToInsert);
+          if (insertErr) throw insertErr;
+        }
+        return;
+      }
+
+      let items = db._readMockPriceListItems();
+      for (const lista of nonDefault) {
+        for (const p of products || []) {
+          const key = buildPriceListItemKey(lista.id, p.id);
+          if (!items.some((it) => buildPriceListItemKey(it.lista_id, it.producto_id) === key)) {
+            items.push({
+              id: `pli_${Date.now()}_${Math.random()}`,
+              business_id: businessId,
+              lista_id: lista.id,
+              producto_id: p.id,
+              precio: parseFloat(p.precio) || 0,
+            });
+          }
+        }
+      }
+      db._writeMockPriceListItems(items);
+    };
 
     if (isSupabaseConfigured() && supabase) {
       try {
@@ -3995,13 +4104,47 @@ export const db = {
           .order('orden', { ascending: true });
 
         const byName = Object.fromEntries((existing || []).map((l) => [l.nombre, l]));
-        const created = [];
+        const resolved = [];
 
         for (const spec of names) {
           if (byName[spec.nombre]) {
-            created.push(byName[spec.nombre]);
+            const current = byName[spec.nombre];
+            if (current.orden !== spec.orden || current.es_default !== spec.es_default) {
+              const { data, error } = await supabase
+                .from('gst_listas_precios')
+                .update({ orden: spec.orden, es_default: spec.es_default, activa: true })
+                .eq('id', current.id)
+                .select()
+                .single();
+              if (error) throw error;
+              resolved.push(data);
+              byName[spec.nombre] = data;
+            } else {
+              resolved.push(current);
+            }
             continue;
           }
+
+          const legacyName = (spec.legacyNames || []).find((legacy) => byName[legacy]);
+          if (legacyName) {
+            const { data, error } = await supabase
+              .from('gst_listas_precios')
+              .update({
+                nombre: spec.nombre,
+                orden: spec.orden,
+                es_default: spec.es_default,
+                activa: true,
+              })
+              .eq('id', byName[legacyName].id)
+              .select()
+              .single();
+            if (error) throw error;
+            delete byName[legacyName];
+            byName[spec.nombre] = data;
+            resolved.push(data);
+            continue;
+          }
+
           const { data, error } = await supabase
             .from('gst_listas_precios')
             .insert([{
@@ -4014,61 +4157,72 @@ export const db = {
             .select()
             .single();
           if (error) throw error;
-          created.push(data);
+          byName[spec.nombre] = data;
+          resolved.push(data);
         }
 
-        const products = await db.getProducts();
-        const nonDefault = created.filter((l) => !l.es_default);
-        for (const lista of nonDefault) {
-          const rows = (products || []).map((p) => ({
-            business_id: businessId,
-            lista_id: lista.id,
-            producto_id: p.id,
-            precio: parseFloat(p.precio) || 0,
-          }));
-          if (rows.length === 0) continue;
-          const { error: upsertErr } = await supabase
-            .from('gst_lista_precio_items')
-            .upsert(rows, { onConflict: 'lista_id,producto_id' });
-          if (upsertErr) throw upsertErr;
-        }
-
-        return created.sort((a, b) => (a.orden || 0) - (b.orden || 0));
+        const sorted = resolved.sort((a, b) => (a.orden || 0) - (b.orden || 0));
+        await seedNonDefaultListItems(sorted);
+        return sorted;
       } catch (err) {
         console.warn('ensureDefaultPriceLists Supabase error:', err);
       }
     }
 
-    let lists = db._readMockPriceLists().filter((l) => l.business_id === businessId);
-    if (lists.length === 0) {
-      lists = names.map((spec, idx) => ({
-        id: `pl_${businessId}_${idx + 1}`,
+    let allLists = db._readMockPriceLists();
+    let lists = allLists.filter((l) => l.business_id === businessId);
+    const byName = Object.fromEntries(lists.map((l) => [l.nombre, l]));
+    const resolved = [];
+
+    for (const spec of names) {
+      if (byName[spec.nombre]) {
+        const current = byName[spec.nombre];
+        current.orden = spec.orden;
+        current.es_default = spec.es_default;
+        current.activa = true;
+        resolved.push(current);
+        continue;
+      }
+
+      const legacyName = (spec.legacyNames || []).find((legacy) => byName[legacy]);
+      if (legacyName) {
+        const current = byName[legacyName];
+        current.nombre = spec.nombre;
+        current.orden = spec.orden;
+        current.es_default = spec.es_default;
+        current.activa = true;
+        delete byName[legacyName];
+        byName[spec.nombre] = current;
+        resolved.push(current);
+        continue;
+      }
+
+      const created = {
+        id: `pl_${businessId}_${spec.orden}`,
         business_id: businessId,
-        ...spec,
+        nombre: spec.nombre,
+        es_default: spec.es_default,
         activa: true,
-      }));
-      db._writeMockPriceLists(lists);
+        orden: spec.orden,
+      };
+      lists.push(created);
+      allLists.push(created);
+      byName[spec.nombre] = created;
+      resolved.push(created);
     }
 
-    const products = await db.getProducts();
-    let items = db._readMockPriceListItems();
-    const nonDefault = lists.filter((l) => !l.es_default);
-    for (const lista of nonDefault) {
-      for (const p of products || []) {
-        const key = buildPriceListItemKey(lista.id, p.id);
-        if (!items.some((it) => buildPriceListItemKey(it.lista_id, it.producto_id) === key)) {
-          items.push({
-            id: `pli_${Date.now()}_${Math.random()}`,
-            business_id: businessId,
-            lista_id: lista.id,
-            producto_id: p.id,
-            precio: parseFloat(p.precio) || 0,
-          });
-        }
-      }
-    }
-    db._writeMockPriceListItems(items);
-    return lists.sort((a, b) => (a.orden || 0) - (b.orden || 0));
+    db._writeMockPriceLists(allLists);
+    const sorted = resolved.sort((a, b) => (a.orden || 0) - (b.orden || 0));
+    await seedNonDefaultListItems(sorted);
+    return sorted;
+  },
+
+  needsPriceListSetup: (lists) => {
+    const expected = Object.values(DEFAULT_PRICE_LIST_NAMES);
+    const names = new Set((lists || []).map((list) => list.nombre));
+    if ((lists || []).length === 0) return true;
+    if (names.has(LEGACY_PRICE_LIST_NAMES.empresas)) return true;
+    return expected.some((name) => !names.has(name));
   },
 
   getPriceLists: async () => {
@@ -4081,18 +4235,24 @@ export const db = {
           .eq('business_id', businessId)
           .eq('activa', true)
           .order('orden', { ascending: true });
-        if (!error && data?.length) return data;
-        if (!error && data?.length === 0) return db.ensureDefaultPriceLists();
+        if (!error) {
+          if (db.needsPriceListSetup(data)) {
+            return db.ensureDefaultPriceLists();
+          }
+          return data;
+        }
       } catch (err) {
         console.warn('getPriceLists Supabase error:', err);
       }
     }
 
-    let lists = db._readMockPriceLists().filter((l) => l.business_id === businessId && l.activa !== false);
-    if (lists.length === 0) {
-      lists = await db.ensureDefaultPriceLists();
+    let lists = db._readMockPriceLists().filter(
+      (list) => list.business_id === businessId && list.activa !== false
+    );
+    if (db.needsPriceListSetup(lists)) {
+      return db.ensureDefaultPriceLists();
     }
-    return lists;
+    return lists.sort((a, b) => (a.orden || 0) - (b.orden || 0));
   },
 
   getPriceListItemsMap: async () => {
@@ -4341,7 +4501,9 @@ export const db = {
       products.push(savedProduct);
     }
     localStorage.setItem('mock_productos', JSON.stringify(products));
-    await db.syncProductPriceListItems(savedProduct.id, savedProduct.precio);
+    if (!product.id) {
+      await db.syncProductPriceListItems(savedProduct.id, savedProduct.precio);
+    }
     return { success: true, data: savedProduct };
   },
 
