@@ -124,26 +124,71 @@ function Cierre({ navigate, navState, accentColor }) {
       ]);
 
       setTurnosDisponibles(activeTurnos);
-      if (activeTurnos.length > 0 && !activeTurnos.includes(turno)) {
+      const prefillTurno = navState?.cierrePrefill?.turno;
+      if (
+        activeTurnos.length > 0
+        && !activeTurnos.includes(turno)
+        && !prefillTurno
+      ) {
         setTurno(activeTurnos[0]);
       }
       setCierreConceptos(activeConcepts);
       setFormasPago(activeFormas || []);
-      
-      const initialMedios = {};
-      getActiveMedios(activeConcepts).forEach((medio) => {
-        initialMedios[medio.id] = 0;
-      });
-      setMedioValues(initialMedios);
     };
 
     loadConfig();
 
     const adelantosConfig = JSON.parse(localStorage.getItem('adelantos_config') || '{"allow_mercaderia":true,"allow_dinero":true,"allow_adelantos":true}');
     setConfig(adelantosConfig);
-    
-    loadData();
   }, []);
+
+  const buildMedioValuesFromData = (concepts, pedidos, prefill) => {
+    const next = {};
+    getActiveMedios(concepts).forEach((medio) => {
+      next[medio.id] = 0;
+    });
+
+    const pedidosSource = prefill?.pedidos?.length ? prefill.pedidos : (pedidos || []);
+
+    if (prefill?.fromPedidosTipo) {
+      const importedMedios = db.aggregatePedidosForCierre(pedidosSource, concepts);
+      getActiveMedios(concepts).forEach((medio) => {
+        next[medio.id] = importedMedios[medio.id] || 0;
+      });
+
+      const prefillTotal = Object.values(prefill?.medioValues || {}).reduce(
+        (sum, value) => sum + (parseFloat(value) || 0),
+        0
+      );
+      if (prefillTotal > 0) {
+        Object.entries(prefill.medioValues).forEach(([id, value]) => {
+          if (next[id] !== undefined) next[id] = parseFloat(value) || 0;
+        });
+      }
+      return next;
+    }
+
+    const importedMedios = db.aggregatePedidosForCierre(pedidosSource, concepts);
+    getActiveMedios(concepts).forEach((medio) => {
+      next[medio.id] = importedMedios[medio.id] || 0;
+    });
+
+    if (prefill?.medioValues) {
+      Object.entries(prefill.medioValues).forEach(([id, value]) => {
+        if (next[id] !== undefined) next[id] = parseFloat(value) || 0;
+      });
+    }
+
+    return next;
+  };
+
+  useEffect(() => {
+    const prefill = navState?.cierrePrefill;
+    if (!prefill?.fromPedidosTipo || !cierreConceptos.length) return;
+
+    setPendingPedidos(prefill.pedidos || []);
+    setMedioValues(buildMedioValuesFromData(cierreConceptos, prefill.pedidos || [], prefill));
+  }, [navState, cierreConceptos]);
 
   const getMedioValue = (id) => medioValues[id] || 0;
 
@@ -217,6 +262,8 @@ function Cierre({ navigate, navState, accentColor }) {
 
   // Auto-select first available unclosed shift when date or closures list change
   useEffect(() => {
+    if (prefillFromPedidos || navState?.cierrePrefill?.turno) return;
+
     const closed = ultimosCierres
       .filter(c => isSameLocalDate(c.fecha, fecha))
       .map(c => c.turno);
@@ -232,7 +279,7 @@ function Cierre({ navigate, navState, accentColor }) {
     } else {
       setTurno('');
     }
-  }, [fecha, ultimosCierres, turnosDisponibles]);
+  }, [fecha, ultimosCierres, turnosDisponibles, prefillFromPedidos, navState]);
 
   // Load datasets on mount or when fecha/turno changes
   useEffect(() => {
@@ -242,13 +289,19 @@ function Cierre({ navigate, navState, accentColor }) {
   const loadData = async () => {
     setLoadingLists(true);
     try {
+      const prefill = navState?.cierrePrefill;
+      const prefillTipo = prefill?.fromPedidosTipo || null;
       const [compras, adelantos, emps, cierres, concepts, pedidos] = await Promise.all([
         db.getPendingCompras(),
         db.getPendingAdelantos(),
         db.getEmpleados(),
         db.getUltimosCierres(),
         db.getCierreConceptos(),
-        turno ? db.getPendingPedidosForCierre(fecha, turno) : Promise.resolve([]),
+        prefill?.pedidos?.length
+          ? Promise.resolve(prefill.pedidos)
+          : (turno
+            ? db.getPendingPedidosForCierre(fecha, turno, prefillTipo)
+            : Promise.resolve([])),
       ]);
       setPendingCompras(compras);
       setPendingAdelantos(adelantos);
@@ -258,19 +311,7 @@ function Cierre({ navigate, navState, accentColor }) {
       setUltimosCierres(cierres);
       setCierreConceptos(concepts);
 
-      const importedMedios = db.aggregatePedidosForCierre(pedidos || [], concepts);
-      setMedioValues(() => {
-        const next = {};
-        getActiveMedios(concepts).forEach((medio) => {
-          next[medio.id] = importedMedios[medio.id] || 0;
-        });
-        if (navState?.cierrePrefill?.medioValues) {
-          Object.entries(navState.cierrePrefill.medioValues).forEach(([id, value]) => {
-            if (next[id] !== undefined) next[id] = value;
-          });
-        }
-        return next;
-      });
+      setMedioValues(buildMedioValuesFromData(concepts, pedidos, prefill));
 
       if (empNames.length > 0) {
         setNewMercEmpleado(empNames[0]);

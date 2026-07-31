@@ -28,6 +28,7 @@ import {
   countNonFinalizedOrdersForCaja,
   getDeliveryOpenBlockReason,
   getOpenCajaName,
+  getPedidosForCierre,
   getTodayOrdersForCaja,
   openCaja,
   resolveCajaForNewPedido,
@@ -956,6 +957,7 @@ function Clientes({ navigate, profile, accentColor }) {
   const [successMsg, setSuccessMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [loadingSubmit, setLoadingSubmit] = useState(false);
+  const [syncingCcToday, setSyncingCcToday] = useState(false);
 
   // Refs for clicking outside autocomplete lists
   const clientRef = useRef(null);
@@ -1395,9 +1397,21 @@ function Clientes({ navigate, profile, accentColor }) {
     }
   };
 
-  const handleOpenDrawer = () => {
+  const handleOpenDrawer = async () => {
     setShowDrawer(true);
-    loadClientMovements();
+    setLoadingMovements(true);
+    try {
+      if (selectedClient?.id) {
+        await db.syncCuentaCorrienteForClient(selectedClient.id);
+        const cl = await db.getClientes();
+        setClientes(cl);
+        const updated = cl.find((c) => c.id === selectedClient.id);
+        if (updated) setSelectedClient(updated);
+      }
+    } catch (err) {
+      console.warn('syncCuentaCorrienteForClient failed:', err);
+    }
+    await loadClientMovements();
   };
 
   const handleClearClienteMovimientos = async () => {
@@ -2851,6 +2865,8 @@ function Clientes({ navigate, profile, accentColor }) {
       comparison = aTipo.localeCompare(bTipo);
     } else if (orderSortField === 'estado') {
       comparison = getOrderShippingEstadoLower(a).localeCompare(getOrderShippingEstadoLower(b));
+    } else if (orderSortField === 'cobro') {
+      comparison = (getOrderCobroLabel(a) || '').localeCompare(getOrderCobroLabel(b) || '', 'es', { sensitivity: 'base' });
     } else if (orderSortField === 'detalles') {
       const aDet = (a.repartidor || '') + (a.direccion_envio || '');
       const bDet = (b.repartidor || '') + (b.direccion_envio || '');
@@ -2980,14 +2996,26 @@ function Clientes({ navigate, profile, accentColor }) {
 
     const fecha = getTodayLocalDateString();
     let medioValues = null;
+    let pedidosForCierre = getPedidosForCierre(orders, tipo, turnoName);
     try {
-      const [concepts, pedidos] = await Promise.all([
+      const [concepts, dbPedidos] = await Promise.all([
         db.getCierreConceptos(),
-        db.getPendingPedidosForCierre(fecha, turnoName),
+        db.getPendingPedidosForCierre(fecha, turnoName, tipo),
       ]);
-      medioValues = db.aggregatePedidosForCierre(pedidos || [], concepts || []);
+      if ((dbPedidos || []).length > 0) {
+        pedidosForCierre = dbPedidos;
+      }
+      medioValues = db.aggregatePedidosForCierre(pedidosForCierre || [], concepts || []);
     } catch (err) {
       console.error('Error preparing cierre prefill:', err);
+      if (!medioValues && pedidosForCierre.length > 0) {
+        try {
+          const concepts = await db.getCierreConceptos();
+          medioValues = db.aggregatePedidosForCierre(pedidosForCierre, concepts || []);
+        } catch (fallbackErr) {
+          console.error('Error preparing cierre prefill fallback:', fallbackErr);
+        }
+      }
     }
 
     if (navigate) {
@@ -2997,6 +3025,7 @@ function Clientes({ navigate, profile, accentColor }) {
           turno: turnoName,
           fromPedidosTipo: tipo,
           medioValues,
+          pedidos: pedidosForCierre,
         },
       });
     }
@@ -3166,6 +3195,52 @@ function Clientes({ navigate, profile, accentColor }) {
       cobroCajaOverride,
     });
 
+  const getSelectedOrdersDayStr = () => {
+    if (dateFilter === 'custom' && customDate) return customDate;
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, '0');
+    const day = String(today.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const syncCuentaCorrientePedidosDelDia = async (dayStr) => {
+    try {
+      const result = await db.syncCuentaCorrienteForDay(dayStr);
+      if ((result?.fixed || 0) > 0) {
+        const cl = await db.getClientes();
+        setClientes(cl);
+      }
+      return result;
+    } catch (err) {
+      console.warn('syncCuentaCorrienteForDay failed:', err);
+      return null;
+    }
+  };
+
+  const handleSyncCcToday = async () => {
+    const dayStr = getSelectedOrdersDayStr();
+    const dayLabel = getHoyButtonLabel();
+    setSyncingCcToday(true);
+    try {
+      const result = await syncCuentaCorrientePedidosDelDia(dayStr);
+      if (!result) {
+        alert('No se pudo sincronizar la cuenta corriente.');
+        return;
+      }
+      const fixed = result.fixed || 0;
+      const processed = result.processed || 0;
+      alert(
+        fixed > 0
+          ? `CC sincronizada (${dayLabel}): ${fixed} pedido(s) corregido(s) de ${processed} revisados.`
+          : `CC al día (${dayLabel}): ${processed} pedido(s) finalizados revisados, sin movimientos faltantes.`
+      );
+      await loadOrders();
+    } finally {
+      setSyncingCcToday(false);
+    }
+  };
+
   const applyBulkStatus = async (updates) => {
     setLoadingSubmit(true);
     try {
@@ -3192,6 +3267,9 @@ function Clientes({ navigate, profile, accentColor }) {
       const res = await db.updatePedidosStatus(selectedOrderIds, enrichedUpdates);
       if (res.success) {
         setSelectedOrderIds([]);
+        if (isFinalize) {
+          await syncCuentaCorrientePedidosDelDia(getSelectedOrdersDayStr());
+        }
         loadOrders(); // Reload orders list
         
         // Reload client lists to update balances globally
@@ -3265,6 +3343,7 @@ function Clientes({ navigate, profile, accentColor }) {
       }
       
       setSelectedOrderIds([]);
+      await syncCuentaCorrientePedidosDelDia(getSelectedOrdersDayStr());
       await loadOrders();
 
       const cl = await db.getClientes();
@@ -4107,6 +4186,28 @@ function Clientes({ navigate, profile, accentColor }) {
                 >
                   <i className="bi bi-calendar-event me-1"></i> {getHoyButtonLabel()} ({getHoyButtonCount()})
                 </button>
+                {(dateFilter === 'today' || dateFilter === 'custom') && (
+                  <button
+                    type="button"
+                    className="btn-new-task"
+                    style={{
+                      backgroundColor: 'white',
+                      color: '#0f766e',
+                      border: '1px solid #99f6e4',
+                      padding: '6px 12px',
+                      fontSize: '0.8rem',
+                    }}
+                    disabled={syncingCcToday}
+                    onClick={handleSyncCcToday}
+                    title="Revisa pedidos finalizados del día seleccionado y agrega cobros faltantes en cuenta corriente"
+                  >
+                    {syncingCcToday ? (
+                      <><span className="spinner-border spinner-border-sm me-1" role="status"></span> Sincronizando…</>
+                    ) : (
+                      <><i className="bi bi-arrow-repeat me-1"></i> Revisar CC del día</>
+                    )}
+                  </button>
+                )}
                 <input 
                   type="date"
                   ref={dateInputRef}
@@ -4653,8 +4754,11 @@ function Clientes({ navigate, profile, accentColor }) {
                         Envío {orderSortField === 'estado' && (orderSortAsc ? '▴' : '▾')}
                       </th>
                     )}
-                    <th style={{ padding: '12px', textAlign: 'center' }}>
-                      Cobro
+                    <th
+                      style={{ padding: '12px', textAlign: 'center', cursor: 'pointer', userSelect: 'none' }}
+                      onClick={() => handleSortOrders('cobro')}
+                    >
+                      Cobro {orderSortField === 'cobro' && (orderSortAsc ? '▴' : '▾')}
                     </th>
                     <th 
                       style={{ padding: '12px', cursor: 'pointer', userSelect: 'none' }}

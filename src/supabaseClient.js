@@ -93,6 +93,14 @@ const isMedioCtaCte = (medio) => {
     || normalized === 'cuenta corriente';
 };
 
+const isMedioPagadoEnCaja = (medio) => {
+  const normalized = String(medio || '').trim().toLowerCase();
+  return normalized === 'pagado en caja' || normalized === 'cobro en caja';
+};
+
+const isPaidMedioForOrder = (medio) =>
+  hasPaymentMedio(medio) && !isMedioCtaCte(medio);
+
 const getOrderMovementRef = (orderId) => String(orderId).substring(0, 6);
 
 const movementConcept = {
@@ -133,7 +141,9 @@ const isCancelledEstadoValue = (estado) => {
 };
 
 const hasPreFinalizeCredit = (estado, medio) =>
-  !isFinalizadoEstadoValue(estado) && hasPaymentMedio(medio) && !isMedioCtaCte(medio);
+  !isFinalizadoEstadoValue(estado)
+  && isPaidMedioForOrder(medio)
+  && !isMedioPagadoEnCaja(medio);
 
 const buildOrderCCFlags = (movements, orderRef) => ({
   hasPedido: (movements || []).some((m) => isPedidoDeudaConcept(m.concepto) && m.concepto.includes(`#${orderRef}`)),
@@ -147,21 +157,17 @@ const getOrderRelatedMovements = (movements, orderRef) =>
 const isFinalizedOrderCCComplete = (order, relatedMovements) => {
   const orderRef = getOrderMovementRef(order.id);
   const medio = order.medio_pago || '';
-  const hasMedio = hasPaymentMedio(medio);
-  const isCtaCte = isMedioCtaCte(medio);
   const ccFlags = buildOrderCCFlags(relatedMovements, orderRef);
 
   if (!ccFlags.hasPedido) return false;
-  if (ccFlags.hasCredit || isCtaCte || !hasMedio) return true;
-  return ccFlags.hasCobro;
+  if (isMedioCtaCte(medio) || !isPaidMedioForOrder(medio)) return true;
+  return ccFlags.hasCobro || ccFlags.hasCredit;
 };
 
 const buildMissingFinalizeMovements = (order, relatedMovements) => {
   const orderRef = getOrderMovementRef(order.id);
   const total = parseFloat(order.total || 0);
   const medio = order.medio_pago || '';
-  const hasMedio = hasPaymentMedio(medio);
-  const isCtaCte = isMedioCtaCte(medio);
   const fecha = order.fecha || order.created_at || new Date().toISOString();
   const ccFlags = buildOrderCCFlags(relatedMovements, orderRef);
 
@@ -170,7 +176,7 @@ const buildMissingFinalizeMovements = (order, relatedMovements) => {
   if (!ccFlags.hasPedido) {
     inserts.push({ concepto: movementConcept.pedido(orderRef), debe: total, haber: 0, fecha });
   }
-  if (!ccFlags.hasCredit && hasMedio && !isCtaCte && !ccFlags.hasCobro) {
+  if (!ccFlags.hasCredit && isPaidMedioForOrder(medio) && !ccFlags.hasCobro) {
     inserts.push({ concepto: movementConcept.cobro(orderRef, medio), debe: 0, haber: total, fecha });
   }
 
@@ -178,13 +184,18 @@ const buildMissingFinalizeMovements = (order, relatedMovements) => {
 };
 
 const getArgentinaDayBounds = (dateInput) => {
-  const date = dateInput ? new Date(dateInput) : new Date();
-  const dayStr = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Argentina/Buenos_Aires',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(date);
+  let dayStr;
+  if (typeof dateInput === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateInput.trim())) {
+    dayStr = dateInput.trim();
+  } else {
+    const date = dateInput ? new Date(dateInput) : new Date();
+    dayStr = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Argentina/Buenos_Aires',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date);
+  }
   const startUtc = new Date(`${dayStr}T03:00:00.000Z`);
   const endUtc = new Date(startUtc);
   endUtc.setUTCDate(endUtc.getUTCDate() + 1);
@@ -2286,12 +2297,24 @@ export const db = {
     });
   },
 
-  getPendingPedidosForCierre: async (fechaLocal, turnoName) => {
+  getPendingPedidosForCierre: async (fechaLocal, turnoName, pedidoTipo = null) => {
     const businessId = getBusinessId();
     const turno = String(turnoName || '').trim();
     if (!fechaLocal || !turno) return [];
 
     const { startIso, endIso } = getArgentinaDayBounds(fechaLocal);
+
+    const mapPedidoRow = (p) => ({
+      ...p,
+      cliente_nombre: p.gst_clientes?.nombre || p.cliente_nombre || 'Cliente',
+    });
+
+    const matchesCierreTurno = (p) => {
+      const caja = String(p.turno_caja || '').trim();
+      if (caja) return caja === turno;
+      if (!pedidoTipo) return true;
+      return pedidoTipo === 'delivery' ? p.con_envio === true : p.con_envio !== true;
+    };
 
     if (isSupabaseConfigured() && supabase) {
       try {
@@ -2299,7 +2322,6 @@ export const db = {
           .from('gst_pedidos')
           .select('*, gst_clientes(nombre)')
           .eq('business_id', businessId)
-          .eq('turno_caja', turno)
           .is('caja_cierre', null)
           .gte('fecha', startIso)
           .lt('fecha', endIso)
@@ -2309,10 +2331,9 @@ export const db = {
 
         return (data || [])
           .filter((p) => isFinalizedPedidoEstado(p.estado))
-          .map((p) => ({
-            ...p,
-            cliente_nombre: p.gst_clientes?.nombre || 'Cliente',
-          }));
+          .filter((p) => isOrderWithinBounds(p, startIso, endIso))
+          .filter(matchesCierreTurno)
+          .map(mapPedidoRow);
       } catch (err) {
         console.warn('getPendingPedidosForCierre failed:', err);
       }
@@ -2320,15 +2341,12 @@ export const db = {
 
     const stored = localStorage.getItem('mock_pedidos');
     const orders = stored ? JSON.parse(stored) : [];
-    const start = new Date(startIso).getTime();
-    const end = new Date(endIso).getTime();
 
-    return orders.filter((p) => {
-      if (p.turno_caja !== turno || p.caja_cierre) return false;
-      if (!isFinalizedPedidoEstado(p.estado)) return false;
-      const t = new Date(p.fecha).getTime();
-      return t >= start && t < end;
-    });
+    return orders
+      .filter((p) => !p.caja_cierre)
+      .filter((p) => isFinalizedPedidoEstado(p.estado))
+      .filter((p) => isOrderWithinBounds(p, startIso, endIso))
+      .filter(matchesCierreTurno);
   },
 
   aggregatePedidosForCierre: (pedidos, cierreConceptos) =>
@@ -2514,7 +2532,7 @@ export const db = {
             pushMovement(movementConcept.pedido(orderRef), total, 0);
           }
 
-          if (!ccFlags.hasCredit && hasPaymentMedio(nextMedio) && !isMedioCtaCte(nextMedio) && !ccFlags.hasCobro) {
+          if (!ccFlags.hasCredit && isPaidMedioForOrder(nextMedio) && !ccFlags.hasCobro) {
             adjustMockSaldo(-total);
             pushMovement(movementConcept.cobro(orderRef, nextMedio), 0, total);
           }
@@ -2540,37 +2558,57 @@ export const db = {
         }
 
         // G. Change payment on Finalizado
-        else if (nextFinalized && prevFinalized && prevMedio !== nextMedio) {
-          if (isPrevCtaCte && !isNextCtaCte) {
-            clientes = clientes.map(c => {
-              if (c.id === order.cliente_id) {
-                return { ...c, saldo: parseFloat(c.saldo || 0) - parseFloat(order.total) };
-              }
-              return c;
-            });
-            movements.push({
-              id: "m_p_" + Date.now() + Math.random(),
-              cliente_id: order.cliente_id,
-              fecha: new Date().toISOString(),
-              concepto: movementConcept.cobro(orderRef, nextMedio),
-              debe: 0.00,
-              haber: parseFloat(order.total)
-            });
-          } else if (!isPrevCtaCte && isNextCtaCte) {
-            clientes = clientes.map(c => {
-              if (c.id === order.cliente_id) {
-                return { ...c, saldo: parseFloat(c.saldo || 0) + parseFloat(order.total) };
-              }
-              return c;
-            });
-            movements.push({
-              id: "m_r_" + Date.now() + Math.random(),
-              cliente_id: order.cliente_id,
-              fecha: new Date().toISOString(),
-              concepto: movementConcept.reversionCobro(orderRef),
-              debe: parseFloat(order.total),
-              haber: 0.00
-            });
+        else if (nextFinalized && prevFinalized) {
+          if (prevMedio !== nextMedio) {
+            if (isPrevCtaCte && !isNextCtaCte) {
+              clientes = clientes.map(c => {
+                if (c.id === order.cliente_id) {
+                  return { ...c, saldo: parseFloat(c.saldo || 0) - parseFloat(order.total) };
+                }
+                return c;
+              });
+              movements.push({
+                id: "m_p_" + Date.now() + Math.random(),
+                cliente_id: order.cliente_id,
+                fecha: new Date().toISOString(),
+                concepto: movementConcept.cobro(orderRef, nextMedio),
+                debe: 0.00,
+                haber: parseFloat(order.total)
+              });
+            } else if (!isPrevCtaCte && isNextCtaCte) {
+              clientes = clientes.map(c => {
+                if (c.id === order.cliente_id) {
+                  return { ...c, saldo: parseFloat(c.saldo || 0) + parseFloat(order.total) };
+                }
+                return c;
+              });
+              movements.push({
+                id: "m_r_" + Date.now() + Math.random(),
+                cliente_id: order.cliente_id,
+                fecha: new Date().toISOString(),
+                concepto: movementConcept.reversionCobro(orderRef),
+                debe: parseFloat(order.total),
+                haber: 0.00
+              });
+            } else if (
+              !isNextCtaCte
+              && isPaidMedioForOrder(nextMedio)
+              && ccFlags.hasPedido
+              && !ccFlags.hasCobro
+              && !ccFlags.hasCredit
+            ) {
+              adjustMockSaldo(-total);
+              pushMovement(movementConcept.cobro(orderRef, nextMedio), 0, total);
+            }
+          } else if (
+            effectiveUpdates.medio_pago !== undefined
+            && isPaidMedioForOrder(nextMedio)
+            && ccFlags.hasPedido
+            && !ccFlags.hasCobro
+            && !ccFlags.hasCredit
+          ) {
+            adjustMockSaldo(-total);
+            pushMovement(movementConcept.cobro(orderRef, nextMedio), 0, total);
           }
         }
 
@@ -2738,7 +2776,7 @@ export const db = {
         await insertMovement(movementConcept.pedido(orderRef), total, 0);
       }
 
-      if (!ccFlags.hasCredit && hasPaymentMedio(nextMedio) && !isMedioCtaCte(nextMedio) && !ccFlags.hasCobro) {
+      if (!ccFlags.hasCredit && isPaidMedioForOrder(nextMedio) && !ccFlags.hasCobro) {
         await adjustClientSaldo(-total);
         await insertMovement(movementConcept.cobro(orderRef, nextMedio), 0, total);
       }
@@ -2764,31 +2802,51 @@ export const db = {
     }
 
     // G. Change payment on Finalizado
-    else if (nextFinalized && prevFinalized && prevMedio !== nextMedio) {
-      if (isPrevCtaCte && !isNextCtaCte) {
-        const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).eq('business_id', businessId).single();
-        const newSaldo = parseFloat(client.saldo || 0) - parseFloat(order.total);
-        await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id).eq('business_id', businessId);
+    else if (nextFinalized && prevFinalized) {
+      if (prevMedio !== nextMedio) {
+        if (isPrevCtaCte && !isNextCtaCte) {
+          const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).eq('business_id', businessId).single();
+          const newSaldo = parseFloat(client.saldo || 0) - parseFloat(order.total);
+          await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id).eq('business_id', businessId);
 
-        await supabase.from('gst_cliente_movimientos').insert([{
-          business_id: businessId,
-          cliente_id: order.cliente_id,
-          concepto: movementConcept.cobro(orderRef, nextMedio),
-          debe: 0.00,
-          haber: order.total
-        }]);
-      } else if (!isPrevCtaCte && isNextCtaCte) {
-        const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).eq('business_id', businessId).single();
-        const newSaldo = parseFloat(client.saldo || 0) + parseFloat(order.total);
-        await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id).eq('business_id', businessId);
+          await supabase.from('gst_cliente_movimientos').insert([{
+            business_id: businessId,
+            cliente_id: order.cliente_id,
+            concepto: movementConcept.cobro(orderRef, nextMedio),
+            debe: 0.00,
+            haber: order.total
+          }]);
+        } else if (!isPrevCtaCte && isNextCtaCte) {
+          const { data: client } = await supabase.from('gst_clientes').select('saldo').eq('id', order.cliente_id).eq('business_id', businessId).single();
+          const newSaldo = parseFloat(client.saldo || 0) + parseFloat(order.total);
+          await supabase.from('gst_clientes').update({ saldo: newSaldo }).eq('id', order.cliente_id).eq('business_id', businessId);
 
-        await supabase.from('gst_cliente_movimientos').insert([{
-          business_id: businessId,
-          cliente_id: order.cliente_id,
-          concepto: movementConcept.reversionCobro(orderRef),
-          debe: order.total,
-          haber: 0.00
-        }]);
+          await supabase.from('gst_cliente_movimientos').insert([{
+            business_id: businessId,
+            cliente_id: order.cliente_id,
+            concepto: movementConcept.reversionCobro(orderRef),
+            debe: order.total,
+            haber: 0.00
+          }]);
+        } else if (
+          !isNextCtaCte
+          && isPaidMedioForOrder(nextMedio)
+          && ccFlags.hasPedido
+          && !ccFlags.hasCobro
+          && !ccFlags.hasCredit
+        ) {
+          await adjustClientSaldo(-total);
+          await insertMovement(movementConcept.cobro(orderRef, nextMedio), 0, total);
+        }
+      } else if (
+        updates.medio_pago !== undefined
+        && isPaidMedioForOrder(nextMedio)
+        && ccFlags.hasPedido
+        && !ccFlags.hasCobro
+        && !ccFlags.hasCredit
+      ) {
+        await adjustClientSaldo(-total);
+        await insertMovement(movementConcept.cobro(orderRef, nextMedio), 0, total);
       }
     }
   },
@@ -4592,11 +4650,14 @@ export const db = {
   },
 
   syncCuentaCorrienteFromFinalizedOrders: async (options = {}) => {
-    const adminCheck = await requireBusinessAdmin();
-    if (!adminCheck.ok) throw new Error(adminCheck.error);
+    const { skipAdminCheck = false } = options;
+    if (!skipAdminCheck) {
+      const adminCheck = await requireBusinessAdmin();
+      if (!adminCheck.ok) throw new Error(adminCheck.error);
+    }
 
     const businessId = await ensureBusinessContext();
-    const { from, to, dayLabel } = options;
+    const { from, to, dayLabel, clienteId } = options;
 
     if (isSupabaseConfigured() && supabase) {
       await supabase
@@ -4614,6 +4675,9 @@ export const db = {
       let finalizedOrders = (orders || []).filter(
         (order) => isFinalizadoEstadoValue(order.estado) && !isCancelledEstadoValue(order.estado)
       );
+      if (clienteId) {
+        finalizedOrders = finalizedOrders.filter((order) => order.cliente_id === clienteId);
+      }
       if (from && to) {
         finalizedOrders = finalizedOrders.filter((order) => isOrderWithinBounds(order, from, to));
       }
@@ -4665,6 +4729,9 @@ export const db = {
     let finalizedOrders = orders.filter(
       (order) => isFinalizadoEstadoValue(order.estado) && !isCancelledEstadoValue(order.estado)
     );
+    if (clienteId) {
+      finalizedOrders = finalizedOrders.filter((order) => order.cliente_id === clienteId);
+    }
     if (from && to) {
       finalizedOrders = finalizedOrders.filter((order) => isOrderWithinBounds(order, from, to));
     }
@@ -4702,12 +4769,23 @@ export const db = {
     };
   },
 
-  syncCuentaCorrienteForToday: async () => {
-    const { dayStr, startIso, endIso } = getArgentinaDayBounds();
+  syncCuentaCorrienteForDay: async (dayStr) => {
+    const bounds = getArgentinaDayBounds(dayStr);
     return db.syncCuentaCorrienteFromFinalizedOrders({
-      from: startIso,
-      to: endIso,
-      dayLabel: dayStr,
+      from: bounds.startIso,
+      to: bounds.endIso,
+      dayLabel: bounds.dayStr,
+      skipAdminCheck: true,
+    });
+  },
+
+  syncCuentaCorrienteForToday: async () => db.syncCuentaCorrienteForDay(),
+
+  syncCuentaCorrienteForClient: async (clienteId) => {
+    if (!clienteId) return { success: false, error: 'Cliente inválido.' };
+    return db.syncCuentaCorrienteFromFinalizedOrders({
+      clienteId,
+      skipAdminCheck: true,
     });
   },
 

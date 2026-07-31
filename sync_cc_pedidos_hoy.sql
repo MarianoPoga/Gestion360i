@@ -4,8 +4,10 @@
 -- Qué hace:
 -- 1) Borra movimientos obsoletos "Aplicación anticipo"
 -- 2) Imputa deuda (Pedido #xxxxxx) si falta
--- 3) Imputa cobro al finalizar si pagaron hoy sin crédito previo
+-- 3) Imputa cobro si pagaron (incl. "Pagado en caja") sin crédito/cobro previo
 -- 4) Recalcula saldos de clientes afectados
+--
+-- También podés usar en la app: Ver Pedidos → elegir fecha (ej. ayer) → "Revisar CC del día"
 
 BEGIN;
 
@@ -113,9 +115,17 @@ WHERE c.id = s.cliente_id
 
 COMMIT;
 
--- Verificación: pedidos finalizados hoy y sus movimientos
--- SELECT p.id, left(p.id::text, 6) AS ref, p.cliente_id, p.total, p.medio_pago, p.estado, p.fecha, p.created_at
+-- Verificación: finalizados hoy con medio de pago pero sin cobro en CC
+-- SELECT p.id, left(p.id::text, 6) AS ref, c.nombre, p.total, p.medio_pago, p.estado,
+--   (SELECT count(*) FROM public.gst_cliente_movimientos m
+--    WHERE m.cliente_id = p.cliente_id AND m.concepto LIKE 'Pedido #' || left(p.id::text, 6) || '%') AS tiene_deuda,
+--   (SELECT count(*) FROM public.gst_cliente_movimientos m
+--    WHERE m.cliente_id = p.cliente_id AND m.concepto LIKE 'Cobro Pedido #' || left(p.id::text, 6) || '%'
+--      AND m.concepto NOT LIKE 'Reversión%') AS tiene_cobro
 -- FROM public.gst_pedidos p
+-- JOIN public.gst_clientes c ON c.id = p.cliente_id
 -- WHERE lower(p.estado) IN ('finalizado', 'cobrado')
 --   AND coalesce(p.fecha, p.created_at)::date = (now() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+--   AND coalesce(trim(p.medio_pago), '') <> ''
+--   AND lower(trim(p.medio_pago)) NOT IN ('cta cte', 'cuenta corriente (deuda)', 'cuenta corriente')
 -- ORDER BY coalesce(p.fecha, p.created_at) DESC;

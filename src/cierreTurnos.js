@@ -105,6 +105,32 @@ export const isPedidoMedioCtaCte = (medio) => {
     || normalized.includes('cuenta corriente');
 };
 
+const normalizeMedioLabel = (label) => String(label || '').trim().toLowerCase();
+
+export const resolvePedidoMedioConcept = (medioLabel, cierreConceptos) => {
+  const activeMedios = getActiveMedios(cierreConceptos);
+  const normalized = normalizeMedioLabel(medioLabel);
+  if (!normalized || isPedidoMedioCtaCte(medioLabel)) return null;
+
+  const exact = activeMedios.find(
+    (concept) => normalizeMedioLabel(concept.label) === normalized
+  );
+  if (exact) return exact;
+
+  if (normalized.includes('pagado en caja') || normalized.includes('cobro en caja')) {
+    const efectivo = activeMedios.find(
+      (concept) => concept.slot === 1 || normalizeMedioLabel(concept.label) === 'efectivo'
+    );
+    if (efectivo) return efectivo;
+  }
+
+  const partial = activeMedios.find((concept) => {
+    const conceptLabel = normalizeMedioLabel(concept.label);
+    return conceptLabel && (normalized.includes(conceptLabel) || conceptLabel.includes(normalized));
+  });
+  return partial || null;
+};
+
 export const aggregatePedidosMediosForCierre = (pedidos, cierreConceptos) => {
   const totals = {};
   getActiveMedios(cierreConceptos).forEach((medio) => {
@@ -112,11 +138,7 @@ export const aggregatePedidosMediosForCierre = (pedidos, cierreConceptos) => {
   });
 
   (pedidos || []).forEach((pedido) => {
-    const medioLabel = String(pedido.medio_pago || '').trim();
-    if (!medioLabel || isPedidoMedioCtaCte(medioLabel)) return;
-    const concept = getActiveMedios(cierreConceptos).find(
-      (c) => c.label.trim().toLowerCase() === medioLabel.toLowerCase()
-    );
+    const concept = resolvePedidoMedioConcept(pedido.medio_pago, cierreConceptos);
     if (!concept) return;
     totals[concept.id] = (totals[concept.id] || 0) + parseFloat(pedido.total || 0);
   });
