@@ -263,6 +263,17 @@ function Clientes({ navigate, profile, accentColor }) {
   const [paymentMethod, setPaymentMethod] = useState('Efectivo');
   const [paymentObs, setPaymentObs] = useState('');
   const [submittingPayment, setSubmittingPayment] = useState(false);
+  const [ccPaymentModal, setCcPaymentModal] = useState(false);
+  const [ccPaymentAmount, setCcPaymentAmount] = useState('');
+  const [ccPaymentMethod, setCcPaymentMethod] = useState('Efectivo');
+  const [ccPaymentObs, setCcPaymentObs] = useState('');
+  const [ccPaymentAmountAuto, setCcPaymentAmountAuto] = useState(true);
+  const [paymentPendingRows, setPaymentPendingRows] = useState([]);
+  const [paymentSelectedOrderIds, setPaymentSelectedOrderIds] = useState([]);
+  const [paymentPendingLoading, setPaymentPendingLoading] = useState(false);
+  const [paymentAmountAuto, setPaymentAmountAuto] = useState(true);
+  const [ccPaymentLoading, setCcPaymentLoading] = useState(false);
+  const [submittingCcPayment, setSubmittingCcPayment] = useState(false);
   const [dailyRefunds, setDailyRefunds] = useState([]);
   const [dailyClientPayments, setDailyClientPayments] = useState([]);
 
@@ -957,7 +968,6 @@ function Clientes({ navigate, profile, accentColor }) {
   const [successMsg, setSuccessMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [loadingSubmit, setLoadingSubmit] = useState(false);
-  const [syncingCcToday, setSyncingCcToday] = useState(false);
 
   // Refs for clicking outside autocomplete lists
   const clientRef = useRef(null);
@@ -1935,14 +1945,111 @@ function Clientes({ navigate, profile, accentColor }) {
     setRefundModal(true);
   };
 
-  const handleOpenPaymentModal = () => {
-    if (!selectedClient || parseFloat(selectedClient.saldo || 0) <= 0) return;
-    setPaymentAmount(String(parseFloat(selectedClient.saldo || 0)));
-    const defaultMethod = collectionPaymentMethods.find((c) => getPaymentMethodValue(c) === 'Efectivo')
-      || collectionPaymentMethods[0];
-    setPaymentMethod(defaultMethod ? getPaymentMethodValue(defaultMethod) : 'Efectivo');
-    setPaymentObs('');
-    setPaymentModal(true);
+  const handleOpenPaymentModal = async () => {
+    if (!selectedClient) return;
+    setPaymentPendingLoading(true);
+    try {
+      const pendingRows = await db.getClientOrdersCCPending(selectedClient.id, []);
+      const defaultIds = pendingRows.map((row) => row.orderId);
+      const totalPending = pendingRows.reduce((sum, row) => sum + parseFloat(row.pending || 0), 0);
+      setPaymentPendingRows(pendingRows);
+      setPaymentSelectedOrderIds(defaultIds);
+      setPaymentAmount(totalPending > 0 ? String(totalPending) : '');
+      setPaymentAmountAuto(true);
+      const defaultMethod = collectionPaymentMethods.find((c) => getPaymentMethodValue(c) === 'Efectivo')
+        || collectionPaymentMethods[0];
+      setPaymentMethod(defaultMethod ? getPaymentMethodValue(defaultMethod) : 'Efectivo');
+      setPaymentObs('');
+      setPaymentModal(true);
+    } catch (err) {
+      console.error(err);
+      alert('No se pudo cargar las compras pendientes del cliente.');
+    } finally {
+      setPaymentPendingLoading(false);
+    }
+  };
+
+  const openCcPaymentModal = async () => {
+    const clientId = selectedOrdersData[0]?.cliente_id;
+    if (!clientId || !canRegisterCCPayment) return;
+
+    setCcPaymentLoading(true);
+    try {
+      const pendingRows = await db.getClientOrdersCCPending(clientId, selectedOrderIds);
+      const defaultIds = pendingRows.map((row) => row.orderId);
+      const totalPending = pendingRows.reduce((sum, row) => sum + parseFloat(row.pending || 0), 0);
+      setPaymentPendingRows(pendingRows);
+      setPaymentSelectedOrderIds(defaultIds);
+      setCcPaymentAmount(totalPending > 0 ? String(totalPending) : '');
+      setCcPaymentAmountAuto(true);
+      const defaultMethod = collectionPaymentMethods.find((c) => getPaymentMethodValue(c) === 'Efectivo')
+        || collectionPaymentMethods[0];
+      setCcPaymentMethod(defaultMethod ? getPaymentMethodValue(defaultMethod) : 'Efectivo');
+      setCcPaymentObs('');
+      setCcPaymentModal(true);
+    } catch (err) {
+      console.error(err);
+      alert('No se pudo cargar la deuda pendiente de los pedidos seleccionados.');
+    } finally {
+      setCcPaymentLoading(false);
+    }
+  };
+
+  const handleSubmitCcPayment = async (e) => {
+    if (e) e.preventDefault();
+    const clientId = selectedOrdersData[0]?.cliente_id;
+    const amt = parseFloat(ccPaymentAmount);
+    if (!clientId) return;
+    if (!Number.isFinite(amt) || amt <= 0) {
+      alert('Ingresá un monto válido mayor a 0.');
+      return;
+    }
+    if (ccPaymentPreview.applied <= 0 && ccPaymentPreview.deposit <= 0) {
+      alert('Ingresá un monto válido para imputar a los pedidos o dejar a cuenta.');
+      return;
+    }
+
+    setSubmittingCcPayment(true);
+    try {
+      const res = await db.registerClientPaymentWithOrders({
+        cliente_id: clientId,
+        monto: amt,
+        medio_pago: ccPaymentMethod,
+        order_ids: paymentSelectedOrderIds,
+        observacion: ccPaymentObs.trim(),
+      });
+
+      if (!res.success) {
+        alert(res.error || 'No se pudo registrar el cobro.');
+        return;
+      }
+
+      setCcPaymentModal(false);
+      setSelectedOrderIds([]);
+
+      const cl = await db.getClientes();
+      setClientes(cl);
+
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      const end = new Date();
+      end.setHours(23, 59, 59, 999);
+      const payments = await db.getDailyClientPayments(start.toISOString(), end.toISOString());
+      setDailyClientPayments(payments);
+
+      await loadOrders();
+
+      const depositMsg = res.data?.depositAmount > 0
+        ? ` Depósito a cuenta: $ ${new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(res.data.depositAmount)}.`
+        : '';
+      alert(
+        `Cobro registrado: $ ${new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(amt)}.${depositMsg}`
+      );
+    } catch (err) {
+      alert(err.message || 'Error al registrar el cobro en cuenta corriente.');
+    } finally {
+      setSubmittingCcPayment(false);
+    }
   };
 
   const handleSubmitPayment = async (e) => {
@@ -1952,9 +2059,9 @@ function Clientes({ navigate, profile, accentColor }) {
       alert('Ingresá un monto válido mayor a 0.');
       return;
     }
-    const maxSaldo = parseFloat(selectedClient.saldo || 0);
-    if (amt > maxSaldo + 0.005) {
-      alert('El monto no puede superar el saldo deudor del cliente.');
+
+    if (drawerPaymentPreview.applied <= 0 && drawerPaymentPreview.deposit <= 0) {
+      alert('Ingresá un monto válido para imputar o depositar a cuenta.');
       return;
     }
 
@@ -1965,6 +2072,7 @@ function Clientes({ navigate, profile, accentColor }) {
         monto: amt,
         medio_pago: paymentMethod,
         observacion: paymentObs.trim(),
+        order_ids: paymentSelectedOrderIds,
       });
 
       if (!res.success) {
@@ -2464,7 +2572,7 @@ function Clientes({ navigate, profile, accentColor }) {
         </div>
       `;
       if (item.observacion) {
-        html += `<div style="font-size: 11px; font-style: italic; margin-left: 15px; margin-bottom: 4px;">* ${item.observacion}</div>`;
+        html += `<div class="item-note" style="margin-left: 15px; margin-bottom: 4px;">* ${item.observacion}</div>`;
       }
       return html;
     }).join('');
@@ -2480,8 +2588,8 @@ function Clientes({ navigate, profile, accentColor }) {
     const observationHtml = generalObservation.trim()
       ? `
         <div class="divider"></div>
-        <div style="font-weight: bold; margin-top: 5px;">OBSERVACIONES GENERALES:</div>
-        <div style="margin-top: 4px; font-size: 14px; white-space: pre-wrap; font-weight: bold; text-transform: uppercase;">${generalObservation.trim().toUpperCase()}</div>
+        <div class="obs-label" style="margin-top: 5px;">OBSERVACIONES GENERALES:</div>
+        <div class="obs-content" style="margin-top: 4px; white-space: pre-wrap; text-transform: uppercase;">${generalObservation.trim().toUpperCase()}</div>
       `
       : '';
 
@@ -2509,11 +2617,11 @@ function Clientes({ navigate, profile, accentColor }) {
         <div class="divider"></div>
         <div style="display: flex; justify-content: space-around; align-items: flex-start; gap: 5px; margin-top: 10px; margin-bottom: 5px;">
           <div style="text-align: center; flex: 1;">
-            <div style="font-weight: bold; font-size: 9px; margin-bottom: 3px; height: 24px; display: flex; align-items: center; justify-content: center; line-height: 1.1;">ESCANEAR WHATSAPP:</div>
+            <div class="qr-label-sm" style="margin-bottom: 3px; height: 24px; display: flex; align-items: center; justify-content: center; line-height: 1.1;">ESCANEAR WHATSAPP:</div>
             <img src="${waQrUrlSmall}" width="95" height="95" style="display: block; margin: 0 auto;" />
           </div>
           <div style="text-align: center; flex: 1;">
-            <div style="font-weight: bold; font-size: 9px; margin-bottom: 3px; height: 24px; display: flex; align-items: center; justify-content: center; line-height: 1.1;">ESCANEAR GPS:</div>
+            <div class="qr-label-sm" style="margin-bottom: 3px; height: 24px; display: flex; align-items: center; justify-content: center; line-height: 1.1;">ESCANEAR GPS:</div>
             <img src="${gpsQrUrlSmall}" width="95" height="95" style="display: block; margin: 0 auto;" />
           </div>
         </div>
@@ -2522,7 +2630,7 @@ function Clientes({ navigate, profile, accentColor }) {
       qrsHtml = `
         <div class="divider"></div>
         <div class="text-center" style="margin-top: 10px; margin-bottom: 5px;">
-          <div style="font-weight: bold; font-size: 11px; margin-bottom: 5px;">ESCANEAR PARA ENVIAR WHATSAPP:</div>
+          <div class="qr-label" style="margin-bottom: 5px;">ESCANEAR PARA ENVIAR WHATSAPP:</div>
           <img src="${waQrUrl}" width="120" height="120" style="display: block; margin: 0 auto;" />
         </div>
       `;
@@ -2530,7 +2638,7 @@ function Clientes({ navigate, profile, accentColor }) {
       qrsHtml = `
         <div class="divider"></div>
         <div class="text-center" style="margin-top: 10px; margin-bottom: 5px;">
-          <div style="font-weight: bold; font-size: 11px; margin-bottom: 5px;">ESCANEAR PARA NAVEGAR (GPS):</div>
+          <div class="qr-label" style="margin-bottom: 5px;">ESCANEAR PARA NAVEGAR (GPS):</div>
           <img src="${gpsQrUrl}" width="120" height="120" style="display: block; margin: 0 auto;" />
         </div>
       `;
@@ -2553,6 +2661,7 @@ function Clientes({ navigate, profile, accentColor }) {
               padding: 4mm;
               font-family: 'Courier New', Courier, monospace;
               font-size: 13px;
+              font-weight: bold;
               line-height: 1.3;
               color: #000;
               background-color: #fff;
@@ -2560,21 +2669,30 @@ function Clientes({ navigate, profile, accentColor }) {
             .text-center { text-align: center; }
             .text-right { text-align: right; }
             .bold { font-weight: bold; }
+            strong { font-size: 14px; font-weight: bold; }
             .divider { border-top: 1px dashed #000; margin: 8px 0; }
-            .header-title { font-size: 18px; font-weight: bold; margin-bottom: 5px; }
-            .total-row { display: flex; justify-content: space-between; font-size: 15px; font-weight: bold; margin-top: 5px; }
+            .header-title { font-size: 19px; font-weight: bold; margin-bottom: 5px; }
+            .subtitle { font-size: 11px; font-weight: bold; margin-bottom: 5px; }
+            .detalle-header { font-size: 14px; font-weight: bold; display: flex; justify-content: space-between; margin-bottom: 5px; }
+            .total-row { display: flex; justify-content: space-between; font-size: 16px; font-weight: bold; margin-top: 5px; }
+            .obs-label { font-size: 14px; font-weight: bold; }
+            .obs-content { font-size: 15px; font-weight: bold; }
+            .item-note { font-size: 11px; font-weight: bold; font-style: italic; }
+            .qr-label-sm { font-size: 10px; font-weight: bold; }
+            .qr-label { font-size: 12px; font-weight: bold; }
+            .footer-note { font-size: 11px; font-weight: bold; margin-top: 15px; }
           </style>
         </head>
         <body>
           <div class="text-center header-title">COMANDA</div>
-          <div class="text-center" style="font-size: 11px; margin-bottom: 5px;">Gestion360i</div>
+          <div class="text-center subtitle">Gestion360i</div>
           <div class="divider"></div>
           <div><strong>Fecha:</strong> ${dateStr}</div>
           <div><strong>Cliente:</strong> ${order.cliente_nombre}</div>
           <div><strong>Tipo:</strong> ${typeLabel}</div>
           ${addressHtml}
           <div class="divider"></div>
-          <div style="font-weight: bold; display: flex; justify-content: space-between; margin-bottom: 5px;">
+          <div class="detalle-header">
             <span>Detalle</span>
             <span>Total</span>
           </div>
@@ -2588,7 +2706,7 @@ function Clientes({ navigate, profile, accentColor }) {
           ${observationHtml}
           ${qrsHtml}
           <div class="divider"></div>
-          <div class="text-center" style="margin-top: 15px; font-size: 11px;">
+          <div class="text-center footer-note">
             *** Control de Pedido ***
           </div>
         </body>
@@ -2901,6 +3019,194 @@ function Clientes({ navigate, profile, accentColor }) {
   const selectedOrdersData = filteredOrders.filter(o => selectedOrderIds.includes(o.id));
   const hasDeliverySelected = selectedOrdersData.some(o => o.con_envio === true);
   const hasLocalSelected = selectedOrdersData.some(o => o.con_envio === false);
+  const selectedOrdersSameClient = selectedOrdersData.length > 0
+    && selectedOrdersData.every((order) => order.cliente_id === selectedOrdersData[0].cliente_id);
+  const canRegisterCCPayment = selectedOrdersSameClient
+    && selectedOrdersData.every((order) => isOrderFinalizado(order) && !isOrderCancelled(order));
+
+  const sumPaymentPendingForOrders = (rows, orderIds) =>
+    rows
+      .filter((row) => orderIds.includes(row.orderId))
+      .reduce((sum, row) => sum + parseFloat(row.pending || 0), 0);
+
+  const buildPaymentAllocationPreview = (amountValue, rows) => {
+    const amt = parseFloat(amountValue);
+    if (!Number.isFinite(amt) || amt <= 0) {
+      return { applied: 0, deposit: 0, lines: [] };
+    }
+    let remaining = amt;
+    const lines = [];
+    for (const row of rows) {
+      if (remaining <= 0) break;
+      const apply = Math.min(remaining, parseFloat(row.pending || 0));
+      if (apply > 0) {
+        lines.push({ ...row, apply });
+        remaining = Math.round((remaining - apply + Number.EPSILON) * 100) / 100;
+      }
+    }
+    return {
+      applied: Math.round((amt - remaining + Number.EPSILON) * 100) / 100,
+      deposit: Math.max(0, remaining),
+      lines,
+    };
+  };
+
+  const paymentSelectedRows = paymentPendingRows.filter((row) =>
+    paymentSelectedOrderIds.includes(row.orderId)
+  );
+  const ccPaymentPreview = buildPaymentAllocationPreview(ccPaymentAmount, paymentSelectedRows);
+  const drawerPaymentPreview = buildPaymentAllocationPreview(paymentAmount, paymentSelectedRows);
+  const paymentSelectedTotal = sumPaymentPendingForOrders(paymentPendingRows, paymentSelectedOrderIds);
+
+  const togglePaymentOrderSelection = (orderId, amountAuto, setAmount) => {
+    setPaymentSelectedOrderIds((prev) => {
+      const next = prev.includes(orderId)
+        ? prev.filter((id) => id !== orderId)
+        : [...prev, orderId];
+      if (amountAuto) {
+        const sum = sumPaymentPendingForOrders(paymentPendingRows, next);
+        setAmount(sum > 0 ? String(sum) : '');
+      }
+      return next;
+    });
+  };
+
+  const setAllPaymentOrders = (selectAll, amountAuto, setAmount) => {
+    const nextIds = selectAll ? paymentPendingRows.map((row) => row.orderId) : [];
+    setPaymentSelectedOrderIds(nextIds);
+    if (amountAuto) {
+      const sum = sumPaymentPendingForOrders(paymentPendingRows, nextIds);
+      setAmount(sum > 0 ? String(sum) : '');
+    }
+  };
+
+  const renderPaymentOrderPicker = ({
+    loading,
+    amountAuto,
+    setAmountAuto,
+    setAmount,
+    emptyMessage,
+  }) => (
+    <div className="form-group mb-3">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', gap: '10px' }}>
+        <label className="form-label mb-0">Compras a imputar</label>
+        {paymentPendingRows.length > 0 && (
+          <div style={{ display: 'flex', gap: '6px' }}>
+            <button
+              type="button"
+              className="btn-nav-back"
+              style={{ fontSize: '0.72rem', padding: '2px 8px', border: '1px solid #cbd5e1' }}
+              onClick={() => setAllPaymentOrders(true, amountAuto, setAmount)}
+            >
+              Todas
+            </button>
+            <button
+              type="button"
+              className="btn-nav-back"
+              style={{ fontSize: '0.72rem', padding: '2px 8px', border: '1px solid #cbd5e1' }}
+              onClick={() => setAllPaymentOrders(false, amountAuto, setAmount)}
+            >
+              Ninguna
+            </button>
+          </div>
+        )}
+      </div>
+      <div
+        className="modal-items-scroll"
+        style={{
+          border: '1px solid var(--border-color)',
+          borderRadius: '8px',
+          padding: '8px',
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))',
+          gap: '8px',
+          alignContent: 'start',
+        }}
+      >
+        {loading ? (
+          <div style={{ gridColumn: '1 / -1', padding: '12px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+            Cargando compras…
+          </div>
+        ) : paymentPendingRows.length === 0 ? (
+          <div style={{ gridColumn: '1 / -1', padding: '12px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+            {emptyMessage}
+          </div>
+        ) : (
+          paymentPendingRows.map((row) => {
+            const checked = paymentSelectedOrderIds.includes(row.orderId);
+            return (
+              <label
+                key={row.orderId}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '6px',
+                  padding: '10px',
+                  border: checked ? '2px solid #93c5fd' : '1px solid #e2e8f0',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  backgroundColor: checked ? '#eff6ff' : 'white',
+                  minHeight: '88px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => togglePaymentOrderSelection(row.orderId, amountAuto, setAmount)}
+                    style={{ width: '16px', height: '16px', flexShrink: 0, marginTop: '2px' }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: '700', fontSize: '0.82rem', lineHeight: 1.2 }}>
+                      Compra #{row.orderRef}
+                    </div>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                      {row.fecha ? new Date(row.fecha).toLocaleDateString('es-AR') : '—'}
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '8px', paddingLeft: '24px' }}>
+                  <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                    Total $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(row.total)}
+                  </span>
+                  <span style={{ fontWeight: '700', color: '#b91c1c', fontSize: '0.82rem', whiteSpace: 'nowrap' }}>
+                    $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(row.pending)}
+                  </span>
+                </div>
+              </label>
+            );
+          })
+        )}
+      </div>
+      {paymentSelectedOrderIds.length > 0 && (
+        <div style={{ fontSize: '0.82rem', marginTop: '8px', color: '#475569' }}>
+          Total seleccionado:{' '}
+          <strong>$ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(paymentSelectedTotal)}</strong>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderPaymentAllocationPreview = (preview) => (
+    (preview.applied > 0 || preview.deposit > 0) ? (
+      <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px', marginBottom: '15px', fontSize: '0.82rem' }}>
+        <div style={{ fontWeight: '700', marginBottom: '6px' }}>Imputación estimada</div>
+        {preview.lines.map((line) => (
+          <div key={line.orderId} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+            <span>Compra #{line.orderRef}</span>
+            <span>- $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(line.apply)}</span>
+          </div>
+        ))}
+        {preview.deposit > 0 && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', color: '#1d4ed8', fontWeight: '600', marginTop: '6px', paddingTop: '6px', borderTop: '1px dashed #cbd5e1' }}>
+            <span>Depósito a cuenta</span>
+            <span>- $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(preview.deposit)}</span>
+          </div>
+        )}
+      </div>
+    ) : null
+  );
+
 
   const deliveryCajas = getCajasForPedidosTipo(pedidosCajasConfig, turnoNames, PEDIDOS_CAJA_TIPOS.DELIVERY);
   const localCajas = getCajasForPedidosTipo(pedidosCajasConfig, turnoNames, PEDIDOS_CAJA_TIPOS.LOCAL);
@@ -3218,29 +3524,6 @@ function Clientes({ navigate, profile, accentColor }) {
     }
   };
 
-  const handleSyncCcToday = async () => {
-    const dayStr = getSelectedOrdersDayStr();
-    const dayLabel = getHoyButtonLabel();
-    setSyncingCcToday(true);
-    try {
-      const result = await syncCuentaCorrientePedidosDelDia(dayStr);
-      if (!result) {
-        alert('No se pudo sincronizar la cuenta corriente.');
-        return;
-      }
-      const fixed = result.fixed || 0;
-      const processed = result.processed || 0;
-      alert(
-        fixed > 0
-          ? `CC sincronizada (${dayLabel}): ${fixed} pedido(s) corregido(s) de ${processed} revisados.`
-          : `CC al día (${dayLabel}): ${processed} pedido(s) finalizados revisados, sin movimientos faltantes.`
-      );
-      await loadOrders();
-    } finally {
-      setSyncingCcToday(false);
-    }
-  };
-
   const applyBulkStatus = async (updates) => {
     setLoadingSubmit(true);
     try {
@@ -3482,6 +3765,8 @@ function Clientes({ navigate, profile, accentColor }) {
     const cobroEstado = getOrderCobroEstado(o);
     if (cobroEstado === 'PENDIENTE') {
       salesByMethod.Pendiente += total;
+    } else if (isMedioCtaCte(o.medio_pago)) {
+      // Deuda en CC: el ingreso real se suma al registrar el cobro del pedido.
     } else {
       const method = resolveMedioPagoKey(o.medio_pago);
       if (salesByMethod[method] !== undefined) {
@@ -4186,28 +4471,6 @@ function Clientes({ navigate, profile, accentColor }) {
                 >
                   <i className="bi bi-calendar-event me-1"></i> {getHoyButtonLabel()} ({getHoyButtonCount()})
                 </button>
-                {(dateFilter === 'today' || dateFilter === 'custom') && (
-                  <button
-                    type="button"
-                    className="btn-new-task"
-                    style={{
-                      backgroundColor: 'white',
-                      color: '#0f766e',
-                      border: '1px solid #99f6e4',
-                      padding: '6px 12px',
-                      fontSize: '0.8rem',
-                    }}
-                    disabled={syncingCcToday}
-                    onClick={handleSyncCcToday}
-                    title="Revisa pedidos finalizados del día seleccionado y agrega cobros faltantes en cuenta corriente"
-                  >
-                    {syncingCcToday ? (
-                      <><span className="spinner-border spinner-border-sm me-1" role="status"></span> Sincronizando…</>
-                    ) : (
-                      <><i className="bi bi-arrow-repeat me-1"></i> Revisar CC del día</>
-                    )}
-                  </button>
-                )}
                 <input 
                   type="date"
                   ref={dateInputRef}
@@ -4515,6 +4778,24 @@ function Clientes({ navigate, profile, accentColor }) {
               
               {/* Dynamic bulk action buttons */}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '5px', width: '100%' }}>
+
+                {canRegisterCCPayment && (
+                  <button
+                    type="button"
+                    className="btn-new-task"
+                    style={{ backgroundColor: '#2563eb' }}
+                    disabled={ccPaymentLoading}
+                    onClick={openCcPaymentModal}
+                  >
+                    <i className="bi bi-wallet2 me-1"></i>
+                    {ccPaymentLoading ? 'Cargando…' : 'Cobrar CC'}
+                  </button>
+                )}
+                {!selectedOrdersSameClient && selectedOrdersData.length > 1 && (
+                  <span style={{ fontSize: '0.78rem', color: '#7c3aed', alignSelf: 'center' }}>
+                    Cobrar CC requiere pedidos del mismo cliente.
+                  </span>
+                )}
                 
                 {/* CASE 1: Delivery - Pendientes */}
                 {typeFilter === 'delivery' && statusFilter === 'pendiente' && (
@@ -5730,6 +6011,134 @@ function Clientes({ navigate, profile, accentColor }) {
         </div>
       )}
 
+      {/* MODAL: COBRAR CUENTA CORRIENTE (PEDIDOS SELECCIONADOS) */}
+      {ccPaymentModal && selectedOrdersSameClient && (
+        <div className="modal-overlay" style={{ zIndex: 1100 }}>
+          <div className="modal-content-card modal-content-card--scrollable" style={{ maxWidth: '760px' }}>
+            <div className="modal-header" style={{ backgroundColor: '#2563eb' }}>
+              <h5 className="modal-title">
+                <i className="bi bi-wallet2 me-2"></i>
+                Cobrar cuenta corriente
+              </h5>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => setCcPaymentModal(false)}
+                disabled={submittingCcPayment}
+              >
+                <i className="bi bi-x-lg"></i>
+              </button>
+            </div>
+            <form onSubmit={handleSubmitCcPayment} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1 }}>
+              <div className="modal-body-scroll">
+                <div className="alert-box" style={{ backgroundColor: '#eff6ff', borderColor: '#bfdbfe', color: '#1e40af', marginBottom: '15px', fontSize: '0.85rem' }}>
+                  <i className="bi bi-info-circle-fill"></i>
+                  <div>
+                    <strong>{selectedOrdersData[0]?.cliente_nombre}</strong>
+                    <div style={{ marginTop: '4px' }}>
+                      Elegí las compras a imputar. El monto se actualiza al seleccionar; podés modificarlo si paga de más.
+                    </div>
+                  </div>
+                </div>
+
+                {renderPaymentOrderPicker({
+                  loading: ccPaymentLoading,
+                  amountAuto: ccPaymentAmountAuto,
+                  setAmountAuto: setCcPaymentAmountAuto,
+                  setAmount: setCcPaymentAmount,
+                  emptyMessage: 'Los pedidos seleccionados no tienen deuda pendiente en CC.',
+                })}
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                  <div className="form-group mb-3">
+                    <label className="form-label">Monto recibido ($)</label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      value={ccPaymentAmount}
+                      onChange={(e) => {
+                        setCcPaymentAmountAuto(false);
+                        setCcPaymentAmount(e.target.value);
+                      }}
+                      onKeyDown={handleNumericKeyDown}
+                      step="any"
+                      min="0.01"
+                      required
+                      placeholder="Podés ingresar más que la deuda seleccionada"
+                    />
+                    {paymentSelectedTotal > 0 && (
+                      <button
+                        type="button"
+                        className="btn-nav-back"
+                        style={{ marginTop: '6px', fontSize: '0.75rem', padding: '2px 8px', border: '1px solid #cbd5e1' }}
+                        onClick={() => {
+                          setCcPaymentAmountAuto(true);
+                          setCcPaymentAmount(String(paymentSelectedTotal));
+                        }}
+                      >
+                        Usar total seleccionado ($ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(paymentSelectedTotal)})
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="form-group mb-3">
+                    <label className="form-label">Medio de pago</label>
+                    <select
+                      className="form-select"
+                      value={ccPaymentMethod}
+                      onChange={(e) => setCcPaymentMethod(e.target.value)}
+                      required
+                    >
+                      {(collectionPaymentMethods.length > 0 ? collectionPaymentMethods : [{ id: 'efectivo', label: 'Efectivo' }]).map((concept) => {
+                        const valueName = getPaymentMethodValue(concept);
+                        return (
+                          <option key={concept.id || valueName} value={valueName}>
+                            {concept.label || valueName}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="form-group mb-3">
+                  <label className="form-label">Observación (opcional)</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="Ej: Transferencia recibida 14:30"
+                    value={ccPaymentObs}
+                    onChange={(e) => setCcPaymentObs(e.target.value)}
+                  />
+                </div>
+
+                {renderPaymentAllocationPreview(ccPaymentPreview)}
+              </div>
+
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn-submit"
+                  style={{ backgroundColor: '#6b7280', margin: 0, flex: 1 }}
+                  onClick={() => setCcPaymentModal(false)}
+                  disabled={submittingCcPayment}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="btn-submit"
+                  style={{ backgroundColor: '#2563eb', margin: 0, flex: 2 }}
+                  disabled={submittingCcPayment || ccPaymentLoading}
+                >
+                  {submittingCcPayment ? 'Registrando…' : 'Confirmar cobro'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* MODAL: CERRAR CAJA DELIVERY */}
       {closeCajaModal && (
         <div className="modal-overlay">
@@ -6303,7 +6712,27 @@ function Clientes({ navigate, profile, accentColor }) {
                     }}
                     onClick={handleOpenPaymentModal}
                   >
-                    <i className="bi bi-cash-stack"></i> Registrar pago
+                    <i className="bi bi-cash-stack"></i> Cobrar / Depositar
+                  </button>
+                )}
+                {(selectedClient.saldo <= 0) && (
+                  <button
+                    type="button"
+                    className="btn-submit"
+                    style={{
+                      backgroundColor: '#2563eb',
+                      margin: '10px 0 0 0',
+                      width: '100%',
+                      fontSize: '0.8rem',
+                      padding: '8px 12px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px',
+                    }}
+                    onClick={handleOpenPaymentModal}
+                  >
+                    <i className="bi bi-piggy-bank"></i> Depositar a cuenta
                   </button>
                 )}
                 {selectedClient.saldo < 0 && (
@@ -6405,12 +6834,49 @@ function Clientes({ navigate, profile, accentColor }) {
                       text = text.replace(/Aplicación anticipo Pedido #/g, 'Aplicación crédito Compra #');
                       text = text.replace(/Reversión anticipo Pedido #/g, 'Reversión crédito Compra #');
                       text = text.replace(/Reversión crédito Pedido #/g, 'Reversión crédito Compra #');
+                      text = text.replace(/Depósito cuenta corriente/g, 'Depósito a cuenta');
+                      text = text.replace(/Pago cuenta corriente/g, 'Pago recibido');
                       
                       // Strip product details (everything after the first ' - ')
                       if (text.includes(' - ')) {
                         text = text.split(' - ')[0];
                       }
                       return text;
+                    };
+
+                    const roundCcMoney = (value) =>
+                      Math.round((parseFloat(value || 0) + Number.EPSILON) * 100) / 100;
+
+                    const isUnlinkedClientPayment = (concepto) =>
+                      String(concepto || '').startsWith('Pago cuenta corriente');
+
+                    const isOrderPrimaryDeudaCharge = (mov, orderId) => {
+                      const c = String(mov?.concepto || '');
+                      const debe = parseFloat(mov?.debe || 0);
+                      if (debe <= 0 || !c.includes(`#${orderId}`)) return false;
+                      if (c.includes('Reversión') || c.includes('Cobro') || c.includes('Crédito') || c.includes('Anticipo')) {
+                        return false;
+                      }
+                      return /^Pedido #/.test(c);
+                    };
+
+                    const getGroupPendingAmount = (groupMovs, orderId) => {
+                      let seenPedidoCharge = false;
+                      const normalized = groupMovs.filter((mov) => {
+                        if (!isOrderPrimaryDeudaCharge(mov, orderId)) return true;
+                        if (seenPedidoCharge) return false;
+                        seenPedidoCharge = true;
+                        return true;
+                      });
+                      const totalDebe = normalized.reduce((sum, m) => sum + parseFloat(m.debe || 0), 0);
+                      const totalHaber = normalized.reduce((sum, m) => sum + parseFloat(m.haber || 0), 0);
+                      return Math.max(0, roundCcMoney(totalDebe - totalHaber));
+                    };
+
+                    const formatLinkedPaymentLabel = (concepto, orderId) => {
+                      const match = String(concepto || '').match(/\(([^)]+)\)/);
+                      const medio = match ? match[1].split('—')[0].trim() : 'Pago';
+                      return `Cobro Compra #${orderId} (${medio})`;
                     };
 
                     const groups = {};
@@ -6433,12 +6899,13 @@ function Clientes({ navigate, profile, accentColor }) {
                       const c = String(concepto || '');
                       if (c.includes('Crédito') || c.includes('Anticipo')) return 0;
                       if (/^Pedido #/.test(c)) return groupHasCredit ? 1 : 0;
-                      if (c.includes('Cobro Pedido') && !c.includes('Reversión')) return groupHasCredit ? 2 : 1;
+                      if ((c.includes('Cobro Pedido') || c.startsWith('Pago cuenta corriente')) && !c.includes('Reversión')) {
+                        return groupHasCredit ? 2 : 1;
+                      }
                       return 3;
                     };
 
-                    const sortedGroups = Object.keys(groups).map(orderId => {
-                      const groupMovs = groups[orderId];
+                    const buildOrderGroup = (orderId, groupMovs) => {
                       const groupHasCredit = groupMovs.some((m) => {
                         const c = m.concepto || '';
                         return c.includes('Crédito') || c.includes('Anticipo');
@@ -6449,16 +6916,24 @@ function Clientes({ navigate, profile, accentColor }) {
                         if (ta !== tb) return ta - tb;
                         return getMovementSortRank(a.concepto, groupHasCredit) - getMovementSortRank(b.concepto, groupHasCredit);
                       });
-                      const groupDate = new Date(groupMovs[0].fecha).getTime();
-
-                      const totalDebe = groupMovs.reduce((sum, m) => sum + parseFloat(m.debe || 0), 0);
-                      const totalHaber = groupMovs.reduce((sum, m) => sum + parseFloat(m.haber || 0), 0);
-                      const isCancelled = groupMovs.some(m => m.concepto.toLowerCase().includes('cancelación') || m.concepto.toLowerCase().includes('cancelacion'));
+                      const normalizedMovs = (() => {
+                        let seenPedidoCharge = false;
+                        return groupMovs.filter((mov) => {
+                          if (!isOrderPrimaryDeudaCharge(mov, orderId)) return true;
+                          if (seenPedidoCharge) return false;
+                          seenPedidoCharge = true;
+                          return true;
+                        });
+                      })();
+                      const groupDate = new Date(normalizedMovs[0]?.fecha || groupMovs[0].fecha).getTime();
+                      const totalDebe = normalizedMovs.reduce((sum, m) => sum + parseFloat(m.debe || 0), 0);
+                      const totalHaber = normalizedMovs.reduce((sum, m) => sum + parseFloat(m.haber || 0), 0);
+                      const isCancelled = normalizedMovs.some(m => m.concepto.toLowerCase().includes('cancelación') || m.concepto.toLowerCase().includes('cancelacion'));
 
                       let paymentStatus = 'pending';
                       if (isCancelled) {
                         paymentStatus = 'cancelled';
-                      } else if (totalHaber >= totalDebe) {
+                      } else if (totalHaber >= totalDebe - 0.005) {
                         paymentStatus = 'paid';
                       }
 
@@ -6466,19 +6941,74 @@ function Clientes({ navigate, profile, accentColor }) {
                         type: 'order_group',
                         orderId,
                         date: groupDate,
-                        movements: groupMovs,
-                        paymentStatus
+                        movements: normalizedMovs,
+                        paymentStatus,
                       };
-                    });
+                    };
 
-                    standalone.forEach(m => {
-                      sortedGroups.push({
+                    let orderGroups = Object.keys(groups).map((orderId) =>
+                      buildOrderGroup(orderId, groups[orderId])
+                    );
+
+                    const unlinkedPayments = standalone.filter((m) => isUnlinkedClientPayment(m.concepto));
+                    const otherStandalone = standalone.filter((m) => !isUnlinkedClientPayment(m.concepto));
+                    const paymentsFifo = [...unlinkedPayments].sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
+                    const ordersFifo = [...orderGroups].sort((a, b) => a.date - b.date);
+                    const stillStandalonePayments = [];
+
+                    for (const payment of paymentsFifo) {
+                      let remaining = roundCcMoney(payment.haber || 0);
+                      let linkedAny = false;
+
+                      for (const group of ordersFifo) {
+                        if (remaining <= 0.005) break;
+                        const pending = getGroupPendingAmount(group.movements, group.orderId);
+                        if (pending <= 0.005) continue;
+
+                        const apply = roundCcMoney(Math.min(remaining, pending));
+                        if (apply <= 0.005) continue;
+
+                        group.movements.push({
+                          ...payment,
+                          id: `${payment.id}_alloc_${group.orderId}_${apply}`,
+                          haber: apply,
+                          _displayLinkedPayment: true,
+                          _linkedOrderId: group.orderId,
+                        });
+                        remaining = roundCcMoney(remaining - apply);
+                        linkedAny = true;
+
+                        const refreshed = buildOrderGroup(group.orderId, group.movements);
+                        group.paymentStatus = refreshed.paymentStatus;
+                        group.movements = refreshed.movements;
+                      }
+
+                      if (remaining > 0.005) {
+                        stillStandalonePayments.push({
+                          ...payment,
+                          haber: remaining,
+                          id: `${payment.id}_remainder`,
+                        });
+                      } else if (!linkedAny) {
+                        stillStandalonePayments.push(payment);
+                      }
+                    }
+
+                    const sortedGroups = [
+                      ...orderGroups,
+                      ...otherStandalone.map((m) => ({
                         type: 'standalone',
                         date: new Date(m.fecha).getTime(),
                         movements: [m],
-                        paymentStatus: 'none'
-                      });
-                    });
+                        paymentStatus: 'none',
+                      })),
+                      ...stillStandalonePayments.map((m) => ({
+                        type: 'standalone',
+                        date: new Date(m.fecha).getTime(),
+                        movements: [m],
+                        paymentStatus: 'none',
+                      })),
+                    ];
 
                     // Sort groups by date descending (newest first)
                     sortedGroups.sort((a, b) => b.date - a.date);
@@ -6560,7 +7090,11 @@ function Clientes({ navigate, profile, accentColor }) {
                                       borderBottom: '2px solid #cbd5e1',
                                       borderBottomLeftRadius: '3px'
                                     }}></span>
-                                    <span className="movement-concept text-dark" style={{ fontSize: '0.85rem', color: '#475569', fontWeight: '500' }}>{cleanConceptForDisplay(subMov.concepto)}</span>
+                                    <span className="movement-concept text-dark" style={{ fontSize: '0.85rem', color: '#475569', fontWeight: '500' }}>
+                                      {subMov._displayLinkedPayment
+                                        ? formatLinkedPaymentLabel(subMov.concepto, subMov._linkedOrderId || group.orderId)
+                                        : cleanConceptForDisplay(subMov.concepto)}
+                                    </span>
                                     <span className="movement-date" style={{ fontSize: '0.7rem' }}>
                                       {new Date(subMov.fecha).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
                                     </span>
@@ -6581,11 +7115,20 @@ function Clientes({ navigate, profile, accentColor }) {
                         // Standalone movement
                         const standMov = group.movements[0];
                         const isStandCharge = standMov.debe > 0;
+                        const conceptText = String(standMov.concepto || '');
+                        const isDeposit = conceptText.includes('Depósito cuenta corriente');
+                        const isClientPayment = conceptText.startsWith('Pago cuenta corriente');
+                        const standBg = isDeposit ? '#eff6ff' : isClientPayment ? '#ecfdf5' : '#ffffff';
+                        const standBadge = isDeposit
+                          ? <span className="badge-tag" style={{ backgroundColor: '#dbeafe', color: '#1d4ed8', borderColor: '#93c5fd', fontSize: '0.65rem', padding: '2px 6px', fontWeight: '800', lineHeight: 1, textTransform: 'uppercase', marginLeft: '6px' }}>A cuenta</span>
+                          : isClientPayment
+                          ? <span className="badge-tag" style={{ backgroundColor: '#ecfdf5', color: '#10b981', borderColor: '#a7f3d0', fontSize: '0.65rem', padding: '2px 6px', fontWeight: '800', lineHeight: 1, textTransform: 'uppercase', marginLeft: '6px' }}>Pago</span>
+                          : null;
                         return (
                           <div key={`s_${standMov.id}_${idx}`} style={{
                             border: '1px solid var(--border-color)',
                             borderRadius: '10px',
-                            backgroundColor: '#ffffff',
+                            backgroundColor: standBg,
                             marginBottom: '14px',
                             boxShadow: 'var(--shadow-sm)',
                             padding: '12px 14px',
@@ -6594,7 +7137,10 @@ function Clientes({ navigate, profile, accentColor }) {
                             alignItems: 'center'
                           }}>
                             <div className="movement-info" style={{ flex: 1, marginRight: '8px' }}>
-                              <span className="movement-concept text-dark" style={{ fontWeight: '600' }}>{cleanConceptForDisplay(standMov.concepto)}</span>
+                              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
+                                <span className="movement-concept text-dark" style={{ fontWeight: '600' }}>{cleanConceptForDisplay(standMov.concepto)}</span>
+                                {standBadge}
+                              </div>
                               <span className="movement-date">
                                 {new Date(standMov.fecha).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
                               </span>
@@ -7103,7 +7649,7 @@ function Clientes({ navigate, profile, accentColor }) {
       {/* MODAL: REGISTRAR PAGO CUENTA CORRIENTE */}
       {paymentModal && selectedClient && (
         <div className="modal-overlay" style={{ zIndex: 1100 }}>
-          <div className="modal-content-card" style={{ maxWidth: '420px' }}>
+          <div className="modal-content-card modal-content-card--scrollable" style={{ maxWidth: '760px' }}>
             <div className="modal-header" style={{ backgroundColor: '#2563eb' }}>
               <h5 className="modal-title">
                 <i className="bi bi-cash-stack me-2"></i>
@@ -7118,8 +7664,8 @@ function Clientes({ navigate, profile, accentColor }) {
                 <i className="bi bi-x-lg"></i>
               </button>
             </div>
-            <div className="modal-body" style={{ padding: '20px' }}>
-              <form onSubmit={handleSubmitPayment}>
+            <form onSubmit={handleSubmitPayment} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1 }}>
+              <div className="modal-body-scroll">
                 <div className="alert-box" style={{ backgroundColor: '#eff6ff', borderColor: '#bfdbfe', color: '#1e40af', marginBottom: '15px', fontSize: '0.85rem' }}>
                   <i className="bi bi-info-circle-fill"></i>
                   <div>
@@ -7128,46 +7674,73 @@ function Clientes({ navigate, profile, accentColor }) {
                       $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(parseFloat(selectedClient.saldo || 0))}
                     </strong>
                     <div style={{ marginTop: '4px', fontSize: '0.78rem' }}>
-                      El pago reduce la cuenta corriente e ingresa en la caja del día según el medio elegido.
+                      Elegí las compras a imputar. El monto se actualiza al seleccionar; podés modificarlo si paga de más.
                     </div>
                   </div>
                 </div>
 
-                <div className="form-group mb-3">
-                  <label className="form-label">Monto a cobrar ($)</label>
-                  <input
-                    type="number"
-                    className="form-input"
-                    value={paymentAmount}
-                    onChange={(e) => setPaymentAmount(e.target.value)}
-                    onKeyDown={handleNumericKeyDown}
-                    step="any"
-                    min="0.01"
-                    max={parseFloat(selectedClient.saldo || 0)}
-                    required
-                  />
+                {renderPaymentOrderPicker({
+                  loading: paymentPendingLoading,
+                  amountAuto: paymentAmountAuto,
+                  setAmountAuto: setPaymentAmountAuto,
+                  setAmount: setPaymentAmount,
+                  emptyMessage: 'Este cliente no tiene compras pendientes en cuenta corriente.',
+                })}
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                  <div className="form-group mb-3">
+                    <label className="form-label">Monto recibido ($)</label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      value={paymentAmount}
+                      onChange={(e) => {
+                        setPaymentAmountAuto(false);
+                        setPaymentAmount(e.target.value);
+                      }}
+                      onKeyDown={handleNumericKeyDown}
+                      step="any"
+                      min="0.01"
+                      required
+                    />
+                    {paymentSelectedTotal > 0 && (
+                      <button
+                        type="button"
+                        className="btn-nav-back"
+                        style={{ marginTop: '6px', fontSize: '0.75rem', padding: '2px 8px', border: '1px solid #cbd5e1' }}
+                        onClick={() => {
+                          setPaymentAmountAuto(true);
+                          setPaymentAmount(String(paymentSelectedTotal));
+                        }}
+                      >
+                        Usar total seleccionado ($ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(paymentSelectedTotal)})
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="form-group mb-3">
+                    <label className="form-label">Medio de pago</label>
+                    <select
+                      className="form-select"
+                      value={paymentMethod}
+                      onChange={(e) => setPaymentMethod(e.target.value)}
+                      required
+                    >
+                      {(collectionPaymentMethods.length > 0 ? collectionPaymentMethods : [{ id: 'efectivo', label: 'Efectivo' }]).map((concept) => {
+                        const valueName = getPaymentMethodValue(concept);
+                        return (
+                          <option key={concept.id || valueName} value={valueName}>
+                            {concept.label || valueName}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
                 </div>
 
-                <div className="form-group mb-3">
-                  <label className="form-label">Medio de pago</label>
-                  <select
-                    className="form-select"
-                    value={paymentMethod}
-                    onChange={(e) => setPaymentMethod(e.target.value)}
-                    required
-                  >
-                    {(collectionPaymentMethods.length > 0 ? collectionPaymentMethods : [{ id: 'efectivo', label: 'Efectivo' }]).map((concept) => {
-                      const valueName = getPaymentMethodValue(concept);
-                      return (
-                        <option key={concept.id || valueName} value={valueName}>
-                          {concept.label || valueName}
-                        </option>
-                      );
-                    })}
-                  </select>
-                </div>
+                {renderPaymentAllocationPreview(drawerPaymentPreview)}
 
-                <div className="form-group mb-4">
+                <div className="form-group mb-0">
                   <label className="form-label">Observación (opcional)</label>
                   <input
                     type="text"
@@ -7177,28 +7750,28 @@ function Clientes({ navigate, profile, accentColor }) {
                     onChange={(e) => setPaymentObs(e.target.value)}
                   />
                 </div>
+              </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                  <button
-                    type="button"
-                    className="btn-cancel"
-                    style={{ padding: '11px', margin: 0 }}
-                    onClick={() => setPaymentModal(false)}
-                    disabled={submittingPayment}
-                  >
-                    Cancelar
-                  </button>
-                  <button
-                    type="submit"
-                    className="btn-submit"
-                    style={{ backgroundColor: '#2563eb', padding: '11px', margin: 0 }}
-                    disabled={submittingPayment}
-                  >
-                    {submittingPayment ? 'Registrando...' : 'Confirmar pago'}
-                  </button>
-                </div>
-              </form>
-            </div>
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn-cancel"
+                  style={{ padding: '11px', margin: 0, flex: 1 }}
+                  onClick={() => setPaymentModal(false)}
+                  disabled={submittingPayment}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="btn-submit"
+                  style={{ backgroundColor: '#2563eb', padding: '11px', margin: 0, flex: 2 }}
+                  disabled={submittingPayment}
+                >
+                  {submittingPayment ? 'Registrando...' : 'Confirmar pago'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

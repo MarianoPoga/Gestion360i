@@ -110,6 +110,11 @@ const movementConcept = {
   reversionCredito: (ref) => `Reversión crédito Pedido #${ref}`,
   cobro: (ref, medio) => `Cobro Pedido #${ref} (${medio})`,
   reversionCobro: (ref) => `Reversión Cobro Pedido #${ref}`,
+  deposito: (medio, note) => (
+    note
+      ? `Depósito cuenta corriente (${medio}) — ${note}`
+      : `Depósito cuenta corriente (${medio})`
+  ),
   cancelacion: (ref, motivo) => (
     motivo
       ? `Cancelación Pedido #${ref} (Motivo: ${motivo})`
@@ -130,6 +135,33 @@ const isCobroPedidoConcept = (concepto, orderRef) => {
 
 const isPedidoDeudaConcept = (concepto) => /^Pedido #/.test(String(concepto || ''));
 
+const isOrderPrimaryDeudaCharge = (mov, orderRef) => {
+  const c = String(mov?.concepto || '');
+  const debe = parseFloat(mov?.debe || 0);
+  if (debe <= 0 || !orderRef || !c.includes(`#${orderRef}`)) return false;
+  if (c.includes('Reversión') || c.includes('Cobro') || c.includes('Crédito') || c.includes('Anticipo')) {
+    return false;
+  }
+  return isPedidoDeudaConcept(c);
+};
+
+const isPedidoChargeMovement = (mov) =>
+  isPedidoDeudaConcept(mov?.concepto) && parseFloat(mov?.debe || 0) > 0;
+
+/** Evita contar/mostrar deudas duplicadas (sync + finalize u formatos viejos con detalle). */
+const dedupePedidoChargeMovements = (movements, orderRef = null) => {
+  let seenPedidoCharge = false;
+  return (movements || []).filter((mov) => {
+    const isDupTarget = orderRef
+      ? isOrderPrimaryDeudaCharge(mov, orderRef)
+      : isPedidoChargeMovement(mov);
+    if (!isDupTarget) return true;
+    if (seenPedidoCharge) return false;
+    seenPedidoCharge = true;
+    return true;
+  });
+};
+
 const isFinalizadoEstadoValue = (estado) => {
   const est = (estado || '').toLowerCase();
   return est === 'finalizado' || est === 'cobrado';
@@ -146,7 +178,7 @@ const hasPreFinalizeCredit = (estado, medio) =>
   && !isMedioPagadoEnCaja(medio);
 
 const buildOrderCCFlags = (movements, orderRef) => ({
-  hasPedido: (movements || []).some((m) => isPedidoDeudaConcept(m.concepto) && m.concepto.includes(`#${orderRef}`)),
+  hasPedido: (movements || []).some((m) => isOrderPrimaryDeudaCharge(m, orderRef)),
   hasCredit: (movements || []).some((m) => isCreditoPedidoConcept(m.concepto, orderRef)),
   hasCobro: (movements || []).some((m) => isCobroPedidoConcept(m.concepto, orderRef)),
 });
@@ -181,6 +213,123 @@ const buildMissingFinalizeMovements = (order, relatedMovements) => {
   }
 
   return inserts;
+};
+
+const roundMoney = (value) =>
+  Math.round((parseFloat(value || 0) + Number.EPSILON) * 100) / 100;
+
+const getOrderPendingCCAmount = (relatedMovements, orderTotal) => {
+  const orderRefMatch = relatedMovements?.[0]?.concepto?.match(/#([A-Za-z0-9_]+)/);
+  const orderRef = orderRefMatch ? orderRefMatch[1] : null;
+  const normalized = dedupePedidoChargeMovements(relatedMovements, orderRef);
+  if (!normalized?.length) {
+    return Math.max(0, roundMoney(orderTotal));
+  }
+  const net = normalized.reduce(
+    (sum, m) => sum + parseFloat(m.debe || 0) - parseFloat(m.haber || 0),
+    0
+  );
+  return Math.max(0, roundMoney(net));
+};
+
+/** Pagos viejos sin compra en el concepto — se imputan FIFO en pantalla y al calcular deuda. */
+const isUnlinkedClientPaymentConcept = (concepto) =>
+  String(concepto || '').startsWith('Pago cuenta corriente');
+
+const applyUnlinkedClientPaymentsFifo = (pendingRows, movements) => {
+  const rows = pendingRows.map((row) => ({
+    ...row,
+    pending: roundMoney(row.pending),
+  }));
+
+  const unlinkedPayments = (movements || [])
+    .filter((m) => isUnlinkedClientPaymentConcept(m.concepto))
+    .sort((a, b) => new Date(a.fecha || 0) - new Date(b.fecha || 0));
+
+  for (const payment of unlinkedPayments) {
+    let remaining = roundMoney(parseFloat(payment.haber || 0));
+    if (remaining <= 0) continue;
+
+    for (const row of rows) {
+      if (remaining <= 0) break;
+      if (row.pending <= 0) continue;
+      const apply = roundMoney(Math.min(remaining, row.pending));
+      row.pending = roundMoney(row.pending - apply);
+      remaining = roundMoney(remaining - apply);
+    }
+  }
+
+  return rows;
+};
+
+const buildClientOrderPendingRows = ({ orders, movements, orderIdsFilter = null }) => {
+  const idSet = Array.isArray(orderIdsFilter) && orderIdsFilter.length > 0
+    ? new Set(orderIdsFilter)
+    : null;
+
+  const rows = (orders || [])
+    .filter((order) => isFinalizadoEstadoValue(order.estado) && !isCancelledEstadoValue(order.estado))
+    .map((order) => {
+      const orderRef = getOrderMovementRef(order.id);
+      const relatedMovements = getOrderRelatedMovements(movements, orderRef);
+      const pending = getOrderPendingCCAmount(relatedMovements, order.total);
+      return {
+        orderId: order.id,
+        orderRef,
+        pending,
+        total: roundMoney(order.total),
+        fecha: order.fecha || order.created_at,
+        cliente_nombre: order.cliente_nombre,
+        order,
+      };
+    })
+    .sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
+
+  const withFifo = applyUnlinkedClientPaymentsFifo(rows, movements);
+
+  return idSet
+    ? withFifo.filter((row) => idSet.has(row.orderId))
+    : withFifo;
+};
+
+const buildClientPaymentAllocations = ({ orders, movements, amount, orderIds, allClientOrders = null }) => {
+  const idSet = new Set(orderIds || []);
+  const fifoSourceOrders = allClientOrders || orders;
+  const effectiveRows = buildClientOrderPendingRows({
+    orders: fifoSourceOrders,
+    movements,
+  });
+  const effectivePendingByOrderId = new Map(
+    effectiveRows.map((row) => [row.orderId, row.pending])
+  );
+
+  const selectedOrders = (orders || [])
+    .filter((order) => idSet.has(order.id))
+    .filter((order) => isFinalizadoEstadoValue(order.estado) && !isCancelledEstadoValue(order.estado))
+    .sort((a, b) => new Date(a.fecha || a.created_at) - new Date(b.fecha || b.created_at));
+
+  let remaining = roundMoney(amount);
+  const orderAllocations = [];
+  let totalPendingSelected = 0;
+
+  for (const order of selectedOrders) {
+    const orderRef = getOrderMovementRef(order.id);
+    const pending = roundMoney(effectivePendingByOrderId.get(order.id) || 0);
+    totalPendingSelected = roundMoney(totalPendingSelected + pending);
+    if (pending <= 0 || remaining <= 0) continue;
+
+    const apply = roundMoney(Math.min(remaining, pending));
+    if (apply > 0) {
+      orderAllocations.push({ order, orderRef, amount: apply, pending });
+      remaining = roundMoney(remaining - apply);
+    }
+  }
+
+  return {
+    orderAllocations,
+    depositAmount: remaining,
+    totalPendingSelected,
+  };
 };
 
 const getArgentinaDayBounds = (dateInput) => {
@@ -1846,48 +1995,259 @@ export const db = {
     return { success: true, data: newMov };
   },
 
-  registerClientPayment: async ({ cliente_id, monto, medio_pago, observacion = '' }) => {
-    const amount = parseFloat(monto);
+  registerClientPayment: async ({ cliente_id, monto, medio_pago, observacion = '', order_ids = null }) => {
+    const pendingRows = await db.getClientOrdersCCPending(cliente_id, []);
+    const resolvedOrderIds = Array.isArray(order_ids)
+      ? order_ids
+      : pendingRows.map((row) => row.orderId);
+
+    return db.registerClientPaymentWithOrders({
+      cliente_id,
+      monto,
+      medio_pago,
+      order_ids: resolvedOrderIds,
+      observacion,
+    });
+  },
+
+  getClientOrdersCCPending: async (clienteId, orderIds = []) => {
+    if (!clienteId) return [];
+    const businessId = await ensureBusinessContext();
+    const idSet = new Set(orderIds);
+
+    let orders = [];
+    let movements = [];
+
+    if (isSupabaseConfigured() && supabase) {
+      const { data: orderRows, error: ordersErr } = await supabase
+        .from('gst_pedidos')
+        .select('*')
+        .eq('business_id', businessId)
+        .eq('cliente_id', clienteId);
+      if (ordersErr) throw ordersErr;
+      orders = orderRows || [];
+
+      const { data: movRows, error: movsErr } = await supabase
+        .from('gst_cliente_movimientos')
+        .select('*')
+        .eq('business_id', businessId)
+        .eq('cliente_id', clienteId);
+      if (movsErr) throw movsErr;
+      movements = movRows || [];
+    } else {
+      const storedOrders = localStorage.getItem('mock_pedidos');
+      const storedMovs = localStorage.getItem('mock_movimientos');
+      orders = storedOrders ? JSON.parse(storedOrders) : [];
+      movements = storedMovs ? JSON.parse(storedMovs) : [];
+      orders = orders.filter((order) => order.cliente_id === clienteId);
+      movements = movements.filter((mov) => mov.cliente_id === clienteId);
+    }
+
+    const orderIdsFilter = idSet.size > 0 ? [...idSet] : null;
+    return buildClientOrderPendingRows({ orders, movements, orderIdsFilter })
+      .filter((row) => row.pending > 0)
+      .map(({ order, ...row }) => row);
+  },
+
+  registerClientPaymentWithOrders: async ({
+    cliente_id,
+    monto,
+    medio_pago,
+    order_ids = [],
+    observacion = '',
+  }) => {
+    const amount = roundMoney(monto);
     if (!cliente_id || !Number.isFinite(amount) || amount <= 0) {
       return { success: false, error: 'Monto inválido.' };
     }
-    const medio = String(medio_pago || '').trim();
-    if (!medio) {
-      return { success: false, error: 'Seleccioná un medio de pago.' };
+    if (!Array.isArray(order_ids)) {
+      order_ids = [];
     }
 
-    const note = String(observacion || '').trim();
-    const concepto = note
-      ? `Pago cuenta corriente (${medio}) — ${note}`
-      : `Pago cuenta corriente (${medio})`;
+    const medio = String(medio_pago || '').trim();
+    if (!medio || isMedioCtaCte(medio)) {
+      return { success: false, error: 'Seleccioná un medio de pago válido (sin Cta Cte).' };
+    }
 
+    const businessId = await ensureBusinessContext();
+    const note = String(observacion || '').trim();
     const clientes = await db.getClientes();
     const client = clientes.find((c) => c.id === cliente_id);
     if (!client) {
       return { success: false, error: 'Cliente no encontrado.' };
     }
 
-    const currentSaldo = parseFloat(client.saldo || 0);
-    if (currentSaldo <= 0) {
-      return { success: false, error: 'El cliente no tiene saldo deudor para imputar un pago.' };
-    }
-    if (amount > currentSaldo + 0.005) {
-      return { success: false, error: 'El monto supera el saldo deudor del cliente.' };
+    if (order_ids.length === 0) {
+      const resDep = await db.saveMovement({
+        cliente_id,
+        concepto: movementConcept.deposito(medio, note),
+        debe: 0,
+        haber: amount,
+      });
+      if (!resDep.success) {
+        return { success: false, error: 'No se pudo registrar el depósito a cuenta.' };
+      }
+      const newSaldo = roundMoney(parseFloat(client.saldo || 0) - amount);
+      await db.updateClienteSaldo(cliente_id, newSaldo);
+      return {
+        success: true,
+        data: {
+          saldo: newSaldo,
+          appliedToOrders: 0,
+          depositAmount: amount,
+          allocations: [],
+        },
+      };
     }
 
-    const resMov = await db.saveMovement({
-      cliente_id,
-      concepto,
-      debe: 0,
-      haber: amount,
+    let orders = [];
+    let allClientOrders = [];
+    let movements = [];
+
+    if (isSupabaseConfigured() && supabase) {
+      const { data: orderRows, error: ordersErr } = await supabase
+        .from('gst_pedidos')
+        .select('*')
+        .eq('business_id', businessId)
+        .in('id', order_ids);
+      if (ordersErr) throw ordersErr;
+      orders = orderRows || [];
+
+      const { data: allOrderRows, error: allOrdersErr } = await supabase
+        .from('gst_pedidos')
+        .select('*')
+        .eq('business_id', businessId)
+        .eq('cliente_id', cliente_id);
+      if (allOrdersErr) throw allOrdersErr;
+      allClientOrders = allOrderRows || [];
+
+      const { data: movRows, error: movsErr } = await supabase
+        .from('gst_cliente_movimientos')
+        .select('*')
+        .eq('business_id', businessId)
+        .eq('cliente_id', cliente_id);
+      if (movsErr) throw movsErr;
+      movements = movRows || [];
+    } else {
+      const storedOrders = localStorage.getItem('mock_pedidos');
+      const storedMovs = localStorage.getItem('mock_movimientos');
+      const parsedOrders = storedOrders ? JSON.parse(storedOrders) : [];
+      movements = storedMovs ? JSON.parse(storedMovs) : [];
+      allClientOrders = parsedOrders.filter((order) => order.cliente_id === cliente_id);
+      orders = allClientOrders.filter((order) => order_ids.includes(order.id));
+      movements = movements.filter((mov) => mov.cliente_id === cliente_id);
+    }
+
+    if (orders.length !== order_ids.length) {
+      return { success: false, error: 'No se encontraron todos los pedidos seleccionados.' };
+    }
+    if (orders.some((order) => order.cliente_id !== cliente_id)) {
+      return { success: false, error: 'Todos los pedidos deben ser del mismo cliente.' };
+    }
+    if (orders.some((order) => !isFinalizadoEstadoValue(order.estado) || isCancelledEstadoValue(order.estado))) {
+      return { success: false, error: 'Solo se pueden imputar pagos a pedidos finalizados.' };
+    }
+
+    const { orderAllocations, depositAmount, totalPendingSelected } = buildClientPaymentAllocations({
+      orders,
+      movements,
+      amount,
+      orderIds: order_ids,
+      allClientOrders,
     });
-    if (!resMov.success) {
-      return { success: false, error: 'No se pudo registrar el movimiento.' };
+
+    if (orderAllocations.length === 0 && totalPendingSelected <= 0 && depositAmount <= 0) {
+      return { success: false, error: 'Los pedidos seleccionados no tienen deuda pendiente en cuenta corriente.' };
     }
 
-    const newSaldo = Math.round((currentSaldo - amount + Number.EPSILON) * 100) / 100;
+    const appliedToOrders = roundMoney(
+      orderAllocations.reduce((sum, row) => sum + row.amount, 0)
+    );
+    if (appliedToOrders <= 0 && depositAmount <= 0) {
+      return { success: false, error: 'No se pudo imputar el pago.' };
+    }
+
+    const insertedMovements = [];
+    const fecha = new Date().toISOString();
+
+    const insertMovementRecord = async (mov) => {
+      if (isSupabaseConfigured() && supabase) {
+        const { data, error } = await supabase
+          .from('gst_cliente_movimientos')
+          .insert([{
+            business_id: businessId,
+            cliente_id,
+            concepto: mov.concepto,
+            debe: mov.debe,
+            haber: mov.haber,
+            fecha: mov.fecha || fecha,
+          }])
+          .select()
+          .single();
+        if (error) throw error;
+        insertedMovements.push(data);
+        movements.push(data);
+        return;
+      }
+
+      const newMov = {
+        id: `m_ccpay_${Date.now()}_${Math.random()}`,
+        cliente_id,
+        fecha: mov.fecha || fecha,
+        concepto: mov.concepto,
+        debe: mov.debe,
+        haber: mov.haber,
+      };
+      movements.push(newMov);
+      insertedMovements.push(newMov);
+    };
+
+    for (const allocation of orderAllocations) {
+      const { order, orderRef, amount: allocAmount } = allocation;
+      const relatedMovements = getOrderRelatedMovements(movements, orderRef);
+      const missing = buildMissingFinalizeMovements(order, relatedMovements);
+      for (const mov of missing) {
+        await insertMovementRecord(mov);
+      }
+
+      await insertMovementRecord({
+        concepto: movementConcept.cobro(orderRef, medio),
+        debe: 0,
+        haber: allocAmount,
+        fecha,
+      });
+    }
+
+    if (depositAmount > 0) {
+      await insertMovementRecord({
+        concepto: movementConcept.deposito(medio, note),
+        debe: 0,
+        haber: depositAmount,
+        fecha,
+      });
+    }
+
+    if (!isSupabaseConfigured() || !supabase) {
+      localStorage.setItem('mock_movimientos', JSON.stringify(movements));
+    }
+
+    const newSaldo = roundMoney(parseFloat(client.saldo || 0) - amount);
     await db.updateClienteSaldo(cliente_id, newSaldo);
-    return { success: true, data: { movement: resMov.data, saldo: newSaldo } };
+
+    return {
+      success: true,
+      data: {
+        saldo: newSaldo,
+        appliedToOrders,
+        depositAmount,
+        allocations: orderAllocations.map((row) => ({
+          orderId: row.order.id,
+          orderRef: row.orderRef,
+          amount: row.amount,
+        })),
+        movements: insertedMovements,
+      },
+    };
   },
 
   updateClienteSaldo: async (clienteId, newSaldo) => {
@@ -1949,6 +2309,14 @@ export const db = {
 
   getDailyClientPayments: async (startDate, endDate) => {
     const businessId = getBusinessId();
+    const isCCCashInflow = (concepto) => {
+      const text = String(concepto || '');
+      if (text.startsWith('Pago cuenta corriente')) return true;
+      if (text.startsWith('Depósito cuenta corriente')) return true;
+      if (text.includes('Cobro Pedido #') && !text.includes('Reversión')) return true;
+      return false;
+    };
+
     if (isSupabaseConfigured() && supabase) {
       try {
         const { data, error } = await supabase
@@ -1957,8 +2325,10 @@ export const db = {
           .eq('business_id', businessId)
           .gte('fecha', startDate)
           .lte('fecha', endDate)
-          .like('concepto', 'Pago cuenta corriente%');
-        if (!error) return data || [];
+          .or('concepto.like.Pago cuenta corriente%,concepto.like.Depósito cuenta corriente%,concepto.like.%Cobro Pedido #%');
+        if (!error) {
+          return (data || []).filter((m) => isCCCashInflow(m.concepto));
+        }
         console.warn('Supabase getDailyClientPayments failed, falling back to mock:', error);
       } catch (err) {
         console.warn('Supabase getDailyClientPayments error, falling back to mock:', err);
@@ -1969,8 +2339,7 @@ export const db = {
     const movements = stored ? JSON.parse(stored) : [];
     return movements.filter((m) => {
       const withinDate = m.fecha >= startDate && m.fecha <= endDate;
-      const isPayment = m.concepto && m.concepto.startsWith('Pago cuenta corriente');
-      return withinDate && isPayment;
+      return withinDate && isCCCashInflow(m.concepto);
     });
   },
 
