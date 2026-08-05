@@ -1,4 +1,4 @@
-import { setActiveCaja, isFinalizedPedidoEstado } from './cierreTurnos';
+import { setActiveCaja, isFinalizedPedidoEstado, orderMatchesCajaTurno } from './cierreTurnos';
 import { PEDIDOS_CAJA_TIPOS } from './pedidosCajas';
 
 export const OPEN_CAJA_SESSION_KEYS = {
@@ -108,15 +108,12 @@ export const getTodayOrdersForTipo = (orders, tipo) =>
     return isSameLocalDay(order.fecha);
   });
 
-const orderBelongsToOpenCaja = (order, turnoName) => {
-  const caja = String(order.turno_caja || '').trim();
-  if (caja) return caja === String(turnoName || '').trim();
-  return true;
-};
+const orderBelongsToOpenCaja = (order, turnoName, tipo) =>
+  orderMatchesCajaTurno(order, turnoName, tipo);
 
 export const getTodayOrdersForCaja = (orders, tipo, turnoName) =>
   getTodayOrdersForTipo(orders, tipo).filter((order) =>
-    orderBelongsToOpenCaja(order, turnoName)
+    orderBelongsToOpenCaja(order, turnoName, tipo)
   );
 
 export const getPedidosForCierre = (orders, tipo, turnoName) =>
@@ -124,15 +121,8 @@ export const getPedidosForCierre = (orders, tipo, turnoName) =>
     (order) => isFinalizedPedidoEstado(order.estado) && !order.caja_cierre
   );
 
-export const orderBelongsToCierreTurno = (order, turnoName, pedidoTipo) => {
-  const turno = String(turnoName || '').trim();
-  const caja = String(order?.turno_caja || '').trim();
-  if (caja) return caja === turno;
-  if (!pedidoTipo) return true;
-  return pedidoTipo === PEDIDOS_CAJA_TIPOS.DELIVERY
-    ? order?.con_envio === true
-    : order?.con_envio !== true;
-};
+export const orderBelongsToCierreTurno = (order, turnoName, pedidoTipo) =>
+  orderMatchesCajaTurno(order, turnoName, pedidoTipo);
 
 export const countNonFinalizedOrdersForCaja = (orders, tipo, turnoName) =>
   getTodayOrdersForCaja(orders, tipo, turnoName).filter(

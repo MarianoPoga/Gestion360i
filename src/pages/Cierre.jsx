@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { db } from '../supabaseClient'
 import { getActiveMedios, getMedioIcon, MEDIO_EFECTIVO_ID, getEfectivoFromCierre } from '../cierreMedios'
 import { clampDateToToday, getTodayLocalDateString } from '../dateUtils'
+import { getCajasForPedidosTipo } from '../pedidosCajas'
 import {
   ADELANTO_EFECTIVO,
   ADELANTO_MERCADERIA,
@@ -96,6 +97,7 @@ function Cierre({ navigate, navState, accentColor }) {
 
   // Configured turnos and concepts states
   const [turnosDisponibles, setTurnosDisponibles] = useState([]);
+  const [pedidosCajasConfig, setPedidosCajasConfig] = useState({ assignments: {} });
   const [cierreConceptos, setCierreConceptos] = useState([]);
   const [config, setConfig] = useState({ allow_dinero: true, allow_mercaderia: true, allow_adelantos: true });
   const [formasPago, setFormasPago] = useState([]);
@@ -117,15 +119,19 @@ function Cierre({ navigate, navState, accentColor }) {
 
   useEffect(() => {
     const loadConfig = async () => {
-      const [activeTurnos, activeConcepts, activeFormas] = await Promise.all([
+      const [activeTurnos, activeConcepts, activeFormas, pedidosCajas] = await Promise.all([
         db.getCierreTurnoNames(),
         db.getCierreConceptos(),
-        db.getComprasFormasPago()
+        db.getComprasFormasPago(),
+        db.getPedidosCajasConfig(),
       ]);
 
       setTurnosDisponibles(activeTurnos);
+      setPedidosCajasConfig(pedidosCajas || { assignments: {} });
       const prefillTurno = navState?.cierrePrefill?.turno;
-      if (
+      if (prefillTurno && activeTurnos.includes(prefillTurno)) {
+        setTurno(prefillTurno);
+      } else if (
         activeTurnos.length > 0
         && !activeTurnos.includes(turno)
         && !prefillTurno
@@ -142,13 +148,26 @@ function Cierre({ navigate, navState, accentColor }) {
     setConfig(adelantosConfig);
   }, []);
 
+  const turnosForSelect = useMemo(() => {
+    if (!prefillFromPedidos) return turnosDisponibles;
+    const cajasTipo = getCajasForPedidosTipo(
+      pedidosCajasConfig,
+      turnosDisponibles,
+      prefillFromPedidos
+    );
+    if (!cajasTipo.length) return turnosDisponibles;
+    return turnosDisponibles.filter((name) => cajasTipo.includes(name));
+  }, [prefillFromPedidos, turnosDisponibles, pedidosCajasConfig]);
+
   const buildMedioValuesFromData = (concepts, pedidos, prefill) => {
     const next = {};
     getActiveMedios(concepts).forEach((medio) => {
       next[medio.id] = 0;
     });
 
-    const pedidosSource = prefill?.pedidos?.length ? prefill.pedidos : (pedidos || []);
+    const pedidosSource = prefill?.fromPedidosTipo
+      ? (pedidos || [])
+      : (prefill?.pedidos?.length ? prefill.pedidos : (pedidos || []));
 
     if (prefill?.fromPedidosTipo) {
       const importedMedios = db.aggregatePedidosForCierre(pedidosSource, concepts);
@@ -181,14 +200,6 @@ function Cierre({ navigate, navState, accentColor }) {
 
     return next;
   };
-
-  useEffect(() => {
-    const prefill = navState?.cierrePrefill;
-    if (!prefill?.fromPedidosTipo || !cierreConceptos.length) return;
-
-    setPendingPedidos(prefill.pedidos || []);
-    setMedioValues(buildMedioValuesFromData(cierreConceptos, prefill.pedidos || [], prefill));
-  }, [navState, cierreConceptos]);
 
   const getMedioValue = (id) => medioValues[id] || 0;
 
@@ -267,10 +278,14 @@ function Cierre({ navigate, navState, accentColor }) {
     const closed = ultimosCierres
       .filter(c => isSameLocalDate(c.fecha, fecha))
       .map(c => c.turno);
-    const available = turnosDisponibles.filter(t => !closed.includes(t));
+    const available = turnosForSelect.filter(t => !closed.includes(t));
     if (available.length > 0) {
       if (!available.includes(turno)) {
         setTurno(available[0]);
+      }
+    } else if (turnosForSelect.length > 0) {
+      if (!turnosForSelect.includes(turno)) {
+        setTurno(turnosForSelect[0]);
       }
     } else if (turnosDisponibles.length > 0) {
       if (!turnosDisponibles.includes(turno)) {
@@ -279,29 +294,29 @@ function Cierre({ navigate, navState, accentColor }) {
     } else {
       setTurno('');
     }
-  }, [fecha, ultimosCierres, turnosDisponibles, prefillFromPedidos, navState]);
+  }, [fecha, ultimosCierres, turnosDisponibles, turnosForSelect, prefillFromPedidos, navState]);
 
   // Load datasets on mount or when fecha/turno changes
   useEffect(() => {
     loadData();
-  }, [fecha, turno]);
+  }, [fecha, turno, prefillFromPedidos]);
 
   const loadData = async () => {
     setLoadingLists(true);
     try {
       const prefill = navState?.cierrePrefill;
-      const prefillTipo = prefill?.fromPedidosTipo || null;
+      const pedidoTipo = prefillFromPedidos || prefill?.fromPedidosTipo || null;
+      const pedidosPromise = turno
+        ? db.getPendingPedidosForCierre(fecha, turno, pedidoTipo)
+        : Promise.resolve([]);
+
       const [compras, adelantos, emps, cierres, concepts, pedidos] = await Promise.all([
         db.getPendingCompras(),
         db.getPendingAdelantos(),
         db.getEmpleados(),
         db.getUltimosCierres(),
         db.getCierreConceptos(),
-        prefill?.pedidos?.length
-          ? Promise.resolve(prefill.pedidos)
-          : (turno
-            ? db.getPendingPedidosForCierre(fecha, turno, prefillTipo)
-            : Promise.resolve([])),
+        pedidosPromise,
       ]);
       setPendingCompras(compras);
       setPendingAdelantos(adelantos);
@@ -530,7 +545,7 @@ function Cierre({ navigate, navState, accentColor }) {
   })();
 
   const isCurrentTurnoClosed = closedTurnos.includes(turno);
-  const allShiftsClosed = turnosDisponibles.length > 0 && turnosDisponibles.every(t => closedTurnos.includes(t));
+  const allShiftsClosed = turnosForSelect.length > 0 && turnosForSelect.every(t => closedTurnos.includes(t));
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '30px' }}>
@@ -587,9 +602,10 @@ function Cierre({ navigate, navState, accentColor }) {
                 className="form-select"
                 value={turno}
                 onChange={(e) => setTurno(e.target.value)}
+                disabled={!!prefillFromPedidos}
                 required
               >
-                {turnosDisponibles.map(t => {
+                {turnosForSelect.map(t => {
                   const isClosed = closedTurnos.includes(t);
                   return (
                     <option key={t} value={t} disabled={isClosed}>

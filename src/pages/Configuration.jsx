@@ -32,6 +32,10 @@ import {
   normalizeCajaAssignment,
   localPedidosManagedExternally,
 } from '../pedidosCajas'
+import {
+  notificationsConfigToForm,
+  notificationsFormToConfig,
+} from '../notificationConfig'
 
 const formatCuit = (val) => {
   if (!val) return '';
@@ -167,6 +171,8 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   const [arcaCert, setArcaCert] = useState('');
   const [arcaKey, setArcaKey] = useState('');
   const [arcaToken, setArcaToken] = useState('');
+
+  const [notificationsForm, setNotificationsForm] = useState(() => notificationsConfigToForm(null));
   
   // UI States
   const [saveStatus, setSaveStatus] = useState(''); // 'success', 'error', ''
@@ -183,7 +189,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
   useEffect(() => {
     async function initConfig() {
       try {
-        const [m, t, pc, c, cc, cco, cp, rp, arca] = await Promise.all([
+        const [m, t, pc, c, cc, cco, cp, rp, arca, notifications] = await Promise.all([
           db.getModules(),
           db.getCierreTurnos(),
           db.getPedidosCajasConfig(),
@@ -193,6 +199,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
           db.getComprasFormasPago(),
           db.getRolePermissions(),
           db.getArcaConfig(),
+          db.getNotificationsConfig(),
         ]);
         
         setModules(m || {});
@@ -249,6 +256,8 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
           setArcaKey(arca.private_key || '');
           setArcaToken(arca.token || '');
         }
+
+        setNotificationsForm(notificationsConfigToForm(notifications));
 
       } catch (e) {
         console.error("Error loading config data:", e);
@@ -551,6 +560,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
           privateKey: arcaKey,
           token: arcaToken,
         })),
+        db.saveNotificationsConfig(notificationsFormToConfig(notificationsForm)),
       ]);
 
       const failedSave = saveResults.find(
@@ -1051,6 +1061,126 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                         <div><strong>Error de Conexión:</strong> {testError}</div>
                       </div>
                     )}
+                  </div>
+                )}
+              </div>
+
+              {/* Config: Notificaciones */}
+              <div style={{ display: 'flex', flexDirection: 'column', borderBottom: '1px solid var(--border-color)', paddingBottom: expandedModule === 'notifications' ? '15px' : '0' }}>
+                <div className="toggle-item" style={{ borderBottom: 'none', marginBottom: 0, paddingBottom: expandedModule === 'notifications' ? '10px' : '15px' }}>
+                  <div
+                    className="toggle-info"
+                    onClick={() => setExpandedModule(expandedModule === 'notifications' ? null : 'notifications')}
+                    style={{ cursor: 'pointer', flex: 1, display: 'flex', alignItems: 'center' }}
+                  >
+                    <i
+                      className={`bi bi-chevron-${expandedModule === 'notifications' ? 'down' : 'right'}`}
+                      style={{ fontSize: '1.25rem', color: 'var(--text-dark)', marginRight: '12px', fontWeight: 'bold', WebkitTextStroke: '0.8px', width: '16px', textAlign: 'center' }}
+                    ></i>
+                    <div className="toggle-icon bg-primary"><i className="bi bi-bell-fill"></i></div>
+                    <div>
+                      <div className="toggle-label">Notificaciones</div>
+                      <div className="toggle-desc">Pushover al cerrar caja y base para app propia / webhooks</div>
+                    </div>
+                  </div>
+                </div>
+
+                {expandedModule === 'notifications' && (
+                  <div style={{ paddingLeft: '28px', paddingTop: '8px' }}>
+                    <div className="small text-muted mb-3" style={{ padding: '10px', backgroundColor: '#eff6ff', borderRadius: '8px', border: '1px solid #bfdbfe' }}>
+                      El <strong>App Token</strong> de Pushover se configura como secret en Supabase (<code>PUSHOVER_APP_TOKEN</code>).
+                      Acá solo cargás el User Key y activás los eventos.
+                    </div>
+
+                    <div className="form-check form-switch mb-3" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <input
+                        type="checkbox"
+                        className="task-checkbox"
+                        id="notifCierreCaja"
+                        checked={notificationsForm.cierreCajaEnabled}
+                        onChange={(e) => setNotificationsForm((prev) => ({ ...prev, cierreCajaEnabled: e.target.checked }))}
+                      />
+                      <label htmlFor="notifCierreCaja" className="form-check-label fw-bold" style={{ cursor: 'pointer' }}>
+                        Notificar al cerrar caja
+                      </label>
+                    </div>
+
+                    <div style={{ border: '1px solid var(--border-color)', borderRadius: '10px', padding: '14px', marginBottom: '12px', backgroundColor: '#f8fafc' }}>
+                      <div className="form-check form-switch mb-2" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <input
+                          type="checkbox"
+                          className="task-checkbox"
+                          id="notifPushover"
+                          checked={notificationsForm.pushoverEnabled}
+                          onChange={(e) => setNotificationsForm((prev) => ({ ...prev, pushoverEnabled: e.target.checked }))}
+                        />
+                        <label htmlFor="notifPushover" className="form-check-label fw-bold" style={{ cursor: 'pointer' }}>
+                          Pushover (celular)
+                        </label>
+                      </div>
+                      <div className="form-group mb-0">
+                        <label className="form-label" style={{ fontSize: '0.8rem' }}>User Key</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          placeholder="Ej: uw4mn8r356h94rsgzw5gmffppnwn9j"
+                          value={notificationsForm.pushoverUserKey}
+                          onChange={(e) => setNotificationsForm((prev) => ({ ...prev, pushoverUserKey: e.target.value.trim() }))}
+                          style={{ fontSize: '0.85rem', padding: '6px 10px', height: '34px' }}
+                        />
+                      </div>
+                    </div>
+
+                    <div style={{ border: '1px solid var(--border-color)', borderRadius: '10px', padding: '14px', marginBottom: '12px', backgroundColor: '#f8fafc' }}>
+                      <div className="form-check form-switch mb-2" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <input
+                          type="checkbox"
+                          className="task-checkbox"
+                          id="notifWebhook"
+                          checked={notificationsForm.webhookEnabled}
+                          onChange={(e) => setNotificationsForm((prev) => ({ ...prev, webhookEnabled: e.target.checked }))}
+                        />
+                        <label htmlFor="notifWebhook" className="form-check-label fw-bold" style={{ cursor: 'pointer' }}>
+                          Webhook (app propia / integraciones)
+                        </label>
+                      </div>
+                      <div className="form-group mb-2">
+                        <label className="form-label" style={{ fontSize: '0.8rem' }}>URL</label>
+                        <input
+                          type="url"
+                          className="form-input"
+                          placeholder="https://tu-servidor.com/api/notifications"
+                          value={notificationsForm.webhookUrl}
+                          onChange={(e) => setNotificationsForm((prev) => ({ ...prev, webhookUrl: e.target.value.trim() }))}
+                          style={{ fontSize: '0.85rem', padding: '6px 10px', height: '34px' }}
+                        />
+                      </div>
+                      <div className="form-group mb-0">
+                        <label className="form-label" style={{ fontSize: '0.8rem' }}>Secret (opcional, header X-Gestion360i-Secret)</label>
+                        <input
+                          type="password"
+                          className="form-input"
+                          value={notificationsForm.webhookSecret}
+                          onChange={(e) => setNotificationsForm((prev) => ({ ...prev, webhookSecret: e.target.value }))}
+                          style={{ fontSize: '0.85rem', padding: '6px 10px', height: '34px' }}
+                        />
+                      </div>
+                    </div>
+
+                    <div style={{ border: '1px dashed #cbd5e1', borderRadius: '10px', padding: '14px', backgroundColor: '#fff' }}>
+                      <div className="form-check form-switch mb-0" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <input
+                          type="checkbox"
+                          className="task-checkbox"
+                          id="notifInternalApp"
+                          checked={notificationsForm.internalAppEnabled}
+                          onChange={(e) => setNotificationsForm((prev) => ({ ...prev, internalAppEnabled: e.target.checked }))}
+                        />
+                        <label htmlFor="notifInternalApp" className="form-check-label" style={{ cursor: 'pointer' }}>
+                          <strong>Cola interna</strong> — guarda eventos en <code>gst_notification_outbox</code> para una app futura
+                        </label>
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>

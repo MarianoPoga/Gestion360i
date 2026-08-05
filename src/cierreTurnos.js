@@ -96,6 +96,22 @@ export const isFinalizedPedidoEstado = (estado) => {
   return est === 'finalizado' || est === 'cobrado';
 };
 
+/** Pedido asignado a una caja/turno concreto (cierre o panel de pedidos). */
+export const orderMatchesCajaTurno = (order, turnoName, pedidoTipo = null) => {
+  const turno = String(turnoName || '').trim();
+  if (!turno) return true;
+
+  const caja = String(order?.turno_caja || '').trim();
+  if (caja) return caja === turno;
+
+  // Sin turno_caja: solo imputar cuando hay contexto de tipo (caja abierta / cierre desde pedidos).
+  if (!pedidoTipo) return false;
+
+  return pedidoTipo === 'delivery'
+    ? order?.con_envio === true
+    : order?.con_envio !== true;
+};
+
 export const isPedidoMedioCtaCte = (medio) => {
   const normalized = String(medio || '').trim().toLowerCase();
   if (!normalized) return false;

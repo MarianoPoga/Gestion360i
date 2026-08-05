@@ -33,10 +33,17 @@ import {
   buildCajaCierreLabel,
   aggregatePedidosMediosForCierre,
   isFinalizedPedidoEstado,
+  orderMatchesCajaTurno,
 } from './cierreTurnos'
 import {
   normalizePedidosCajasConfig,
 } from './pedidosCajas'
+import {
+  NOTIFICATION_EVENTS,
+  normalizeNotificationsConfig,
+  buildCierreCajaNotification,
+  buildCierreMedioLines,
+} from './notificationConfig'
 
 const resolveLegacyShippingEstadoUpdate = (order, updates) => {
   if (updates.estado !== undefined || updates.medio_pago === undefined) return updates;
@@ -684,6 +691,63 @@ const BUSINESS_CONFIG = {
   PEDIDOS_CAJAS: 'pedidos_cajas',
 };
 
+const NOTIFICATIONS_CONFIG_KEY = 'notifications';
+
+const dispatchNotificationEvent = async (event, payload) => {
+  const instance = getSupabaseInstance();
+  if (!isSupabaseConfigured() || !instance?.functions?.invoke) {
+    return { success: true, skipped: true, reason: 'no_supabase' };
+  }
+
+  try {
+    const { data, error } = await instance.functions.invoke('send-notification', {
+      body: {
+        event,
+        title: payload.title,
+        message: payload.message,
+        payload,
+      },
+    });
+
+    if (error) {
+      console.warn('[Gestion360i] dispatchNotificationEvent:', error.message || error);
+      return { success: false, error: error.message || String(error) };
+    }
+
+    return data || { success: true };
+  } catch (err) {
+    console.warn('[Gestion360i] dispatchNotificationEvent:', err);
+    return { success: false, error: err.message || String(err) };
+  }
+};
+
+const notifyCierreCajaSaved = async (cierre, medioValues, medios) => {
+  const medioLines = buildCierreMedioLines(medioValues, medios);
+  const compras = parseFloat(cierre.compras || 0);
+  const adelEfec = parseFloat(cierre.adelantos_efectivo || 0);
+  const adelMerc = parseFloat(cierre.adelantos_merc || 0);
+
+  if (compras > 0) medioLines.push({ label: 'Compras/Gastos', amount: compras });
+  if (adelEfec > 0) medioLines.push({ label: 'Adelantos efectivo', amount: adelEfec });
+  if (adelMerc > 0) medioLines.push({ label: 'Adelantos mercadería', amount: adelMerc });
+
+  const { title, body } = buildCierreCajaNotification({
+    fecha: cierre.fecha,
+    turno: cierre.turno,
+    total: cierre.total,
+    medioLines,
+  });
+
+  return dispatchNotificationEvent(NOTIFICATION_EVENTS.CIERRE_CAJA, {
+    title,
+    message: body,
+    fecha: cierre.fecha,
+    turno: cierre.turno,
+    total: parseFloat(cierre.total || 0),
+    medios: medioLines,
+  });
+};
+
 const OPERATIONAL_CONFIG_KEYS = new Set([
   BUSINESS_CONFIG.CIERRE_MEDIOS_USED,
 ]);
@@ -1316,6 +1380,28 @@ export const db = {
       : { ok: true };
     if (!result.ok) return { success: false, error: result.error };
     localStorage.setItem('pedidos_cajas', JSON.stringify(normalized));
+    return { success: true };
+  },
+
+  getNotificationsConfig: async () => {
+    const stored = await getBusinessConfig(NOTIFICATIONS_CONFIG_KEY);
+    if (stored) return normalizeNotificationsConfig(stored);
+    try {
+      const local = localStorage.getItem('notifications_config');
+      if (local) return normalizeNotificationsConfig(JSON.parse(local));
+    } catch (_) {
+      /* ignore */
+    }
+    return normalizeNotificationsConfig(null);
+  },
+
+  saveNotificationsConfig: async (config) => {
+    const normalized = normalizeNotificationsConfig(config);
+    const result = isSupabaseConfigured() && supabase
+      ? await saveBusinessConfig(NOTIFICATIONS_CONFIG_KEY, normalized)
+      : { ok: true };
+    if (!result.ok) return { success: false, error: result.error };
+    localStorage.setItem('notifications_config', JSON.stringify(normalized));
     return { success: true };
   },
 
@@ -2678,12 +2764,7 @@ export const db = {
       cliente_nombre: p.gst_clientes?.nombre || p.cliente_nombre || 'Cliente',
     });
 
-    const matchesCierreTurno = (p) => {
-      const caja = String(p.turno_caja || '').trim();
-      if (caja) return caja === turno;
-      if (!pedidoTipo) return true;
-      return pedidoTipo === 'delivery' ? p.con_envio === true : p.con_envio !== true;
-    };
+    const matchesCierreTurno = (p) => orderMatchesCajaTurno(p, turno, pedidoTipo);
 
     if (isSupabaseConfigured() && supabase) {
       try {
@@ -4357,6 +4438,8 @@ export const db = {
             .eq('business_id', businessId);
         }
 
+        void notifyCierreCajaSaved(cierre, medioValues, medios);
+
         return { success: true };
       } catch (err) {
         console.warn("Supabase saveCierre failed:", err);
@@ -4412,6 +4495,8 @@ export const db = {
     }
 
     await db.saveCierreMediosUsed(applyUsedMedioFlags(medios, medioValues));
+
+    void notifyCierreCajaSaved(cierre, medioValues, medios);
 
     return { success: true };
   },

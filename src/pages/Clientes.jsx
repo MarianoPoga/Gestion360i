@@ -1752,7 +1752,7 @@ function Clientes({ navigate, profile, accentColor }) {
   };
 
   const handleCreateClient = async (e) => {
-    e.preventDefault();
+    e?.preventDefault?.();
     setNewClientError('');
 
     if (!newClientName.trim()) {
@@ -1760,12 +1760,8 @@ function Clientes({ navigate, profile, accentColor }) {
       return;
     }
 
-    if (!newClientAddress.trim()) {
-      setNewClientError('Agregá al menos una dirección de envío.');
-      return;
-    }
-
-    if (!isValidGpsAddress(newClientAddress)) {
+    const addressText = newClientAddress.trim();
+    if (addressText && !isValidGpsAddress(addressText)) {
       const proceed = window.confirm(
         'La dirección parece incompleta o no apta para guía por GPS (se recomienda calle, número y localidad). ¿Desea registrarla de todas formas?'
       );
@@ -1773,7 +1769,6 @@ function Clientes({ navigate, profile, accentColor }) {
     }
 
     try {
-      const addressText = newClientAddress.trim();
       const res = await db.saveCliente({
         nombre: newClientName.trim(),
         razon_social: newClientRazon.trim() || newClientName.trim(),
@@ -1784,20 +1779,22 @@ function Clientes({ navigate, profile, accentColor }) {
       });
 
       if (res.success && res.data) {
-        const dirRes = await db.saveDireccion(res.data.id, addressText);
-        if (!dirRes.success) {
-          throw new Error('El cliente se creó pero no se pudo guardar la dirección.');
-        }
+        if (addressText) {
+          const dirRes = await db.saveDireccion(res.data.id, addressText);
+          if (!dirRes.success) {
+            throw new Error('El cliente se creó pero no se pudo guardar la dirección.');
+          }
 
-        await db.updateCliente(res.data.id, {
-          direccion_predeterminada: addressText,
-        });
+          await db.updateCliente(res.data.id, {
+            direccion_predeterminada: addressText,
+          });
+        }
 
         const cl = await db.getClientes();
         setClientes(cl);
         const createdClient = cl.find(c => c.id === res.data.id) || {
           ...res.data,
-          direccion_predeterminada: addressText,
+          direccion_predeterminada: addressText || null,
         };
         handleSelectClient(createdClient);
         setNewClientName('');
@@ -3301,8 +3298,8 @@ function Clientes({ navigate, profile, accentColor }) {
     setCloseCajaModal(null);
 
     const fecha = getTodayLocalDateString();
-    let medioValues = null;
     let pedidosForCierre = getPedidosForCierre(orders, tipo, turnoName);
+    let medioValues = null;
     try {
       const [concepts, dbPedidos] = await Promise.all([
         db.getCierreConceptos(),
@@ -4030,7 +4027,11 @@ function Clientes({ navigate, profile, accentColor }) {
                 type="button" 
                 className="btn-new-task" 
                 style={{ backgroundColor: '#8b5cf6', padding: '10px 14px', height: '42px', flexShrink: 0 }}
-                onClick={() => setNewClientModal(true)}
+                onClick={() => {
+                  setNewClientModal(true);
+                  setNewClientError('');
+                  setNewClientAddress('');
+                }}
               >
                 <i className="bi bi-person-plus-fill me-1"></i> + Nuevo
               </button>
@@ -5578,19 +5579,27 @@ function Clientes({ navigate, profile, accentColor }) {
       {/* MODAL: NEW CLIENT */}
       {newClientModal && (
         <div className="modal-overlay">
-          <div className="modal-content-card">
+          <div className="modal-content-card modal-content-card--scrollable" style={{ maxWidth: '520px' }}>
             <div className="modal-header" style={{ backgroundColor: '#8b5cf6' }}>
               <h5 className="modal-title"><i className="bi bi-person-plus-fill me-2"></i>Nuevo Cliente</h5>
-              <button className="modal-close-btn" onClick={() => {
-                setNewClientModal(false);
-                setNewClientError('');
-                setNewClientAddress('');
-              }}>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => {
+                  setNewClientModal(false);
+                  setNewClientError('');
+                  setNewClientAddress('');
+                }}
+              >
                 <i className="bi bi-x-lg"></i>
               </button>
             </div>
-            <div className="modal-body">
-              <form onSubmit={handleCreateClient}>
+            <form
+              onSubmit={handleCreateClient}
+              noValidate
+              style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1 }}
+            >
+              <div className="modal-body-scroll">
                 {newClientError && (
                   <div className="alert-box" style={{ marginBottom: '15px', backgroundColor: '#fee2e2', borderColor: '#fecaca', color: '#991b1b', padding: '8px 12px', fontSize: '0.8rem' }}>
                     <i className="bi bi-exclamation-circle-fill"></i>
@@ -5667,12 +5676,11 @@ function Clientes({ navigate, profile, accentColor }) {
                   </select>
                 </div>
                 <div className="form-group">
-                  <label className="form-label">Dirección de envío</label>
+                  <label className="form-label">Dirección de envío <span className="text-muted" style={{ fontWeight: 'normal' }}>(opcional)</span></label>
                   <div className="flex-row-group mb-2" style={{ flexWrap: 'wrap', gap: '8px' }}>
                     <input
                       type="text"
                       className="form-input"
-                      required
                       placeholder="Ej: Av. Argentina 120, Neuquén"
                       value={newClientAddress}
                       onChange={(e) => setNewClientAddress(e.target.value)}
@@ -5710,14 +5718,33 @@ function Clientes({ navigate, profile, accentColor }) {
                     )}
                   </div>
                   <small className="text-muted" style={{ display: 'block', marginTop: '6px' }}>
-                    Obligatoria. Incluí calle, número y ciudad.
+                    Opcional. Si la cargás, incluí calle, número y ciudad para guía GPS.
                   </small>
                 </div>
-                <button type="submit" className="btn-submit" style={{ backgroundColor: '#8b5cf6', marginTop: '10px' }}>
-                  REGISTRAR CLIENTE
+              </div>
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn-submit"
+                  style={{ backgroundColor: '#6b7280', margin: 0, flex: 1 }}
+                  onClick={() => {
+                    setNewClientModal(false);
+                    setNewClientError('');
+                    setNewClientAddress('');
+                  }}
+                >
+                  Cancelar
                 </button>
-              </form>
-            </div>
+                <button
+                  type="button"
+                  className="btn-submit"
+                  style={{ backgroundColor: '#8b5cf6', margin: 0, flex: 2 }}
+                  onClick={handleCreateClient}
+                >
+                  Registrar cliente
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -7202,6 +7229,7 @@ function Clientes({ navigate, profile, accentColor }) {
                 setNewClientRazon('');
                 setNewClientCuit('');
                 setNewClientTelefono('');
+                setNewClientAddress('');
                 setNewClientCondicionIva('Consumidor Final');
                 setNewClientError('');
                 setNewClientModal(true);
@@ -7426,22 +7454,24 @@ function Clientes({ navigate, profile, accentColor }) {
       {/* MODAL: EDITAR CLIENTE                                          */}
       {/* ============================================================== */}
       {editClientModal && editingClient && (
-        <div className="modal-backdrop" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 1000 }}>
-          <div className="page-card" style={{ width: '95%', maxWidth: '600px', backgroundColor: '#ffffff', borderRadius: '16px', border: '1px solid var(--border-color)', boxShadow: 'var(--shadow-lg)', animation: 'slideUp 0.3s ease-out', position: 'relative', maxHeight: '90vh', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px', marginBottom: '20px' }}>
-              <h3 style={{ fontSize: '1.25rem', margin: 0, color: '#10b981' }}>
-                <i className="bi bi-pencil-square me-2"></i>Editar Cliente: {editingClient.nombre}
-              </h3>
-              <button 
-                type="button" 
-                className="btn-nav-back" 
-                style={{ padding: '4px 8px', border: 'none' }}
+        <div className="modal-overlay">
+          <div className="modal-content-card modal-content-card--scrollable" style={{ maxWidth: '600px' }}>
+            <div className="modal-header" style={{ backgroundColor: '#10b981' }}>
+              <h5 className="modal-title">
+                <i className="bi bi-pencil-square me-2"></i>
+                Editar cliente: {editingClient.nombre}
+              </h5>
+              <button
+                type="button"
+                className="modal-close-btn"
                 onClick={() => setEditClientModal(false)}
               >
                 <i className="bi bi-x-lg"></i>
               </button>
             </div>
-            
+
+            <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1 }}>
+              <div className="modal-body-scroll">
             <form onSubmit={handleSaveEditedClient}>
               <div className="form-group mb-3">
                 <label className="form-label text-dark">Nombre / Fantasía</label>
@@ -7533,7 +7563,7 @@ function Clientes({ navigate, profile, accentColor }) {
               <button 
                 type="submit" 
                 className="btn-submit"
-                style={{ backgroundColor: '#10b981', width: '100%', padding: '10px 20px', marginBottom: '25px' }}
+                style={{ backgroundColor: '#10b981', width: '100%', padding: '10px 20px', marginBottom: '20px' }}
                 disabled={savingClient}
               >
                 {savingClient ? 'Guardando...' : 'Guardar Datos Básicos'}
@@ -7640,6 +7670,18 @@ function Clientes({ navigate, profile, accentColor }) {
                     Sin direcciones registradas. Agrega una arriba.
                   </div>
                 )}
+              </div>
+            </div>
+              </div>
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn-submit"
+                  style={{ backgroundColor: '#6b7280', margin: 0, flex: 1 }}
+                  onClick={() => setEditClientModal(false)}
+                >
+                  Cerrar
+                </button>
               </div>
             </div>
           </div>
