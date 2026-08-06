@@ -126,7 +126,14 @@ const normalizeMedioLabel = (label) => String(label || '').trim().toLowerCase();
 export const resolvePedidoMedioConcept = (medioLabel, cierreConceptos) => {
   const activeMedios = getActiveMedios(cierreConceptos);
   const normalized = normalizeMedioLabel(medioLabel);
-  if (!normalized || isPedidoMedioCtaCte(medioLabel)) return null;
+  if (!normalized) return null;
+
+  if (isPedidoMedioCtaCte(medioLabel)) {
+    return activeMedios.find(
+      (concept) => concept.slot === 6
+        || normalizeMedioLabel(concept.label).includes('cuenta corriente')
+    ) || null;
+  }
 
   const exact = activeMedios.find(
     (concept) => normalizeMedioLabel(concept.label) === normalized

@@ -367,8 +367,6 @@ function Cierre({ navigate, navState, accentColor }) {
     .filter((ad) => isAdelantoMercaderiaConcept(ad.concepto))
     .reduce((acc, curr) => acc + parseFloat(curr.monto || 0), 0);
 
-  const pedidosSum = pendingPedidos.reduce((acc, curr) => acc + parseFloat(curr.total || 0), 0);
-
   // Final total shift sales revenue
   const totalSum = 
     Object.values(medioValues).reduce((acc, curr) => acc + parseFloat(curr || 0), 0) + 
@@ -625,26 +623,6 @@ function Cierre({ navigate, navState, accentColor }) {
           <h4 style={{ fontSize: '0.85rem', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-color)', paddingBottom: '6px', marginBottom: '15px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
             Conceptos de Ventas e Ingresos
           </h4>
-
-          {pendingPedidos.length > 0 && (
-            <div style={{ marginBottom: '15px', padding: '12px', backgroundColor: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: '8px' }}>
-              <div className="fw-bold small text-success mb-2">
-                <i className="bi bi-receipt-cutoff me-1"></i>
-                {pendingPedidos.length} pedido(s) del turno <strong>{turno}</strong> — total $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(pedidosSum)}
-              </div>
-              <div style={{ maxHeight: '140px', overflowY: 'auto', fontSize: '0.82rem' }}>
-                {pendingPedidos.map((p) => (
-                  <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', padding: '3px 0', borderBottom: '1px dashed #bbf7d0' }}>
-                    <span>{p.cliente_nombre || 'Cliente'} · #{String(p.id).substring(0, 6)}</span>
-                    <span><strong>{p.medio_pago || 'Sin medio'}</strong> · $ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(p.total || 0)}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="small text-muted mt-2">
-                Los importes se cargaron automáticamente por medio de pago. Podés ajustarlos manualmente si hace falta.
-              </div>
-            </div>
-          )}
 
           {/* Grid of Concept Inputs */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '20px' }}>
