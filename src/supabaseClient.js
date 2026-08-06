@@ -987,6 +987,89 @@ const rejectAdminRoleAssignment = (role) => {
   return null;
 };
 
+const EMPLEADO_MOVIMIENTOS_SELECT = '*, gst_personal(nombre)';
+
+const mapEmpleadoMovimientoRow = (row) => {
+  if (!row) return row;
+  const personalNombre = row.gst_personal?.nombre;
+  return {
+    ...row,
+    empleado: personalNombre || row.empleado || 'Empleado',
+    gst_personal: undefined,
+  };
+};
+
+const mapEmpleadoMovimientoRows = (rows) => (rows || []).map(mapEmpleadoMovimientoRow);
+
+const resolveEmpleadoMovimientoIdentity = async (mov) => {
+  const businessId = await ensureBusinessContext();
+  let empleadoId = mov?.empleado_id || null;
+  let empleadoNombre = String(mov?.nombre_empleado || mov?.empleado || '').trim();
+
+  const resolveFromMockPersonal = () => {
+    const list = JSON.parse(localStorage.getItem('mock_personal_full') || '[]');
+    if (empleadoId) {
+      const emp = list.find((row) => row.id === empleadoId);
+      if (emp) {
+        return { empleadoId: emp.id, empleadoNombre: emp.nombre || empleadoNombre };
+      }
+    }
+    if (empleadoNombre) {
+      const emp = list.find(
+        (row) => String(row.nombre || '').trim().toLowerCase() === empleadoNombre.toLowerCase()
+      );
+      if (emp) {
+        return { empleadoId: emp.id, empleadoNombre: emp.nombre };
+      }
+    }
+    return null;
+  };
+
+  if (!isSupabaseConfigured() || !supabase) {
+    const resolved = resolveFromMockPersonal();
+    if (resolved) return resolved;
+    return { error: 'Seleccioná un empleado del listado.' };
+  }
+
+  if (isSupabaseConfigured() && supabase) {
+    if (empleadoId && !empleadoNombre) {
+      const { data } = await supabase
+        .from('gst_personal')
+        .select('nombre')
+        .eq('business_id', businessId)
+        .eq('id', empleadoId)
+        .maybeSingle();
+      empleadoNombre = data?.nombre || empleadoNombre;
+    } else if (!empleadoId && empleadoNombre) {
+      const { data } = await supabase
+        .from('gst_personal')
+        .select('id, nombre')
+        .eq('business_id', businessId)
+        .ilike('nombre', empleadoNombre)
+        .limit(5);
+      const exact = (data || []).find(
+        (row) => String(row.nombre || '').trim().toLowerCase() === empleadoNombre.toLowerCase()
+      );
+      if (exact) {
+        empleadoId = exact.id;
+        empleadoNombre = exact.nombre;
+      }
+    }
+  }
+
+  if (!empleadoId) {
+    return {
+      error: 'Seleccioná un empleado del listado (gst_personal).',
+    };
+  }
+
+  if (!empleadoNombre) {
+    empleadoNombre = 'Empleado';
+  }
+
+  return { empleadoId, empleadoNombre };
+};
+
 const fetchAdelantosMovimientos = async (limitDays = 90) => {
   const businessId = getBusinessId();
   const limitDate = new Date();
@@ -996,14 +1079,14 @@ const fetchAdelantosMovimientos = async (limitDays = 90) => {
   if (isSupabaseConfigured() && supabase) {
     try {
       const [recentRes, pendingRes] = await Promise.all([
-        supabase.from('gst_empleado_movimientos').select('*').eq('business_id', businessId).gte('fecha', limitIso),
-        supabase.from('gst_empleado_movimientos').select('*').eq('business_id', businessId).is('caja_cierre', null)
+        supabase.from('gst_empleado_movimientos').select(EMPLEADO_MOVIMIENTOS_SELECT).eq('business_id', businessId).gte('fecha', limitIso),
+        supabase.from('gst_empleado_movimientos').select(EMPLEADO_MOVIMIENTOS_SELECT).eq('business_id', businessId).is('caja_cierre', null)
       ]);
 
       if (recentRes.error) throw recentRes.error;
       if (pendingRes.error) throw pendingRes.error;
 
-      const combined = [...(recentRes.data || []), ...(pendingRes.data || [])];
+      const combined = [...mapEmpleadoMovimientoRows(recentRes.data), ...mapEmpleadoMovimientoRows(pendingRes.data)];
       const map = {};
       combined.forEach(item => {
         map[item.id] = item;
@@ -1028,26 +1111,22 @@ const fetchEmpleadoMovimientosByEmployee = async (empleadoId, empleadoNombre) =>
   const businessId = getBusinessId();
   if (isSupabaseConfigured() && supabase) {
     try {
-      if (empleadoNombre) {
-        const { data, error } = await supabase
-          .from('gst_empleado_movimientos')
-          .select('*')
-          .eq('business_id', businessId)
-          .eq('empleado', empleadoNombre)
-          .order('fecha', { ascending: false });
-        if (!error) return data || [];
-      }
+      let query = supabase
+        .from('gst_empleado_movimientos')
+        .select(EMPLEADO_MOVIMIENTOS_SELECT)
+        .eq('business_id', businessId);
 
       if (empleadoId) {
-        const { data, error } = await supabase
-          .from('gst_empleado_movimientos')
-          .select('*')
-          .eq('business_id', businessId)
-          .eq('empleado_id', empleadoId)
-          .order('fecha', { ascending: false });
-        if (!error) return data || [];
-        if (error) throw error;
+        query = query.eq('empleado_id', empleadoId);
+      } else if (empleadoNombre) {
+        query = query.eq('empleado', empleadoNombre);
+      } else {
+        return [];
       }
+
+      const { data, error } = await query.order('fecha', { ascending: false });
+      if (error) throw error;
+      return mapEmpleadoMovimientoRows(data);
     } catch (err) {
       console.error('Error fetching employee movements:', err);
     }
@@ -3892,11 +3971,11 @@ export const db = {
       try {
         const { data, error } = await supabase
           .from('gst_empleado_movimientos')
-          .select('*')
+          .select(EMPLEADO_MOVIMIENTOS_SELECT)
           .eq('business_id', businessId)
           .is('caja_cierre', null)
           .order('created_at', { ascending: true });
-        if (!error) return data;
+        if (!error) return mapEmpleadoMovimientoRows(data);
       } catch (err) {
         console.warn("Supabase pending adelantos failed:", err);
       }
@@ -4242,6 +4321,11 @@ export const db = {
   saveAdelanto: async (mov) => {
     const businessId = getBusinessId();
     const terminalId = getTerminalId();
+    const identity = await resolveEmpleadoMovimientoIdentity(mov);
+    if (identity.error) {
+      return { success: false, error: identity.error };
+    }
+
     const isRendicion = mov.concepto.toLowerCase().includes("rendic") || (mov.origen && mov.origen.toLowerCase().includes("rendic"));
     const finalCajaCierre = isRendicion ? 'Rendición' : null;
     
@@ -4251,8 +4335,9 @@ export const db = {
     const cleanMov = {
       business_id: businessId,
       terminal_id: terminalId,
+      empleado_id: identity.empleadoId,
       fecha: mov.fecha || new Date().toISOString(),
-      empleado: mov.empleado,
+      empleado: identity.empleadoNombre,
       concepto: combinedConcepto,
       monto: parseFloat(mov.monto || 0),
       caja_cierre: finalCajaCierre
@@ -5868,16 +5953,21 @@ export const db = {
 
   saveEmpleadoMovimiento: async (mov) => {
     const businessId = getBusinessId();
+    const identity = await resolveEmpleadoMovimientoIdentity(mov);
+    if (identity.error) {
+      return { success: false, error: identity.error };
+    }
+
     if (isSupabaseConfigured() && supabase) {
       try {
         const payload = {
           business_id: businessId,
-          empleado: mov.nombre_empleado || mov.empleado,
+          empleado_id: identity.empleadoId,
+          empleado: identity.empleadoNombre,
           concepto: mov.concepto,
           monto: parseFloat(mov.debe || mov.haber || mov.monto || 0),
           fecha: mov.fecha || new Date().toISOString(),
         };
-        if (mov.empleado_id) payload.empleado_id = mov.empleado_id;
 
         const { error } = await supabase
           .from('gst_empleado_movimientos')

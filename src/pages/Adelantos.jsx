@@ -37,14 +37,14 @@ function Adelantos({ navigate, modules, accentColor }) {
   });
 
   // Form states (Employees)
-  const [empleado, setEmpleado] = useState('');
+  const [empleadoId, setEmpleadoId] = useState('');
+  const [employeesList, setEmployeesList] = useState([]);
   const [concepto, setConcepto] = useState(ADELANTO_EFECTIVO);
   const [pagoOrigenEmp, setPagoOrigenEmp] = useState(''); // Shift name or 'Rendición'
   const [monto, setMonto] = useState('');
   const [observacion, setObservacion] = useState('');
 
   // UI state lists
-  const [activeEmployees, setActiveEmployees] = useState([]);
   const [todayAdvances, setTodayAdvances] = useState([]);
   const [loading, setLoading] = useState(false);
   const [saveStatus, setSaveStatus] = useState(''); // 'saving' | 'success' | 'error'
@@ -53,10 +53,6 @@ function Adelantos({ navigate, modules, accentColor }) {
 
   // Sorting state
   const [advancesSort, setAdvancesSort] = useState({ column: 'fecha', direction: 'desc' });
-
-  // Autocomplete suggestions state
-  const [showEmpSuggestions, setShowEmpSuggestions] = useState(false);
-  const [filteredEmployees, setFilteredEmployees] = useState([]);
 
   // Refs
   const amountInputRef = useRef(null);
@@ -118,12 +114,18 @@ function Adelantos({ navigate, modules, accentColor }) {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [namesData, allAdvances] = await Promise.all([
-        db.getEmployees ? db.getEmployees() : db.getEmpleados(), // handle both names
+      const [employeesData, allAdvances] = await Promise.all([
+        db.getEmployees ? db.getEmployees() : db.getEmpleados(),
         db.getEmpleadoMovimientos(50)
       ]);
-      
-      setActiveEmployees((namesData || []).map(e => e.nombre));
+
+      const activeList = (employeesData || []).filter(
+        (emp) => emp.is_active !== false && emp.activo !== false
+      );
+      setEmployeesList(activeList);
+      if (activeList.length > 0 && !empleadoId) {
+        setEmpleadoId(activeList[0].id);
+      }
 
       const today = new Date();
       const advancesToday = (allAdvances || []).filter(mov => {
@@ -142,17 +144,6 @@ function Adelantos({ navigate, modules, accentColor }) {
       setLoading(false);
     }
   };
-
-  useEffect(() => {
-    if (empleado.trim() === '') {
-      setFilteredEmployees([]);
-      return;
-    }
-    const match = activeEmployees.filter(name =>
-      name.toLowerCase().includes(empleado.toLowerCase())
-    );
-    setFilteredEmployees(match);
-  }, [empleado, activeEmployees]);
 
   const handleNumericKeyDown = (e) => {
     if (e.key === ',' || e.key === '.') {
@@ -174,8 +165,8 @@ function Adelantos({ navigate, modules, accentColor }) {
 
   const handleSaveAdelanto = async (e) => {
     e.preventDefault();
-    if (!empleado.trim()) {
-      alert("Por favor ingrese el nombre del empleado.");
+    if (!empleadoId) {
+      alert('Seleccioná un empleado del listado.');
       return;
     }
     const val = parseFloat(monto);
@@ -215,7 +206,7 @@ function Adelantos({ navigate, modules, accentColor }) {
 
       const res = await db.saveAdelanto({
         fecha: formattedDate,
-        empleado: empleado.trim(),
+        empleado_id: empleadoId,
         concepto: finalConcepto,
         monto: val,
         observacion: finalObservation
@@ -223,7 +214,6 @@ function Adelantos({ navigate, modules, accentColor }) {
 
       if (res.success) {
         setSaveStatus('success');
-        setEmpleado('');
         setMonto('');
         setObservacion('');
         loadData();
@@ -293,42 +283,19 @@ function Adelantos({ navigate, modules, accentColor }) {
             <div className="h-100 pe-lg-3">
               <h5 className="section-title mb-3">Nuevo Adelanto</h5>
             <form onSubmit={handleSaveAdelanto} autoComplete="off">
-              <div className="mb-3 position-relative">
+              <div className="mb-3">
                 <label className="form-label small fw-bold">Empleado</label>
-                <div className="input-group">
-                  <span className="input-group-text bg-light border-end-0"><i className="bi bi-person text-muted"></i></span>
-                  <input
-                    type="text"
-                    className="form-control border-start-0"
-                    placeholder="Buscar o escribir nombre..."
-                    value={empleado}
-                    onChange={(e) => {
-                      setEmpleado(e.target.value);
-                      setShowEmpSuggestions(true);
-                    }}
-                    onFocus={() => setShowEmpSuggestions(true)}
-                    autoComplete="off"
-                    required
-                  />
-                </div>
-                {showEmpSuggestions && filteredEmployees.length > 0 && (
-                  <ul className="list-group position-absolute w-100 shadow-lg" style={{ zIndex: 1000, maxHeight: '200px', overflowY: 'auto' }}>
-                    {filteredEmployees.map((name, idx) => (
-                      <li
-                        key={idx}
-                        className="list-group-item list-group-item-action py-2 small"
-                        style={{ cursor: 'pointer' }}
-                        onClick={() => {
-                          setEmpleado(name);
-                          setShowEmpSuggestions(false);
-                          amountInputRef.current?.focus();
-                        }}
-                      >
-                        <i className="bi bi-person-check me-2 text-primary"></i>{name}
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                <select
+                  className="form-select"
+                  value={empleadoId}
+                  onChange={(e) => setEmpleadoId(e.target.value)}
+                  required
+                >
+                  <option value="">Seleccionar empleado...</option>
+                  {employeesList.map((emp) => (
+                    <option key={emp.id} value={emp.id}>{emp.nombre}</option>
+                  ))}
+                </select>
               </div>
 
               <div className="row g-2 mb-3">

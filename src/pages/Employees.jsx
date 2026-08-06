@@ -92,7 +92,7 @@ function Employees() {
     setDetailLoading(true);
     try {
       setSelectedEmployee(emp);
-      const data = await db.getEmpleadoMovimientos(emp.id, emp.nombre);
+      const data = await db.getEmpleadoMovimientos(emp.id);
       setHistory(Array.isArray(data) ? data : []);
 
       const profile = profiles.find(p => p.employee_id === emp.id);
@@ -619,7 +619,7 @@ function Employees() {
                   setTimeout(async () => {
                     setShowMovModal(false);
                     setSaveStatus('');
-                    const data = await db.getEmpleadoMovimientos(selectedEmployee.id, selectedEmployee.nombre);
+                    const data = await db.getEmpleadoMovimientos(selectedEmployee.id);
                     setHistory(data);
                   }, 1000);
                 } else { 

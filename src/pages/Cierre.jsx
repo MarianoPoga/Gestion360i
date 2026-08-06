@@ -321,16 +321,18 @@ function Cierre({ navigate, navState, accentColor }) {
       setPendingCompras(compras);
       setPendingAdelantos(adelantos);
       setPendingPedidos(pedidos || []);
-      const empNames = (emps || []).map(e => e.nombre);
-      setEmpleados(empNames);
+      const activeEmps = (emps || []).filter(
+        (emp) => emp.is_active !== false && emp.activo !== false
+      );
+      setEmpleados(activeEmps);
       setUltimosCierres(cierres);
       setCierreConceptos(concepts);
 
       setMedioValues(buildMedioValuesFromData(concepts, pedidos, prefill));
 
-      if (empNames.length > 0) {
-        setNewMercEmpleado(empNames[0]);
-        setNewEfecEmpleado(empNames[0]);
+      if (activeEmps.length > 0) {
+        setNewMercEmpleado(activeEmps[0].id);
+        setNewEfecEmpleado(activeEmps[0].id);
       }
     } catch (err) {
       console.error("Error loading closure datasets:", err);
@@ -428,7 +430,7 @@ function Cierre({ navigate, navState, accentColor }) {
     try {
       const finalObs = `[Caja: ${turno}]${newMercObs.trim() ? ' ' + newMercObs.trim() : ''}`;
       const res = await db.saveAdelanto({
-        empleado: newMercEmpleado,
+        empleado_id: newMercEmpleado,
         concepto: ADELANTO_MERCADERIA,
         monto: val,
         observacion: finalObs
@@ -465,7 +467,7 @@ function Cierre({ navigate, navState, accentColor }) {
     try {
       const finalObs = `[Caja: ${turno}]${newEfecObs.trim() ? ' ' + newEfecObs.trim() : ''}`;
       const res = await db.saveAdelanto({
-        empleado: newEfecEmpleado,
+        empleado_id: newEfecEmpleado,
         concepto: ADELANTO_EFECTIVO,
         monto: val,
         observacion: finalObs
@@ -1141,7 +1143,7 @@ function Cierre({ navigate, navState, accentColor }) {
                   >
                     <option value="">Seleccionar empleado...</option>
                     {empleados.map(emp => (
-                      <option key={emp} value={emp}>{emp}</option>
+                      <option key={emp.id} value={emp.id}>{emp.nombre}</option>
                     ))}
                   </select>
                 </div>
@@ -1220,7 +1222,7 @@ function Cierre({ navigate, navState, accentColor }) {
                   >
                     <option value="">Seleccionar empleado...</option>
                     {empleados.map(emp => (
-                      <option key={emp} value={emp}>{emp}</option>
+                      <option key={emp.id} value={emp.id}>{emp.nombre}</option>
                     ))}
                   </select>
                 </div>

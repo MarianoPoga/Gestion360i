@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS public.GST_empleado_movimientos (
     id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
     business_id uuid REFERENCES public.GST_businesses(id) ON DELETE CASCADE NOT NULL,
     terminal_id uuid REFERENCES public.GST_terminals(id) ON DELETE SET NULL,
+    empleado_id uuid REFERENCES public.GST_personal(id) ON DELETE SET NULL,
     fecha timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL,
     empleado text NOT NULL,
     concepto text NOT NULL,
