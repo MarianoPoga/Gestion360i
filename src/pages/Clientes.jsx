@@ -186,7 +186,8 @@ const isOrderFinalizado = (order) => {
 
 const getOrderCobroEstado = (order) => {
   if (!order || isOrderCancelled(order)) return null;
-  if (!hasPaymentMedio(order.medio_pago) || isMedioCtaCte(order.medio_pago)) return 'PENDIENTE';
+  if (!hasPaymentMedio(order.medio_pago)) return 'PENDIENTE';
+  if (isMedioCtaCte(order.medio_pago)) return 'CTA CTE';
   return 'PAGADO';
 };
 
@@ -3676,7 +3677,14 @@ function Clientes({ navigate, profile, accentColor }) {
         if (order && normalizeOrderEstado(order) === 'pagado') {
           updates.estado = getOrderShippingEstado(order);
         }
-        await db.updatePedidosStatus([id], updates);
+        const res = await db.updatePedidosStatus([id], updates);
+        if (!res.success) {
+          throw new Error(res.error || 'No se pudo registrar el cobro del pedido.');
+        }
+        if (res.warnings?.length) {
+          console.warn('updatePedidosStatus warnings:', res.warnings);
+        }
+        setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, ...updates } : o)));
       }
       
       setSelectedOrderIds([]);
@@ -3687,7 +3695,7 @@ function Clientes({ navigate, profile, accentColor }) {
       setClientes(cl);
     } catch (err) {
       console.error(err);
-      alert("Error al registrar los cobros individuales.");
+      alert(err.message || 'Error al registrar los cobros individuales.');
     } finally {
       setLoadingSubmit(false);
     }
@@ -3819,6 +3827,13 @@ function Clientes({ navigate, profile, accentColor }) {
     const cobroEstado = getOrderCobroEstado(o);
     if (cobroEstado === 'PENDIENTE') {
       salesByMethod.Pendiente += total;
+    } else if (cobroEstado === 'CTA CTE') {
+      const method = resolveMedioPagoKey(o.medio_pago);
+      if (salesByMethod[method] !== undefined) {
+        salesByMethod[method] += total;
+      } else {
+        salesByMethod.Efectivo += total;
+      }
     } else {
       const method = resolveMedioPagoKey(o.medio_pago);
       if (salesByMethod[method] !== undefined) {
@@ -5190,7 +5205,7 @@ function Clientes({ navigate, profile, accentColor }) {
                                   fontWeight: '700',
                                   backgroundColor: cobroStyle.backgroundColor,
                                   color: cobroStyle.color,
-                                  textTransform: cobroEstado === 'PENDIENTE' ? 'uppercase' : 'none',
+                                  textTransform: cobroEstado === 'PENDIENTE' || cobroEstado === 'CTA CTE' ? 'uppercase' : 'none',
                                   maxWidth: '120px',
                                   overflow: 'hidden',
                                   textOverflow: 'ellipsis',

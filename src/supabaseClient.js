@@ -2715,23 +2715,29 @@ export const db = {
   },
 
   getPedidos: async () => {
-    const businessId = getBusinessId();
+    const businessId = await ensureBusinessContext();
     if (isSupabaseConfigured() && supabase) {
+      let isAuthenticated = false;
       try {
+        const { data: { session } } = await supabase.auth.getSession();
+        isAuthenticated = !!session?.user;
+
         const { data, error } = await supabase
           .from('gst_pedidos')
           .select('*, gst_clientes(nombre), gst_pedido_items(*)')
           .eq('business_id', businessId)
           .order('fecha', { ascending: false });
-        
-        if (!error && data) {
-          // Format client name and sort: con_envio=true first, then false
+
+        if (error) {
+          console.error('[Gestion360i] getPedidos error:', error.message, { businessId, isAuthenticated });
+          if (isAuthenticated) return [];
+        } else if (data) {
           const formatted = data.map(p => ({
             ...p,
             cliente_nombre: p.gst_clientes ? p.gst_clientes.nombre : 'Cliente',
             items: p.gst_pedido_items || []
           }));
-          
+
           return formatted.sort((a, b) => {
             if (a.con_envio === b.con_envio) {
               return new Date(b.fecha) - new Date(a.fecha);
@@ -2739,9 +2745,12 @@ export const db = {
             return a.con_envio ? -1 : 1;
           });
         }
-        console.warn("Supabase getPedidos failed, falling back to mock:", error);
+
+        if (isAuthenticated) return [];
       } catch (err) {
-        console.warn("Supabase getPedidos error, falling back to mock:", err);
+        console.error('[Gestion360i] getPedidos exception:', err);
+        if (isAuthenticated) return [];
+        console.warn('Supabase getPedidos error, falling back to mock:', err);
       }
     }
 
@@ -2900,12 +2909,6 @@ export const db = {
           }
         }
 
-        try {
-          await db.processFinancialTransactions(order, effectiveUpdates);
-        } catch (finErr) {
-          console.warn('processFinancialTransactions failed, continuing with status update:', finErr);
-        }
-
         const fieldsToUpdate = {};
         if (effectiveUpdates.estado !== undefined) fieldsToUpdate.estado = effectiveUpdates.estado;
         if (effectiveUpdates.repartidor !== undefined) fieldsToUpdate.repartidor = effectiveUpdates.repartidor;
@@ -2926,23 +2929,34 @@ export const db = {
         if (effectiveUpdates.factura_tipo !== undefined) fieldsToUpdate.factura_tipo = effectiveUpdates.factura_tipo;
         if (effectiveUpdates.factura_error !== undefined) fieldsToUpdate.factura_error = effectiveUpdates.factura_error;
 
-        let { error: updateErr } = await supabase
-          .from('gst_pedidos')
-          .update(fieldsToUpdate)
-          .eq('id', id)
-          .eq('business_id', businessId);
-
-        if (updateErr && fieldsToUpdate.motivo_cancelacion !== undefined) {
-          const { motivo_cancelacion, ...withoutMotivo } = fieldsToUpdate;
+        let updateErr = null;
+        if (Object.keys(fieldsToUpdate).length > 0) {
           ({ error: updateErr } = await supabase
             .from('gst_pedidos')
-            .update(withoutMotivo)
+            .update(fieldsToUpdate)
             .eq('id', id)
             .eq('business_id', businessId));
+
+          if (updateErr && fieldsToUpdate.motivo_cancelacion !== undefined) {
+            const { motivo_cancelacion, ...withoutMotivo } = fieldsToUpdate;
+            ({ error: updateErr } = await supabase
+              .from('gst_pedidos')
+              .update(withoutMotivo)
+              .eq('id', id)
+              .eq('business_id', businessId));
+          }
         }
 
         if (updateErr) {
           updateErrors.push(`Pedido ${String(id).substring(0, 8)}: ${updateErr.message}`);
+          continue;
+        }
+
+        try {
+          const orderAfterUpdate = { ...order, ...fieldsToUpdate };
+          await db.processFinancialTransactions(orderAfterUpdate, effectiveUpdates);
+        } catch (finErr) {
+          console.warn('processFinancialTransactions failed after pedido update:', finErr);
         }
       }
 
