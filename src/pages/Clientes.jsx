@@ -36,6 +36,17 @@ import {
   syncOpenCajaWithConfig,
 } from '../pedidosCajaSession'
 import { getTodayLocalDateString } from '../dateUtils'
+import {
+  formatMovementForDisplay,
+  isCobroPedidoConcept,
+  isCreditoPedidoConcept,
+  isDepositConcept,
+  isInvalidCtaCteCobroConcept,
+  isOrderPrimaryDeudaCharge,
+  isUnlinkedClientPaymentConcept,
+  movementConcept,
+  sortOrderGroupMovements,
+} from '../ccMovements'
 
 const cleanAddressText = (str) => {
   if (!str) return '';
@@ -175,8 +186,7 @@ const isOrderFinalizado = (order) => {
 
 const getOrderCobroEstado = (order) => {
   if (!order || isOrderCancelled(order)) return null;
-  if (!hasPaymentMedio(order.medio_pago)) return 'PENDIENTE';
-  if (isMedioCtaCte(order.medio_pago)) return 'CTA CTE';
+  if (!hasPaymentMedio(order.medio_pago) || isMedioCtaCte(order.medio_pago)) return 'PENDIENTE';
   return 'PAGADO';
 };
 
@@ -193,12 +203,14 @@ const COBRO_ESTADO_STYLES = {
   'CTA CTE': { backgroundColor: '#fef3c7', color: '#b45309' },
 };
 
-const isOrderPaid = (order) => isOrderPagado(order) || isOrderCtaCte(order) || isOrderFinalizado(order);
+const isOrderPaid = (order) => isOrderPagado(order);
 
 const canCobrarOrder = (order) => {
-  if (!order || isOrderCancelled(order)) return false;
-  return !isOrderFinalizado(order);
+  if (!order || isOrderCancelled(order) || isOrderFinalizado(order)) return false;
+  return true;
 };
+
+const orderHasMedioPagoAssigned = (order) => hasPaymentMedio(order?.medio_pago);
 
 function Clientes({ navigate, profile, accentColor }) {
   // Navigation View Mode: 'register' (Cargar Pedidos) or 'orders' (Ver Pedidos)
@@ -1394,11 +1406,11 @@ function Clientes({ navigate, profile, accentColor }) {
     }
   };
 
-  const loadClientMovements = async () => {
-    if (!selectedClient) return;
+  const loadClientMovements = async (clientId = selectedClient?.id) => {
+    if (!clientId) return;
     setLoadingMovements(true);
     try {
-      const data = await db.getMovimientos(selectedClient.id);
+      const data = await db.getMovimientos(clientId);
       setMovements(data);
     } catch (e) {
       console.error("Error loading client movements:", e);
@@ -1407,21 +1419,32 @@ function Clientes({ navigate, profile, accentColor }) {
     }
   };
 
-  const handleOpenDrawer = async () => {
+  const handleOpenClientCuentaCorriente = async (client) => {
+    if (!client?.id) return;
+    setSelectedClient(client);
     setShowDrawer(true);
-    setLoadingMovements(true);
+
+    // Mostrar movimientos de inmediato; el sync puede tardar (recalcula CC en backend).
+    await loadClientMovements(client.id);
+
     try {
-      if (selectedClient?.id) {
-        await db.syncCuentaCorrienteForClient(selectedClient.id);
-        const cl = await db.getClientes();
-        setClientes(cl);
-        const updated = cl.find((c) => c.id === selectedClient.id);
-        if (updated) setSelectedClient(updated);
+      await db.syncCuentaCorrienteForClient(client.id);
+      const cl = await db.getClientes();
+      setClientes(cl);
+      const updated = cl.find((c) => c.id === client.id) || client;
+      setSelectedClient(updated);
+      if (editingClient?.id === client.id) {
+        setEditingClient(updated);
       }
+      await loadClientMovements(client.id);
     } catch (err) {
       console.warn('syncCuentaCorrienteForClient failed:', err);
     }
-    await loadClientMovements();
+  };
+
+  const handleOpenDrawer = async () => {
+    if (!selectedClient?.id) return;
+    await handleOpenClientCuentaCorriente(selectedClient);
   };
 
   const handleClearClienteMovimientos = async () => {
@@ -1812,13 +1835,18 @@ function Clientes({ navigate, profile, accentColor }) {
   };
 
   const handleOpenClientMovements = (client) => {
-    setSelectedClient(client);
-    setShowDrawer(true);
-    setLoadingMovements(true);
-    db.getMovimientos(client.id)
-      .then(data => setMovements(data))
-      .catch(e => console.error(e))
-      .finally(() => setLoadingMovements(false));
+    handleOpenClientCuentaCorriente(client);
+  };
+
+  const handleOpenEditClientFromOrder = (order) => {
+    const client = order?.cliente_id
+      ? clientes.find((c) => c.id === order.cliente_id)
+      : null;
+    if (!client) {
+      alert('No se encontró el cliente del pedido.');
+      return;
+    }
+    handleOpenEditClientModal(client);
   };
 
   const handleOpenEditClientModal = async (client) => {
@@ -2113,7 +2141,7 @@ function Clientes({ navigate, profile, accentColor }) {
     try {
       const resMov = await db.saveMovement({
         cliente_id: selectedClient.id,
-        concepto: `Devolución de pago (${refundMethod})`,
+        concepto: movementConcept.devolucion(refundMethod),
         debe: amt,
         haber: 0.00
       });
@@ -3021,6 +3049,23 @@ function Clientes({ navigate, profile, accentColor }) {
   const canRegisterCCPayment = selectedOrdersSameClient
     && selectedOrdersData.every((order) => isOrderFinalizado(order) && !isOrderCancelled(order));
 
+  const selectedOrdersMissingPayment = selectedOrdersData.filter(
+    (order) => !orderHasMedioPagoAssigned(order)
+  );
+  const canFinalizeSelectedOrders = selectedOrdersData.length > 0 && selectedOrdersMissingPayment.length === 0;
+
+  const getBulkPaymentActionLabel = () => {
+    if (
+      selectedOrdersData.length > 0
+      && selectedOrdersData.every((order) => isOrderPagado(order))
+    ) {
+      return 'Cambiar Medio de Pago';
+    }
+    if (typeFilter === 'delivery' && statusFilter === 'entregado') return 'Rendir Viaje';
+    if (typeFilter === 'local' && statusFilter === 'pendiente') return 'Cobrar Pedidos';
+    return 'Medio de Pago';
+  };
+
   const sumPaymentPendingForOrders = (rows, orderIds) =>
     rows
       .filter((row) => orderIds.includes(row.orderId))
@@ -3527,6 +3572,19 @@ function Clientes({ navigate, profile, accentColor }) {
       let enrichedUpdates = { ...updates };
       const isFinalize = String(updates.estado || '').toLowerCase() === 'finalizado';
       if (isFinalize) {
+        const ordersToFinalize = selectedOrderIds
+          .map((id) => orders.find((o) => o.id === id))
+          .filter(Boolean);
+        const withoutPayment = ordersToFinalize.filter((order) => !orderHasMedioPagoAssigned(order));
+        if (withoutPayment.length > 0) {
+          alert(
+            `No podés finalizar pedidos sin medio de pago asignado.\n\nFalta cobro en: ${withoutPayment
+              .map((order) => order.cliente_nombre || `#${String(order.id).slice(0, 8)}`)
+              .join(', ')}`
+          );
+          return;
+        }
+
         if (hasDeliverySelected && !hasLocalSelected) {
           enrichedUpdates.turno_caja = openCajas[PEDIDOS_CAJA_TIPOS.DELIVERY]
             || getDefaultCajaForPedidosTipo(
@@ -3547,14 +3605,13 @@ function Clientes({ navigate, profile, accentColor }) {
       const res = await db.updatePedidosStatus(selectedOrderIds, enrichedUpdates);
       if (res.success) {
         setSelectedOrderIds([]);
-        if (isFinalize) {
-          await syncCuentaCorrientePedidosDelDia(getSelectedOrdersDayStr());
-        }
         loadOrders(); // Reload orders list
         
         // Reload client lists to update balances globally
         const cl = await db.getClientes();
         setClientes(cl);
+      } else if (res.error) {
+        alert(res.error);
       }
     } catch (e) {
       console.error(e);
@@ -3762,8 +3819,6 @@ function Clientes({ navigate, profile, accentColor }) {
     const cobroEstado = getOrderCobroEstado(o);
     if (cobroEstado === 'PENDIENTE') {
       salesByMethod.Pendiente += total;
-    } else if (isMedioCtaCte(o.medio_pago)) {
-      // Deuda en CC: el ingreso real se suma al registrar el cobro del pedido.
     } else {
       const method = resolveMedioPagoKey(o.medio_pago);
       if (salesByMethod[method] !== undefined) {
@@ -4780,22 +4835,15 @@ function Clientes({ navigate, profile, accentColor }) {
               {/* Dynamic bulk action buttons */}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '5px', width: '100%' }}>
 
-                {canRegisterCCPayment && (
+                {statusFilter !== 'finalizado' && (
                   <button
                     type="button"
                     className="btn-new-task"
-                    style={{ backgroundColor: '#2563eb' }}
-                    disabled={ccPaymentLoading}
-                    onClick={openCcPaymentModal}
+                    style={{ backgroundColor: '#10b981' }}
+                    onClick={triggerBulkCobrarRendir}
                   >
-                    <i className="bi bi-wallet2 me-1"></i>
-                    {ccPaymentLoading ? 'Cargando…' : 'Cobrar CC'}
+                    <i className="bi bi-cash-coin me-1"></i> {getBulkPaymentActionLabel()}
                   </button>
-                )}
-                {!selectedOrdersSameClient && selectedOrdersData.length > 1 && (
-                  <span style={{ fontSize: '0.78rem', color: '#7c3aed', alignSelf: 'center' }}>
-                    Cobrar CC requiere pedidos del mismo cliente.
-                  </span>
                 )}
                 
                 {/* CASE 1: Delivery - Pendientes */}
@@ -4859,16 +4907,9 @@ function Clientes({ navigate, profile, accentColor }) {
                     <button 
                       type="button" 
                       className="btn-new-task" 
-                      style={{ backgroundColor: '#059669' }}
-                      onClick={triggerBulkCobrarRendir}
-                    >
-                      <i className="bi bi-cash-coin me-1"></i> Rendir Viaje
-                    </button>
-
-                    <button 
-                      type="button" 
-                      className="btn-new-task" 
-                      style={{ backgroundColor: '#047857' }}
+                      style={{ backgroundColor: canFinalizeSelectedOrders ? '#047857' : '#cbd5e1' }}
+                      disabled={!canFinalizeSelectedOrders}
+                      title={canFinalizeSelectedOrders ? 'Finalizar pedidos seleccionados' : 'Asigná medio de pago antes de finalizar'}
                       onClick={() => applyBulkStatus({ estado: 'Finalizado' })}
                     >
                       <i className="bi bi-check-circle-fill me-1"></i> Finalizar Pedidos
@@ -4878,7 +4919,7 @@ function Clientes({ navigate, profile, accentColor }) {
                       type="button" 
                       className="btn-new-task" 
                       style={{ backgroundColor: '#64748b' }}
-                      onClick={() => applyBulkStatus({ estado: 'Pendiente', repartidor: null, medio_pago: null })}
+                      onClick={() => applyBulkStatus({ estado: 'Pendiente', repartidor: null })}
                     >
                       <i className="bi bi-arrow-left-circle me-1"></i> Volver a Pendiente
                     </button>
@@ -4892,18 +4933,9 @@ function Clientes({ navigate, profile, accentColor }) {
                       type="button" 
                       className="btn-new-task" 
                       style={{ backgroundColor: '#64748b' }}
-                      onClick={() => applyBulkStatus({ estado: 'Pendiente', repartidor: null, medio_pago: null })}
+                      onClick={() => applyBulkStatus({ estado: 'Pendiente', repartidor: null })}
                     >
                       <i className="bi bi-arrow-left-circle me-1"></i> Volver a Pendiente
-                    </button>
-
-                    <button 
-                      type="button" 
-                      className="btn-new-task" 
-                      style={{ backgroundColor: '#10b981' }}
-                      onClick={triggerBulkCobrarRendir}
-                    >
-                      <i className="bi bi-cash-coin me-1"></i> Cambiar Medio de Pago
                     </button>
 
                     <button 
@@ -4923,16 +4955,9 @@ function Clientes({ navigate, profile, accentColor }) {
                     <button 
                       type="button" 
                       className="btn-new-task" 
-                      style={{ backgroundColor: '#10b981' }}
-                      onClick={triggerBulkCobrarRendir}
-                    >
-                      <i className="bi bi-cash-coin me-1"></i> Cobrar Pedidos
-                    </button>
-
-                    <button 
-                      type="button" 
-                      className="btn-new-task" 
-                      style={{ backgroundColor: '#047857' }}
+                      style={{ backgroundColor: canFinalizeSelectedOrders ? '#047857' : '#cbd5e1' }}
+                      disabled={!canFinalizeSelectedOrders}
+                      title={canFinalizeSelectedOrders ? 'Finalizar pedidos seleccionados' : 'Asigná medio de pago antes de finalizar'}
                       onClick={() => applyBulkStatus({ estado: 'Finalizado' })}
                     >
                       <i className="bi bi-check-circle-fill me-1"></i> Finalizar Pedidos
@@ -4952,15 +4977,6 @@ function Clientes({ navigate, profile, accentColor }) {
                 {/* CASE 5: Local - Finalizado */}
                 {typeFilter === 'local' && statusFilter === 'finalizado' && (
                   <>
-                    <button 
-                      type="button" 
-                      className="btn-new-task" 
-                      style={{ backgroundColor: '#10b981' }}
-                      onClick={triggerBulkCobrarRendir}
-                    >
-                      <i className="bi bi-cash-coin me-1"></i> Cambiar Medio de Pago
-                    </button>
-
                     <button 
                       type="button" 
                       className="btn-new-task" 
@@ -5114,7 +5130,24 @@ function Clientes({ navigate, profile, accentColor }) {
                         </td>
                         <td style={{ padding: '12px', color: 'var(--text-muted)', fontSize: '0.8rem' }}>{dateFmt}</td>
                         <td style={{ padding: '12px', fontWeight: '600', fontSize: '1.05rem' }}>
-                          {order.cliente_nombre}
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditClientFromOrder(order)}
+                            title="Editar cliente"
+                            style={{
+                              border: 'none',
+                              background: 'none',
+                              padding: 0,
+                              margin: 0,
+                              font: 'inherit',
+                              fontWeight: 600,
+                              color: '#5b21b6',
+                              cursor: 'pointer',
+                              textAlign: 'left',
+                            }}
+                          >
+                            {order.cliente_nombre}
+                          </button>
                           {clientSaldo !== null && (
                             <span style={{ fontSize: '0.72rem', fontWeight: '500', color: 'var(--text-muted)', marginLeft: '4px' }}>
                               ($ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(clientSaldo)})
@@ -5219,30 +5252,6 @@ function Clientes({ navigate, profile, accentColor }) {
                               <i className="bi bi-printer"></i> Comanda
                             </button>
 
-                            {estLower === 'pendiente' && !isCancelled && (
-                              <button
-                                type="button"
-                                className="btn-new-task"
-                                style={{
-                                  padding: '4px 8px',
-                                  fontSize: '0.75rem',
-                                  backgroundColor: 'transparent',
-                                  color: '#f59e0b',
-                                  border: '1px solid #f59e0b',
-                                  borderRadius: '6px',
-                                  cursor: 'pointer',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                  margin: 0
-                                }}
-                                onClick={() => handleOpenEditOrder(order)}
-                                title="Editar ítems del pedido"
-                              >
-                                <i className="bi bi-pencil-fill"></i>
-                              </button>
-                            )}
-
                             {canCobrarOrder(order) && (
                               <button
                                 type="button"
@@ -5261,7 +5270,7 @@ function Clientes({ navigate, profile, accentColor }) {
                                   margin: 0
                                 }}
                                 onClick={() => handleOpenCobrarOrder(order)}
-                                title={(isOrderPagado(order) || isOrderCtaCte(order)) ? 'Cambiar medio de pago' : (order.con_envio ? 'Rendir / cobrar pedido' : 'Cobrar pedido')}
+                                title={isOrderPagado(order) ? 'Cambiar medio de pago' : (order.con_envio ? 'Rendir / cobrar pedido' : 'Cobrar pedido')}
                               >
                                 <i className="bi bi-cash-coin"></i>
                               </button>
@@ -6849,43 +6858,19 @@ function Clientes({ navigate, profile, accentColor }) {
               ) : movements.length > 0 ? (
                 <div>
                   {(() => {
-                    const cleanConceptForDisplay = (concepto) => {
-                      let text = concepto;
-                      text = text.replace(/Pedido #/g, 'Compra #');
-                      text = text.replace(/Pedido /g, 'Compra ');
-                      text = text.replace(/Cobro Pedido #/g, 'Cobro Compra #');
-                      text = text.replace(/Cancelación Pedido #/g, 'Cancelación Compra #');
-                      text = text.replace(/Reversión Cobro Pedido #/g, 'Reversión Cobro Compra #');
-                      text = text.replace(/Anticipo Pedido #/g, 'Crédito Compra #');
-                      text = text.replace(/Crédito Pedido #/g, 'Crédito Compra #');
-                      text = text.replace(/Aplicación anticipo Pedido #/g, 'Aplicación crédito Compra #');
-                      text = text.replace(/Reversión anticipo Pedido #/g, 'Reversión crédito Compra #');
-                      text = text.replace(/Reversión crédito Pedido #/g, 'Reversión crédito Compra #');
-                      text = text.replace(/Depósito cuenta corriente/g, 'Depósito a cuenta');
-                      text = text.replace(/Pago cuenta corriente/g, 'Pago recibido');
-                      
-                      // Strip product details (everything after the first ' - ')
-                      if (text.includes(' - ')) {
-                        text = text.split(' - ')[0];
-                      }
-                      return text;
-                    };
+                    const cleanConceptForDisplay = formatMovementForDisplay;
 
                     const roundCcMoney = (value) =>
                       Math.round((parseFloat(value || 0) + Number.EPSILON) * 100) / 100;
 
-                    const isUnlinkedClientPayment = (concepto) =>
-                      String(concepto || '').startsWith('Pago cuenta corriente');
+                    const isUnlinkedClientPayment = isUnlinkedClientPaymentConcept;
 
-                    const isOrderPrimaryDeudaCharge = (mov, orderId) => {
-                      const c = String(mov?.concepto || '');
-                      const debe = parseFloat(mov?.debe || 0);
-                      if (debe <= 0 || !c.includes(`#${orderId}`)) return false;
-                      if (c.includes('Reversión') || c.includes('Cobro') || c.includes('Crédito') || c.includes('Anticipo')) {
-                        return false;
-                      }
-                      return /^Pedido #/.test(c);
-                    };
+                    const orderGroupHasPayment = (groupMovs, orderId) =>
+                      groupMovs.some(
+                        (m) =>
+                          isCreditoPedidoConcept(m.concepto, orderId)
+                          || isCobroPedidoConcept(m.concepto, orderId)
+                      );
 
                     const getGroupPendingAmount = (groupMovs, orderId) => {
                       let seenPedidoCharge = false;
@@ -6901,6 +6886,9 @@ function Clientes({ navigate, profile, accentColor }) {
                     };
 
                     const formatLinkedPaymentLabel = (concepto, orderId) => {
+                      if (String(concepto || '').includes('saldo a favor')) {
+                        return formatMovementForDisplay(movementConcept.cobroSaldoFavor(orderId, 'Depósito'));
+                      }
                       const match = String(concepto || '').match(/\(([^)]+)\)/);
                       const medio = match ? match[1].split('—')[0].trim() : 'Pago';
                       return `Cobro Compra #${orderId} (${medio})`;
@@ -6922,37 +6910,23 @@ function Clientes({ navigate, profile, accentColor }) {
                       }
                     });
 
-                    const getMovementSortRank = (concepto, groupHasCredit) => {
-                      const c = String(concepto || '');
-                      if (c.includes('Crédito') || c.includes('Anticipo')) return 0;
-                      if (/^Pedido #/.test(c)) return groupHasCredit ? 1 : 0;
-                      if ((c.includes('Cobro Pedido') || c.startsWith('Pago cuenta corriente')) && !c.includes('Reversión')) {
-                        return groupHasCredit ? 2 : 1;
-                      }
-                      return 3;
-                    };
-
                     const buildOrderGroup = (orderId, groupMovs) => {
-                      const groupHasCredit = groupMovs.some((m) => {
-                        const c = m.concepto || '';
-                        return c.includes('Crédito') || c.includes('Anticipo');
-                      });
-                      groupMovs.sort((a, b) => {
-                        const ta = new Date(a.fecha).getTime();
-                        const tb = new Date(b.fecha).getTime();
-                        if (ta !== tb) return ta - tb;
-                        return getMovementSortRank(a.concepto, groupHasCredit) - getMovementSortRank(b.concepto, groupHasCredit);
-                      });
+                      const sortedMovs = sortOrderGroupMovements(groupMovs).filter(
+                        (mov) => !isInvalidCtaCteCobroConcept(mov.concepto)
+                      );
                       const normalizedMovs = (() => {
                         let seenPedidoCharge = false;
-                        return groupMovs.filter((mov) => {
+                        return sortedMovs.filter((mov) => {
                           if (!isOrderPrimaryDeudaCharge(mov, orderId)) return true;
                           if (seenPedidoCharge) return false;
                           seenPedidoCharge = true;
                           return true;
                         });
                       })();
-                      const groupDate = new Date(normalizedMovs[0]?.fecha || groupMovs[0].fecha).getTime();
+                      const compraMov = normalizedMovs.find((m) => isOrderPrimaryDeudaCharge(m, orderId));
+                      const groupDate = new Date(
+                        compraMov?.fecha || normalizedMovs[0]?.fecha || groupMovs[0]?.fecha
+                      ).getTime();
                       const totalDebe = normalizedMovs.reduce((sum, m) => sum + parseFloat(m.debe || 0), 0);
                       const totalHaber = normalizedMovs.reduce((sum, m) => sum + parseFloat(m.haber || 0), 0);
                       const isCancelled = normalizedMovs.some(m => m.concepto.toLowerCase().includes('cancelación') || m.concepto.toLowerCase().includes('cancelacion'));
@@ -6989,6 +6963,7 @@ function Clientes({ navigate, profile, accentColor }) {
 
                       for (const group of ordersFifo) {
                         if (remaining <= 0.005) break;
+                        if (orderGroupHasPayment(group.movements, group.orderId)) continue;
                         const pending = getGroupPendingAmount(group.movements, group.orderId);
                         if (pending <= 0.005) continue;
 
@@ -7143,8 +7118,8 @@ function Clientes({ navigate, profile, accentColor }) {
                         const standMov = group.movements[0];
                         const isStandCharge = standMov.debe > 0;
                         const conceptText = String(standMov.concepto || '');
-                        const isDeposit = conceptText.includes('Depósito cuenta corriente');
-                        const isClientPayment = conceptText.startsWith('Pago cuenta corriente');
+                        const isDeposit = isDepositConcept(conceptText);
+                        const isClientPayment = isUnlinkedClientPaymentConcept(conceptText);
                         const standBg = isDeposit ? '#eff6ff' : isClientPayment ? '#ecfdf5' : '#ffffff';
                         const standBadge = isDeposit
                           ? <span className="badge-tag" style={{ backgroundColor: '#dbeafe', color: '#1d4ed8', borderColor: '#93c5fd', fontSize: '0.65rem', padding: '2px 6px', fontWeight: '800', lineHeight: 1, textTransform: 'uppercase', marginLeft: '6px' }}>A cuenta</span>
@@ -7673,7 +7648,15 @@ function Clientes({ navigate, profile, accentColor }) {
               </div>
             </div>
               </div>
-              <div className="modal-footer">
+              <div className="modal-footer" style={{ display: 'flex', gap: '10px' }}>
+                <button
+                  type="button"
+                  className="btn-submit"
+                  style={{ backgroundColor: '#8b5cf6', margin: 0, flex: 1 }}
+                  onClick={() => handleOpenClientCuentaCorriente(editingClient)}
+                >
+                  <i className="bi bi-clock-history me-1"></i> Ver cuenta corriente
+                </button>
                 <button
                   type="button"
                   className="btn-submit"

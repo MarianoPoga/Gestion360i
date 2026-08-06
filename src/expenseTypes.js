@@ -1,5 +1,7 @@
 /** Taxonomía de gastos — irregular vs regular y dónde se registran. */
 
+import { resolvePaymentSubgroupId } from './periodicPaymentsDefaults';
+
 export const EXPENSE_IRREGULAR_TYPES = [
   {
     name: 'Mercadería',
@@ -124,20 +126,103 @@ const LEGACY_CATEGORY_ALIASES = {
   'Personal y Cargas Sociales': 'Personal y Cargas',
 };
 
-export const DEFAULT_COMPRAS_CATEGORIES = [
-  {
-    name: 'Mercadería',
-    details: [
-      { label: 'NO CONSIDERAR 21%', iva: 21 },
-      { label: 'NO CONSIDERAR 10,5%', iva: 10.5 },
-    ],
-  },
-  { name: 'Mantenimiento', details: [] },
-  { name: 'Inversión', details: [] },
-  { name: 'Servicios', details: [] },
-  { name: 'Estructura y Gestión', details: [] },
-  { name: 'Seguros', details: [] },
+export const COMPRAS_CONFIG_CATEGORY_NAMES = [
+  'Mercadería',
+  'Mantenimiento',
+  'Inversión',
 ];
+
+export const COMPRAS_CALENDAR_CATEGORY_NAMES = [
+  'Servicios',
+  'Estructura y Gestión',
+  'Seguros',
+];
+
+export const COMPRAS_CATEGORY_PERIODIC_SUBGROUP = {
+  'Estructura y Gestión': '2.2',
+  Servicios: '2.3',
+  Seguros: '2.5',
+};
+
+export const isComprasConfigCategory = (name) =>
+  COMPRAS_CONFIG_CATEGORY_NAMES.includes(name);
+
+export const isComprasCalendarCategory = (name) =>
+  COMPRAS_CALENDAR_CATEGORY_NAMES.includes(name);
+
+export const DEFAULT_COMPRAS_CONCEPTO_LABELS = [
+  'Almacén',
+  'Art. Cocina',
+  'Bebidas',
+  'Carnes',
+  'Combustible',
+  'Envases',
+  'Fiambres',
+  'Flete',
+  'Fumigación',
+  'Huevos',
+  'Lacteos',
+  'Limpieza',
+  'Pan',
+  'Pastas',
+  'Pescado',
+  'Pollos',
+  'Productos',
+  'Verduras',
+  'Sin categoria',
+];
+
+export const createDefaultComprasCategories = () => {
+  const mercaderiaConcepts = DEFAULT_COMPRAS_CONCEPTO_LABELS.map((label, idx) => ({
+    id: `cc_m_${idx + 1}`,
+    label,
+    iva: 21,
+  }));
+
+  return [
+    {
+      name: 'Mercadería',
+      details: [
+        { id: 'cc_nc_21', label: 'NO CONSIDERAR 21%', iva: 21 },
+        { id: 'cc_nc_105', label: 'NO CONSIDERAR 10,5%', iva: 10.5 },
+        ...mercaderiaConcepts,
+      ],
+    },
+    { name: 'Mantenimiento', details: [] },
+    { name: 'Inversión', details: [] },
+    { name: 'Servicios', details: [] },
+    { name: 'Estructura y Gestión', details: [] },
+    { name: 'Seguros', details: [] },
+  ];
+};
+
+export const DEFAULT_COMPRAS_CATEGORIES = createDefaultComprasCategories();
+
+export const flattenComprasConceptosFromCategories = (categories = []) => {
+  const seen = new Set();
+  const result = [];
+
+  normalizeComprasCategories(categories).forEach((cat) => {
+    if (!isComprasConfigCategory(cat.name)) return;
+    (cat.details || []).forEach((detail) => {
+      const label = detail?.label || detail;
+      if (!label) return;
+      const key = String(label).toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      result.push({
+        id: detail.id || `cc_${key.replace(/\s+/g, '_')}`,
+        label,
+        iva: detail.iva ?? 21,
+      });
+    });
+  });
+
+  return result;
+};
+
+export const createDefaultComprasConceptos = () =>
+  flattenComprasConceptosFromCategories(createDefaultComprasCategories());
 
 export const COMPRAS_PROVIDER_CATEGORY_NAMES = [
   ...EXPENSE_IRREGULAR_TYPES.map((item) => item.name),
@@ -183,6 +268,54 @@ export const normalizeComprasCategories = (categories = []) => {
 export const getProviderCategories = (categories = []) =>
   normalizeComprasCategories(categories).filter((cat) =>
     COMPRAS_PROVIDER_CATEGORY_NAMES.includes(cat.name)
+  );
+
+const normalizeConceptDetail = (detail) => {
+  if (typeof detail === 'string') return { label: detail, iva: 21 };
+  return {
+    id: detail.id,
+    label: detail.label || detail,
+    iva: detail.iva ?? 21,
+  };
+};
+
+export const conceptosFromPeriodicPayments = (categoryName, periodicPayments = []) => {
+  const subgroupId = COMPRAS_CATEGORY_PERIODIC_SUBGROUP[categoryName];
+  if (!subgroupId) return [];
+
+  return (periodicPayments || [])
+    .filter((payment) => payment?.activo !== false)
+    .filter((payment) => resolvePaymentSubgroupId(payment) === subgroupId)
+    .filter((payment) => String(payment?.tipo_factura || '').toLowerCase().includes('factura'))
+    .map((payment, idx) => ({
+      id: payment.id || `pp_${subgroupId}_${idx}`,
+      label: payment.nombre,
+      iva: payment.iva_alicuota ?? 21,
+    }));
+};
+
+export const getComprasConceptosForCategory = (
+  categoryName,
+  categories = [],
+  periodicPayments = [],
+  flatFallback = []
+) => {
+  if (isComprasCalendarCategory(categoryName)) {
+    return conceptosFromPeriodicPayments(categoryName, periodicPayments);
+  }
+
+  const cat = normalizeComprasCategories(categories).find((c) => c.name === categoryName);
+  if (cat?.details?.length > 0) {
+    return cat.details.map(normalizeConceptDetail);
+  }
+
+  if (isComprasConfigCategory(categoryName)) return [];
+  return (flatFallback || []).map(normalizeConceptDetail);
+};
+
+export const prepareComprasCategoriasForSave = (categories = []) =>
+  normalizeComprasCategories(categories).map((cat) =>
+    isComprasCalendarCategory(cat.name) ? { ...cat, details: [] } : cat
   );
 
 export const isProviderCategory = (name) =>

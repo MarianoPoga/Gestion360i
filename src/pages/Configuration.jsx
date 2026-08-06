@@ -9,7 +9,13 @@ import {
 } from '../rolePermissions'
 import { MODULE_LABELS, MODULE_DESCRIPTIONS, getModuleLabel, DEFAULT_CAJA_FUERTE_NAME } from '../moduleLabels'
 import { buildArcaConfigFromForm } from '../arcaConfig'
-import { DEFAULT_COMPRAS_CATEGORIES, normalizeComprasCategories } from '../expenseTypes'
+import {
+  COMPRAS_CONFIG_CATEGORY_NAMES,
+  createDefaultComprasCategories,
+  flattenComprasConceptosFromCategories,
+  normalizeComprasCategories,
+  prepareComprasCategoriasForSave,
+} from '../expenseTypes'
 import { ADELANTO_EFECTIVO, ADELANTO_MERCADERIA } from '../adelantoConcepts'
 import {
   CIERRE_MEDIOS_SLOTS,
@@ -131,12 +137,6 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
 
   // Compras configuration settings
   const [comprasCategoriasList, setComprasCategoriasList] = useState([]);
-  const [newComprasCategoriaInput, setNewComprasCategoriaInput] = useState('');
-  const [editingCatIdx, setEditingCatIdx] = useState(null);
-  const [editingCatName, setEditingCatName] = useState('');
-  const [comprasConceptosList, setComprasConceptosList] = useState([]);
-  const [newComprasConceptoInput, setNewComprasConceptoInput] = useState('');
-  const [newComprasConceptoIva, setNewComprasConceptoIva] = useState('21');
   const [comprasFormasPagoList, setComprasFormasPagoList] = useState([]);
   const [newComprasFormaPagoInput, setNewComprasFormaPagoInput] = useState('');
   const [comprasWaReclaimTemplate, setComprasWaReclaimTemplate] = useState('Hola, te reclamo la factura pendiente del proveedor *{proveedor}* (Factura: {nro_factura}) por la compra de fecha *{fecha}* por un total de *${monto}*. Gracias.');
@@ -210,9 +210,24 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
           if (typeof cat === 'string') return { name: cat, details: [] };
           return cat;
         });
-        setComprasCategoriasList(normalizeComprasCategories(formattedCats));
-        
-        setComprasConceptosList(cco || []);
+        let normalizedCats = normalizeComprasCategories(formattedCats);
+        const hasCategoryDetails = normalizedCats.some((cat) => (cat.details?.length || 0) > 0);
+        const legacyConceptos = cco || [];
+        if (!hasCategoryDetails && legacyConceptos.length > 0) {
+          normalizedCats = normalizedCats.map((cat) =>
+            cat.name === 'Mercadería'
+              ? {
+                  ...cat,
+                  details: legacyConceptos.map((item, idx) => ({
+                    id: item.id || `cc_m_${idx + 1}`,
+                    label: item.label,
+                    iva: item.iva ?? 21,
+                  })),
+                }
+              : cat
+          );
+        }
+        setComprasCategoriasList(normalizedCats);
         setComprasFormasPagoList(cp || []);
         
         if (rp) {
@@ -429,58 +444,76 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
     );
   };
 
-  // Categorías de Compra Helpers
-  const handleAddComprasCategoria = (e) => {
+  const COMPRAS_IVA_OPTIONS = [0, 10.5, 21, 27];
+
+  const formatComprasConceptoIva = (iva) => {
+    const n = parseFloat(iva);
+    if (n === 0) return '0%';
+    if (n === 10.5) return '10,5%';
+    if (n === 27) return '27%';
+    return '21%';
+  };
+
+  const handleAddComprasDetail = (e, catName) => {
     if (e) e.preventDefault();
-    const val = newComprasCategoriaInput.trim();
-    if (val && !comprasCategoriasList.some(c => c.name === val)) {
-      setComprasCategoriasList(prev => [...prev, { name: val, details: [] }]);
-      setNewComprasCategoriaInput('');
-    }
+    const label = String(e.currentTarget.elements.concepto?.value || '').trim();
+    const ivaVal = parseFloat(e.currentTarget.elements.iva?.value);
+    if (!label) return;
+
+    setComprasCategoriasList((prev) =>
+      prev.map((cat) => {
+        if (cat.name !== catName) return cat;
+        const details = cat.details || [];
+        if (details.some((d) => (d.label || d).toLowerCase() === label.toLowerCase())) return cat;
+        return {
+          ...cat,
+          details: [
+            ...details,
+            { id: `cc_${Date.now()}`, label, iva: Number.isNaN(ivaVal) ? 21 : ivaVal },
+          ],
+        };
+      })
+    );
+
+    e.currentTarget.reset();
+    const ivaSelect = e.currentTarget.elements.iva;
+    if (ivaSelect) ivaSelect.value = '21';
   };
 
-  const handleAddCategoriaDetail = (catIdx, detailLabel, ivaValue) => {
-    if (!detailLabel.trim()) return;
-    setComprasCategoriasList(prev => {
-      const newList = [...prev];
-      const details = newList[catIdx].details || [];
-      if (!details.some(d => d.label === detailLabel.trim())) {
-        newList[catIdx].details = [...details, { label: detailLabel.trim(), iva: parseFloat(ivaValue) || 0 }];
-      }
-      return newList;
-    });
+  const handleRemoveComprasDetail = (catName, detailKey) => {
+    setComprasCategoriasList((prev) =>
+      prev.map((cat) => {
+        if (cat.name !== catName) return cat;
+        return {
+          ...cat,
+          details: (cat.details || []).filter((d, idx) => (d.id || `${catName}-${idx}`) !== detailKey),
+        };
+      })
+    );
   };
 
-  const handleRemoveCategoriaDetail = (catIdx, detailIdx) => {
-    setComprasCategoriasList(prev => {
-      const newList = [...prev];
-      newList[catIdx].details = newList[catIdx].details.filter((_, i) => i !== detailIdx);
-      return newList;
-    });
+  const handleCycleComprasDetailIva = (catName, detailKey) => {
+    setComprasCategoriasList((prev) =>
+      prev.map((cat) => {
+        if (cat.name !== catName) return cat;
+        return {
+          ...cat,
+          details: (cat.details || []).map((detail, idx) => {
+            const key = detail.id || `${catName}-${idx}`;
+            if (key !== detailKey) return detail;
+            const current = parseFloat(detail.iva);
+            const normalized = COMPRAS_IVA_OPTIONS.includes(current) ? current : 21;
+            const optionIdx = COMPRAS_IVA_OPTIONS.indexOf(normalized);
+            return { ...detail, iva: COMPRAS_IVA_OPTIONS[(optionIdx + 1) % COMPRAS_IVA_OPTIONS.length] };
+          }),
+        };
+      })
+    );
   };
 
-  const handleRemoveComprasCategoria = (index) => {
-    setComprasCategoriasList(prev => prev.filter((_, i) => i !== index));
-    if (editingCatIdx === index) {
-      setEditingCatIdx(null);
-      setEditingCatName('');
-    }
-  };
-
-  const handleStartEditCategoria = (index, name) => {
-    setEditingCatIdx(index);
-    setEditingCatName(name);
-  };
-
-  const handleSaveEditCategoria = () => {
-    if (editingCatIdx === null || !editingCatName.trim()) return;
-    setComprasCategoriasList(prev => {
-      const newList = [...prev];
-      newList[editingCatIdx].name = editingCatName.trim();
-      return newList;
-    });
-    setEditingCatIdx(null);
-    setEditingCatName('');
+  const handleRestoreDefaultComprasCategories = () => {
+    if (!window.confirm('¿Restaurar categorías y conceptos predefinidos? Se reemplazará la configuración actual de compras.')) return;
+    setComprasCategoriasList(createDefaultComprasCategories());
   };
 
   // Formas de Pago de Compra Helpers
@@ -495,30 +528,6 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
 
   const handleRemoveComprasFormaPago = (index) => {
     setComprasFormasPagoList(prev => prev.filter((_, i) => i !== index));
-  };
-
-  // Conceptos / Detalles Helpers (con IVA)
-  const handleAddComprasConcepto = (e) => {
-    if (e) e.preventDefault();
-    const val = newComprasConceptoInput.trim();
-    if (val) {
-      const existing = comprasConceptosList.find(c => c.label.toLowerCase() === val.toLowerCase());
-      if (existing) {
-        setComprasConceptosList(prev => prev.map(c => c.id === existing.id ? { ...c, iva: parseFloat(newComprasConceptoIva) } : c));
-      } else {
-        const newId = `cc_${Date.now()}`;
-        setComprasConceptosList(prev => [...prev, { id: newId, label: val, iva: parseFloat(newComprasConceptoIva) }]);
-      }
-      setNewComprasConceptoInput('');
-    }
-  };
-
-  const handleRemoveComprasConcepto = (id) => {
-    setComprasConceptosList(prev => prev.filter(c => c.id !== id));
-  };
-
-  const handleChangeComprasConceptoIva = (id, ivaVal) => {
-    setComprasConceptosList(prev => prev.map(c => c.id === id ? { ...c, iva: parseFloat(ivaVal) } : c));
   };
 
   const handleSaveConfig = async (e) => {
@@ -538,6 +547,8 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
         .map((t) => String(t).trim())
         .filter((t) => t.length > 0);
       const pedidosCajasToSave = normalizePedidosCajasConfig(cleanTurnos, pedidosCajasConfig);
+      const comprasCategoriasToSave = prepareComprasCategoriasForSave(comprasCategoriasList);
+      const comprasConceptosToSave = flattenComprasConceptosFromCategories(comprasCategoriasToSave);
 
       // Save all database settings concurrently and await them
       const saveResults = await Promise.all([
@@ -545,8 +556,8 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
         db.saveCierreTurnos(cleanTurnos.length > 0 ? cleanTurnos : getCierreTurnoNames(DEFAULT_CIERRE_TURNOS)),
         db.savePedidosCajasConfig(pedidosCajasToSave),
         db.saveCierreConceptos(conceptsList),
-        db.saveComprasCategorias(comprasCategoriasList),
-        db.saveComprasConceptos(comprasConceptosList),
+        db.saveComprasCategorias(comprasCategoriasToSave),
+        db.saveComprasConceptos(comprasConceptosToSave),
         db.saveComprasFormasPago(comprasFormasPagoList),
         db.saveRolePermissions(normalizeRolePermissions(rolePermissionsConfig, modules)),
         db.saveArcaConfig(buildArcaConfigFromForm({
@@ -702,22 +713,8 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       setTurnosList(getCierreTurnoNames(DEFAULT_CIERRE_TURNOS));
       setPedidosCajasConfig(normalizePedidosCajasConfig(getCierreTurnoNames(DEFAULT_CIERRE_TURNOS), null));
       setConceptsList(createDefaultCierreMedios());
-      setComprasCategoriasList(DEFAULT_COMPRAS_CATEGORIES.map((cat) => ({ ...cat, details: [...(cat.details || [])] })));
-      setComprasConceptosList([
-        { id: 'c1', label: 'Alquiler', iva: 0 },
-        { id: 'c2', label: 'Luz', iva: 21 },
-        { id: 'c3', label: 'Gas', iva: 21 },
-        { id: 'c4', label: 'Sueldos', iva: 0 },
-        { id: 'c5', label: 'Repuestos', iva: 21 },
-        { id: 'c6', label: 'Bolsas y descartables', iva: 21 },
-        { id: 'c7', label: 'Fiambrería', iva: 21 },
-        { id: 'c8', label: 'Bebidas', iva: 21 },
-        { id: 'c9', label: 'Limpieza', iva: 21 },
-        { id: 'c10', label: 'Insumos', iva: 21 }
-      ]);
+      setComprasCategoriasList(createDefaultComprasCategories());
       setComprasFormasPagoList(["Efectivo", "Caja", "Rendición", "Transferencia", "Tarjeta", "Mercado Pago"]);
-      setNewComprasCategoriaInput('');
-      setNewComprasConceptoInput('');
       setNewComprasFormaPagoInput('');
       
       const defaultModules = {
@@ -1553,14 +1550,86 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
               {/* Compras */}
               {renderModuleHeader('compras', MODULE_LABELS.compras, MODULE_DESCRIPTIONS.compras, 'bi-cart-fill', 'bg-compras')}
               {modules.compras && expandedModule === 'compras' && (
-                <div style={{ padding: '5px 20px 10px 48px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
-                  <div style={{ backgroundColor: '#fff', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-                    <div className="small text-muted">Las categorías y formas de pago de compras se configuran en sus respectivas secciones del módulo.</div>
+                <div style={{ padding: '5px 20px 10px 48px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <div className="d-flex align-items-center justify-content-between gap-2">
+                    <label className="form-label fw-bold small text-muted mb-0">Conceptos por categoría / tipo</label>
+                    <button
+                      type="button"
+                      className="btn btn-link btn-sm p-0 text-muted"
+                      onClick={handleRestoreDefaultComprasCategories}
+                    >
+                      Restaurar
+                    </button>
                   </div>
+                  <div className="small text-muted">
+                    Mercadería, Mantenimiento e Inversión se configuran acá. Servicios, Estructura y Gestión y Seguros se toman del Calendario de Pagos.
+                  </div>
+                  {comprasCategoriasList
+                    .filter((cat) => COMPRAS_CONFIG_CATEGORY_NAMES.includes(cat.name))
+                    .map((cat) => (
+                    <div key={cat.name}>
+                      <div className="small fw-bold text-muted mb-1">{cat.name}</div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', padding: '8px', border: '1px solid #e2e8f0', borderRadius: '8px', backgroundColor: '#fff', minHeight: '34px' }}>
+                        {(cat.details || []).length === 0 ? (
+                          <span className="small text-muted">Sin conceptos</span>
+                        ) : (
+                          (cat.details || []).map((detail, detailIdx) => {
+                            const detailKey = detail.id || `${cat.name}-${detailIdx}`;
+                            const label = detail.label || detail;
+                            return (
+                              <span
+                                key={detailKey}
+                                className="badge bg-light text-dark border d-inline-flex align-items-center gap-1"
+                                style={{ fontWeight: 500, padding: '5px 7px' }}
+                              >
+                                {label}
+                                <span
+                                  className="badge bg-compras text-white"
+                                  style={{ fontSize: '0.65rem', cursor: 'pointer', lineHeight: 1.2 }}
+                                  title="Clic para cambiar IVA"
+                                  onClick={() => handleCycleComprasDetailIva(cat.name, detailKey)}
+                                >
+                                  {formatComprasConceptoIva(detail.iva)}
+                                </span>
+                                <i
+                                  className="bi bi-x cursor-pointer"
+                                  onClick={() => handleRemoveComprasDetail(cat.name, detailKey)}
+                                ></i>
+                              </span>
+                            );
+                          })
+                        )}
+                      </div>
+                      <form
+                        className="d-flex gap-2 mt-1"
+                        onSubmit={(e) => handleAddComprasDetail(e, cat.name)}
+                      >
+                        <input
+                          name="concepto"
+                          type="text"
+                          className="form-input"
+                          placeholder="Agregar..."
+                          style={{ height: '32px', fontSize: '0.85rem', padding: '6px 10px' }}
+                        />
+                        <select
+                          name="iva"
+                          defaultValue="21"
+                          className="form-select"
+                          style={{ width: '68px', flexShrink: 0, height: '32px', padding: '4px 6px', fontSize: '0.8rem' }}
+                        >
+                          <option value="0">0%</option>
+                          <option value="10.5">10,5%</option>
+                          <option value="21">21%</option>
+                          <option value="27">27%</option>
+                        </select>
+                        <button type="submit" className="btn-new-task" style={{ height: '32px', minWidth: '32px', padding: 0 }}>
+                          <i className="bi bi-plus-lg"></i>
+                        </button>
+                      </form>
+                    </div>
+                  ))}
                 </div>
               )}
-
-              {/* Adelantos */}
               {renderModuleHeader('adelantos', MODULE_LABELS.adelantos, MODULE_DESCRIPTIONS.adelantos, 'bi-cash-stack', 'bg-adelantos')}
               {modules.adelantos && expandedModule === 'adelantos' && (
                 <div style={{ padding: '5px 20px 10px 48px', display: 'flex', flexDirection: 'column', gap: '15px' }}>

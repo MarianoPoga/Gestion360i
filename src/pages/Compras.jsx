@@ -2,10 +2,19 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { db } from '../supabaseClient';
 import { DEFAULT_CAJA_FUERTE_NAME } from '../moduleLabels';
 import {
+  COMPRAS_CATEGORY_PERIODIC_SUBGROUP,
+  getComprasConceptosForCategory,
   getProviderCategories,
+  isComprasCalendarCategory,
   normalizeCategoryName,
   normalizeComprasCategories,
 } from '../expenseTypes';
+import {
+  buildFullSubgroup,
+  normalizePeriodicPayment,
+  resolvePaymentSubgroupId,
+  sortPeriodicPayments,
+} from '../periodicPaymentsDefaults';
 import ExpenseGuideModal from '../components/ExpenseGuideModal';
 import { clampDateToToday, getTodayLocalDateString } from '../dateUtils';
 function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
@@ -85,6 +94,7 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
   // UI lists & autocompletes state
   const [proveedoresMap, setProveedoresMap] = useState({});
   const [uniqueDetails, setUniqueDetails] = useState([]);
+  const [periodicPayments, setPeriodicPayments] = useState([]);
   const [uniquePayments, setUniquePayments] = useState([]);
   const [comprasCategorias, setComprasCategorias] = useState([]);
   const [showGuiaModal, setShowGuiaModal] = useState(false);
@@ -128,10 +138,14 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
       setProvSortAsc(true);
     }
   };
-  const initializeDefaultConceptInDesglose = (conceptName, defaultNeto = '', defaultIvaRate = null) => {
+  const getConceptosForCategory = (categoryName) =>
+    getComprasConceptosForCategory(categoryName, comprasCategorias, periodicPayments, uniqueDetails);
+
+  const initializeDefaultConceptInDesglose = (conceptName, defaultNeto = '', defaultIvaRate = null, categoryName = tipo) => {
     if (!conceptName) return;
     
-    const concept = uniqueDetails.find(d => (d.label || d).toLowerCase().trim() === conceptName.toLowerCase().trim());
+    const concept = getConceptosForCategory(categoryName)
+      .find(d => (d.label || d).toLowerCase().trim() === conceptName.toLowerCase().trim());
     let ivaRate = concept && concept.iva !== undefined ? concept.iva : 21;
     if (defaultIvaRate !== null) {
       ivaRate = defaultIvaRate;
@@ -321,10 +335,16 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
       
       // Intentar inicializar el desglose con el concepto
       if (p.nombre && p.monto_mensual) {
-        initializeDefaultConceptInDesglose(p.nombre, p.monto_mensual.toString(), p.iva_alicuota);
+        const calendarCategory = p.subgrupo.includes('. ') ? p.subgrupo.split('. ')[1] : p.subgrupo;
+        initializeDefaultConceptInDesglose(
+          p.nombre,
+          p.monto_mensual.toString(),
+          p.iva_alicuota,
+          calendarCategory
+        );
       }
     }
-  }, [navState, uniqueDetails]);
+  }, [navState, uniqueDetails, periodicPayments, comprasCategorias]);
 
   useEffect(() => {
     setFecha(getTodayLocalDateString());
@@ -372,12 +392,14 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
       setUniquePayments(uniqueOptions.pagos || []);
 
 
-      const [pr, cierres] = await Promise.all([
+      const [pr, cierres, periodics] = await Promise.all([
         db.getProducts(),
-        db.getUltimosCierres()
+        db.getUltimosCierres(),
+        db.getPagosPeriodicos(),
       ]);
       setProducts(pr || []);
       setUltimosCierres(cierres || []);
+      setPeriodicPayments(sortPeriodicPayments(periodics || []));
 
       const cats = normalizeComprasCategories(await db.getComprasCategorias());
       setComprasCategorias(cats);
@@ -454,7 +476,9 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
   const applyDefaultIva = (currentDetalle, typedNet) => {
     if (!currentDetalle) return;
     
-    const match = uniqueDetails.find(d => d.label && d.label.toLowerCase() === currentDetalle.trim().toLowerCase());
+    const match = getConceptosForCategory(tipo).find(
+      (d) => d.label && d.label.toLowerCase() === currentDetalle.trim().toLowerCase()
+    );
 
     if (match) {
       const currentActiveNet = parseFloat(typedNet) || 
@@ -515,7 +539,9 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
       if (val.trim() === '') {
         setDesgloseConceptos([]);
       } else {
-        const concept = uniqueDetails.find(d => (d.label || d).toLowerCase().trim() === val.toLowerCase().trim());
+        const concept = getConceptosForCategory(tipo).find(
+          (d) => (d.label || d).toLowerCase().trim() === val.toLowerCase().trim()
+        );
         const ivaRate = concept && concept.iva !== undefined ? concept.iva : 21;
         
         const newItem = {
@@ -554,7 +580,9 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
     if (desgloseConceptos.length === 1 && desgloseConceptos[0].ivaRate !== undefined && desgloseConceptos[0].ivaRate !== null) {
       defaultIva = parseFloat(desgloseConceptos[0].ivaRate);
     } else {
-      const conceptMatch = uniqueDetails.find(d => d.label && d.label.toLowerCase() === detalle.trim().toLowerCase());
+      const conceptMatch = getConceptosForCategory(tipo).find(
+        (d) => d.label && d.label.toLowerCase() === detalle.trim().toLowerCase()
+      );
       defaultIva = conceptMatch ? (conceptMatch.iva !== undefined ? conceptMatch.iva : 21) : 21;
     }
     return defaultIva;
@@ -734,7 +762,7 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
     }
   };
 
-  const handleCreateConcepto = (e) => {
+  const handleCreateConcepto = async (e) => {
     if (e) e.preventDefault();
     const label = newConceptNombre.trim();
     if (!label) {
@@ -742,8 +770,10 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
       return;
     }
 
-    const currentCat = comprasCategorias.find(c => c.name === tempCategory);
-    const exists = currentCat && currentCat.details?.some(d => (d.label || d).toLowerCase() === label.toLowerCase());
+    const categoryConceptos = getConceptosForCategory(tempCategory);
+    const exists = categoryConceptos.some(
+      (d) => (d.label || d).toLowerCase() === label.toLowerCase()
+    );
     if (exists) {
       alert(`Este concepto ya existe en la categoría ${tempCategory}.`);
       return;
@@ -751,27 +781,49 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
 
     const newConcept = {
       id: `cc_${Date.now()}`,
-      label: label,
-      iva: parseFloat(newConceptIva)
+      label,
+      iva: parseFloat(newConceptIva),
     };
 
-    // Find the category and update it
-    const updatedCategorias = comprasCategorias.map(cat => {
-      if (cat.name === tempCategory) {
-        return {
-          ...cat,
-          details: [...(cat.details || []), newConcept]
-        };
+    if (isComprasCalendarCategory(tempCategory)) {
+      const subgroupId = COMPRAS_CATEGORY_PERIODIC_SUBGROUP[tempCategory];
+      const res = await db.savePagoPeriodico({
+        subgrupo: buildFullSubgroup(subgroupId),
+        nombre: label,
+        monto_mensual: 0,
+        dia_vencimiento: 10,
+        tipo_factura: 'Factura B',
+        iva_alicuota: parseFloat(newConceptIva),
+        medio_pago: 'Banco',
+        periodicidad: 'Mensual',
+        estado_valor: 'VALOR ESTIMADO',
+        orden: periodicPayments.filter((p) => resolvePaymentSubgroupId(p) === subgroupId).length,
+        activo: true,
+      });
+      if (!res.success) {
+        alert(res.error || 'No se pudo guardar el concepto en el calendario de pagos.');
+        return;
       }
-      return cat;
-    });
+      setPeriodicPayments((prev) =>
+        sortPeriodicPayments([...prev, normalizePeriodicPayment(res.data)])
+      );
+    } else {
+      const updatedCategorias = comprasCategorias.map((cat) => {
+        if (cat.name === tempCategory) {
+          return {
+            ...cat,
+            details: [...(cat.details || []), newConcept],
+          };
+        }
+        return cat;
+      });
 
-    setComprasCategorias(updatedCategorias);
-    db.saveComprasCategorias(updatedCategorias);
-    
-    // Also update uniqueDetails for backward compatibility/legacy logic if still used elsewhere
-    const updatedFlatList = [...uniqueDetails, newConcept];
-    setUniqueDetails(updatedFlatList);
+      setComprasCategorias(updatedCategorias);
+      await db.saveComprasCategorias(updatedCategorias);
+
+      const updatedFlatList = [...uniqueDetails, newConcept];
+      setUniqueDetails(updatedFlatList);
+    }
 
     // Auto-populate the target input field
     if (conceptTargetField === 'main') {
@@ -799,9 +851,8 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
   const handleAddConceptToDesglose = () => {
     if (!selectedConceptToAdd) return;
     
-    const currentCategory = comprasCategorias.find(c => c.name === tempCategory);
     setTipo(tempCategory);
-    const conceptsList = currentCategory && currentCategory.details?.length > 0 ? currentCategory.details : uniqueDetails;
+    const conceptsList = getConceptosForCategory(tempCategory);
     const concept = conceptsList.find(d => (d.label || d) === selectedConceptToAdd);
     let ivaRate = concept && concept.iva !== undefined ? concept.iva : 21;
 
@@ -3344,16 +3395,13 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
                     />
                     {showNewProvDetalleSuggestions && (
                       (() => {
-                        const selectedCatObj = comprasCategorias.find(c => c.name === newProvTipo);
-                        const catDetails = selectedCatObj ? selectedCatObj.details : [];
+                        const catConceptos = getConceptosForCategory(newProvTipo);
                         const search = newProvDetalle.toLowerCase();
                         
-                        const filtered = catDetails.filter(d => d.toLowerCase().includes(search));
-                        const extraDetails = uniqueDetails
-                          .filter(d => (d.label || d).toLowerCase().includes(search))
-                          .map(d => d.label || d);
-                        
-                        const allSuggested = Array.from(new Set([...filtered, ...extraDetails])).slice(0, 8);
+                        const allSuggested = catConceptos
+                          .map((d) => d.label || d)
+                          .filter((label) => label.toLowerCase().includes(search))
+                          .slice(0, 8);
 
                         if (allSuggested.length === 0) return null;
 
@@ -3637,10 +3685,7 @@ function Compras({ navigate, refreshModules, modules, navState, accentColor }) {
                 >
                   <option value="">-- Seleccionar concepto --</option>
                   {(() => {
-                    const currentCategory = comprasCategorias.find(c => c.name === tempCategory);
-                    const listToMap = currentCategory && currentCategory.details?.length > 0 
-                      ? currentCategory.details 
-                      : uniqueDetails;
+                    const listToMap = getConceptosForCategory(tempCategory);
                       
                     return listToMap.map((d, idx) => {
                       const labelText = d.label || d;
