@@ -11,15 +11,19 @@ import { MODULE_LABELS, MODULE_DESCRIPTIONS, getModuleLabel, DEFAULT_CAJA_FUERTE
 import { buildArcaConfigFromForm } from '../arcaConfig'
 import {
   COMPRAS_CONFIG_CATEGORY_NAMES,
-  createDefaultComprasCategories,
   flattenComprasConceptosFromCategories,
   normalizeComprasCategories,
   prepareComprasCategoriasForSave,
 } from '../expenseTypes'
+import {
+  buildDefaultComprasCategorias,
+  buildDefaultCierreMedios,
+  DEFAULT_COMPRAS_FORMAS_PAGO,
+  DEFAULT_ENABLED_MODULES,
+} from '../businessDefaults'
 import { ADELANTO_EFECTIVO, ADELANTO_MERCADERIA } from '../adelantoConcepts'
 import {
   CIERRE_MEDIOS_SLOTS,
-  createDefaultCierreMedios,
   getConfiguredMedios,
   getNextEmptyMedioSlot,
   canDeleteMedio,
@@ -210,7 +214,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
           if (typeof cat === 'string') return { name: cat, details: [] };
           return cat;
         });
-        let normalizedCats = normalizeComprasCategories(formattedCats);
+        let normalizedCats = normalizeComprasCategories(formattedCats, { mergeDefaults: false });
         const hasCategoryDetails = normalizedCats.some((cat) => (cat.details?.length || 0) > 0);
         const legacyConceptos = cco || [];
         if (!hasCategoryDetails && legacyConceptos.length > 0) {
@@ -454,10 +458,10 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
     return '21%';
   };
 
-  const handleAddComprasDetail = (e, catName) => {
-    if (e) e.preventDefault();
-    const label = String(e.currentTarget.elements.concepto?.value || '').trim();
-    const ivaVal = parseFloat(e.currentTarget.elements.iva?.value);
+  const handleAddComprasDetailFromRow = (catName, rowEl) => {
+    if (!rowEl) return;
+    const label = String(rowEl.querySelector('[name="concepto"]')?.value || '').trim();
+    const ivaVal = parseFloat(rowEl.querySelector('[name="iva"]')?.value);
     if (!label) return;
 
     setComprasCategoriasList((prev) =>
@@ -475,8 +479,9 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       })
     );
 
-    e.currentTarget.reset();
-    const ivaSelect = e.currentTarget.elements.iva;
+    const conceptInput = rowEl.querySelector('[name="concepto"]');
+    if (conceptInput) conceptInput.value = '';
+    const ivaSelect = rowEl.querySelector('[name="iva"]');
     if (ivaSelect) ivaSelect.value = '21';
   };
 
@@ -513,7 +518,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
 
   const handleRestoreDefaultComprasCategories = () => {
     if (!window.confirm('¿Restaurar categorías y conceptos predefinidos? Se reemplazará la configuración actual de compras.')) return;
-    setComprasCategoriasList(createDefaultComprasCategories());
+    setComprasCategoriasList(buildDefaultComprasCategorias());
   };
 
   // Formas de Pago de Compra Helpers
@@ -712,22 +717,12 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
       setArcaToken('');
       setTurnosList(getCierreTurnoNames(DEFAULT_CIERRE_TURNOS));
       setPedidosCajasConfig(normalizePedidosCajasConfig(getCierreTurnoNames(DEFAULT_CIERRE_TURNOS), null));
-      setConceptsList(createDefaultCierreMedios());
-      setComprasCategoriasList(createDefaultComprasCategories());
-      setComprasFormasPagoList(["Efectivo", "Caja", "Rendición", "Transferencia", "Tarjeta", "Mercado Pago"]);
+      setConceptsList(buildDefaultCierreMedios());
+      setComprasCategoriasList(buildDefaultComprasCategorias());
+      setComprasFormasPagoList([...DEFAULT_COMPRAS_FORMAS_PAGO]);
       setNewComprasFormaPagoInput('');
       
-      const defaultModules = {
-        cierre: true,
-        compras: true,
-        adelantos: true,
-        rendiciones: true,
-        clientes: true,
-        tareas: true,
-        proveedores: true,
-        empleados: true,
-        resultados: true
-      };
+      const defaultModules = { ...DEFAULT_ENABLED_MODULES };
       setModules(defaultModules);
       await db.saveModules(defaultModules);
       
@@ -1562,7 +1557,7 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                     </button>
                   </div>
                   <div className="small text-muted">
-                    Mercadería, Mantenimiento e Inversión se configuran acá. Servicios, Estructura y Gestión y Seguros se toman del Calendario de Pagos.
+                    Mercadería, Mantenimiento y limpieza e Inversión se configuran acá. Servicios, Estructura y Gestión y Seguros se toman del Calendario de Pagos.
                   </div>
                   {comprasCategoriasList
                     .filter((cat) => COMPRAS_CONFIG_CATEGORY_NAMES.includes(cat.name))
@@ -1600,9 +1595,9 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                           })
                         )}
                       </div>
-                      <form
+                      <div
                         className="d-flex gap-2 mt-1"
-                        onSubmit={(e) => handleAddComprasDetail(e, cat.name)}
+                        data-compras-add-row
                       >
                         <input
                           name="concepto"
@@ -1610,6 +1605,13 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                           className="form-input"
                           placeholder="Agregar..."
                           style={{ height: '32px', fontSize: '0.85rem', padding: '6px 10px' }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              handleAddComprasDetailFromRow(cat.name, e.currentTarget.closest('[data-compras-add-row]'));
+                            }
+                          }}
                         />
                         <select
                           name="iva"
@@ -1622,10 +1624,19 @@ function Configuration({ navigate, modules: initialModules, moduleColors: initia
                           <option value="21">21%</option>
                           <option value="27">27%</option>
                         </select>
-                        <button type="submit" className="btn-new-task" style={{ height: '32px', minWidth: '32px', padding: 0 }}>
+                        <button
+                          type="button"
+                          className="btn-new-task"
+                          style={{ height: '32px', minWidth: '32px', padding: 0 }}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleAddComprasDetailFromRow(cat.name, e.currentTarget.closest('[data-compras-add-row]'));
+                          }}
+                        >
                           <i className="bi bi-plus-lg"></i>
                         </button>
-                      </form>
+                      </div>
                     </div>
                   ))}
                 </div>

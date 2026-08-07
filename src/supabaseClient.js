@@ -78,6 +78,17 @@ const resolveLegacyShippingEstadoUpdate = (order, updates) => {
   return { ...updates, estado: shippingEstado };
 };
 import { mapCsvRowsToClientes, parseCsvText, analyzeCsvImport } from './clientesImport'
+import {
+  buildNewBusinessDefaults,
+  DEFAULT_COMPRAS_FORMAS_PAGO,
+} from './businessDefaults'
+import {
+  BUSINESS_FISCAL_CONFIG_KEY,
+  DEFAULT_PERIODIC_CONCEPTS,
+  buildPeriodicPaymentFromConcept,
+  findExistingPeriodicItem,
+  normalizePeriodicPayment,
+} from './periodicPaymentsDefaults'
 
 // Credentials: localStorage first, then Vite env vars (for local dev)
 export const getSupabaseCredentials = () => {
@@ -1218,7 +1229,7 @@ export const db = {
       
       setTerminalId(termData.id);
 
-      await db.seedDefaultPeriodicPayments({ isMonotributo });
+      await db.seedBusinessDefaults({ isMonotributo });
 
       return { success: true, user: authData.user, business: bizData };
     } catch (err) {
@@ -5835,13 +5846,15 @@ export const db = {
           .eq('business_id', businessId)
           .eq('key', 'compras_categorias')
           .maybeSingle();
-        if (!error && data?.value) return normalizeComprasCategories(data.value);
+        if (!error && data?.value) {
+          return normalizeComprasCategories(data.value, { mergeDefaults: false });
+        }
       } catch (err) {
         console.warn("Supabase getComprasCategorias failed:", err);
       }
     }
     const stored = localStorage.getItem('compras_categorias');
-    return normalizeComprasCategories(stored ? JSON.parse(stored) : defaultCats);
+    return normalizeComprasCategories(stored ? JSON.parse(stored) : defaultCats, { mergeDefaults: false });
   },
 
   saveComprasCategorias: async (list) => {
@@ -5907,7 +5920,7 @@ export const db = {
 
   getComprasFormasPago: async () => {
     const businessId = getBusinessId();
-    const defaultPayments = ["Efectivo", "Transferencia Bancaria", "Caja", "Rendiciones"];
+    const defaultPayments = DEFAULT_COMPRAS_FORMAS_PAGO;
     if (isSupabaseConfigured() && supabase) {
       try {
         const { data, error } = await supabase
@@ -6297,6 +6310,37 @@ export const db = {
   saveBusinessFiscalConfig: async (condicion) =>
     saveBusinessConfig(BUSINESS_FISCAL_CONFIG_KEY, { condicion }),
 
+  seedBusinessDefaults: async ({ isMonotributo = false } = {}) => {
+    const businessId = await ensureBusinessContext();
+    if (!isSupabaseConfigured() || !supabase || !businessId || INVALID_BUSINESS_ID.includes(String(businessId))) {
+      return { success: false, error: 'Empresa no configurada' };
+    }
+
+    const defaults = buildNewBusinessDefaults({ isMonotributo });
+
+    try {
+      await Promise.all([
+        db.saveModules(defaults.modules),
+        db.saveCierreTurnos(getCierreTurnoNames(defaults.cierreTurnos)),
+        db.saveCierreConceptos(defaults.cierreMedios),
+        db.saveComprasCategorias(defaults.comprasCategorias),
+        db.saveComprasFormasPago(defaults.comprasFormasPago),
+        db.saveRolePermissions(defaults.rolePermissions),
+        db.savePedidosCajasConfig(defaults.pedidosCajas),
+      ]);
+
+      localStorage.setItem('rendiciones_config', JSON.stringify(defaults.rendiciones));
+      localStorage.setItem('whatsapp_template', defaults.whatsappTemplate);
+
+      await db.seedDefaultPeriodicPayments({ isMonotributo });
+
+      return { success: true };
+    } catch (err) {
+      console.error('[Gestion360i] seedBusinessDefaults:', err);
+      return { success: false, error: err.message };
+    }
+  },
+
   seedDefaultPeriodicPayments: async ({ isMonotributo = false } = {}) => {
     const businessId = await ensureBusinessContext();
     if (!isSupabaseConfigured() || !supabase || !businessId || INVALID_BUSINESS_ID.includes(String(businessId))) {
@@ -6309,27 +6353,14 @@ export const db = {
 
       for (let i = 0; i < DEFAULT_PERIODIC_CONCEPTS.length; i++) {
         const concept = DEFAULT_PERIODIC_CONCEPTS[i];
-        const fullSubgroup = buildFullSubgroup(concept.sg);
         const payload = buildPeriodicPaymentFromConcept(concept, isMonotributo, i);
         const found = findExistingPeriodicItem(existing, concept.sg, concept.nombre);
 
         if (found) {
-          const needsRepair =
-            found.subgrupo !== fullSubgroup ||
-            found.activo === false ||
-            found.nombre !== concept.nombre ||
-            found.periodicidad !== payload.periodicidad ||
-            found.tipo_factura !== payload.tipo_factura;
-
-          if (needsRepair) {
-            const res = await db.savePagoPeriodico({
-              ...found,
-              ...payload,
-              id: found.id,
-              activo: true,
-            });
+          if (found.activo === false) {
+            const res = await db.savePagoPeriodico({ ...found, activo: true });
             if (!res.success) {
-              console.error(`No se pudo reparar ${concept.nombre}:`, res.error);
+              console.error(`No se pudo reactivar ${concept.nombre}:`, res.error);
             }
           }
           continue;

@@ -1,6 +1,10 @@
 /** Taxonomía de gastos — irregular vs regular y dónde se registran. */
 
 import { resolvePaymentSubgroupId } from './periodicPaymentsDefaults';
+import {
+  buildPredefinedComprasCategories,
+  getPredefinedComprasConceptos,
+} from './comprasConceptosDefaults';
 
 export const EXPENSE_IRREGULAR_TYPES = [
   {
@@ -13,9 +17,9 @@ export const EXPENSE_IRREGULAR_TYPES = [
     requiresProveedorFactura: true,
   },
   {
-    name: 'Mantenimiento',
-    description: 'Gasto para conservar o mejorar activos.',
-    examples: 'Repuestos, reparaciones, service de equipos.',
+    name: 'Mantenimiento y limpieza',
+    description: 'Gasto para conservar, reparar o higienizar activos e instalaciones.',
+    examples: 'Repuestos, reparaciones, service de equipos, insumos de limpieza.',
     viaCompras: true,
     viaPagos: false,
     viaCalendario: false,
@@ -124,11 +128,44 @@ export const REMOVED_PROVIDER_CATEGORIES = ['Gasto', 'Impuesto', 'Impuestos'];
 const LEGACY_CATEGORY_ALIASES = {
   Servicio: 'Servicios',
   'Personal y Cargas Sociales': 'Personal y Cargas',
+  Mantenimiento: 'Mantenimiento y limpieza',
+};
+
+const EXCLUDED_COMPRAS_CONCEPT_PATTERN = /^no considerar/i;
+
+export const isExcludedComprasConceptLabel = (label) =>
+  EXCLUDED_COMPRAS_CONCEPT_PATTERN.test(String(label || '').trim());
+
+const filterComprasDetails = (details = []) =>
+  (details || []).filter((detail) => {
+    const label = typeof detail === 'string' ? detail : detail?.label;
+    return label && !isExcludedComprasConceptLabel(label);
+  });
+
+const normalizeConceptDetail = (detail) => {
+  if (typeof detail === 'string') return { label: detail, iva: 21 };
+  return {
+    id: detail.id,
+    label: detail.label || detail,
+    iva: detail.iva ?? 21,
+  };
+};
+
+export const mergeCategoryDetailsWithDefaults = (categoryName, storedDetails = []) => {
+  const defaults = getPredefinedComprasConceptos(categoryName);
+  if (!defaults.length) return filterComprasDetails(storedDetails).map(normalizeConceptDetail);
+
+  const defaultLabels = new Set(defaults.map((item) => item.label.toLowerCase()));
+  const custom = filterComprasDetails(storedDetails)
+    .map(normalizeConceptDetail)
+    .filter((item) => !defaultLabels.has(String(item.label).toLowerCase()));
+
+  return [...defaults, ...custom];
 };
 
 export const COMPRAS_CONFIG_CATEGORY_NAMES = [
   'Mercadería',
-  'Mantenimiento',
+  'Mantenimiento y limpieza',
   'Inversión',
 ];
 
@@ -150,51 +187,11 @@ export const isComprasConfigCategory = (name) =>
 export const isComprasCalendarCategory = (name) =>
   COMPRAS_CALENDAR_CATEGORY_NAMES.includes(name);
 
-export const DEFAULT_COMPRAS_CONCEPTO_LABELS = [
-  'Almacén',
-  'Art. Cocina',
-  'Bebidas',
-  'Carnes',
-  'Combustible',
-  'Envases',
-  'Fiambres',
-  'Flete',
-  'Fumigación',
-  'Huevos',
-  'Lacteos',
-  'Limpieza',
-  'Pan',
-  'Pastas',
-  'Pescado',
-  'Pollos',
-  'Productos',
-  'Verduras',
-  'Sin categoria',
-];
-
-export const createDefaultComprasCategories = () => {
-  const mercaderiaConcepts = DEFAULT_COMPRAS_CONCEPTO_LABELS.map((label, idx) => ({
-    id: `cc_m_${idx + 1}`,
-    label,
-    iva: 21,
+export const createDefaultComprasCategories = () =>
+  buildPredefinedComprasCategories().map((cat) => ({
+    name: cat.name,
+    details: cat.details.map((detail) => ({ ...detail })),
   }));
-
-  return [
-    {
-      name: 'Mercadería',
-      details: [
-        { id: 'cc_nc_21', label: 'NO CONSIDERAR 21%', iva: 21 },
-        { id: 'cc_nc_105', label: 'NO CONSIDERAR 10,5%', iva: 10.5 },
-        ...mercaderiaConcepts,
-      ],
-    },
-    { name: 'Mantenimiento', details: [] },
-    { name: 'Inversión', details: [] },
-    { name: 'Servicios', details: [] },
-    { name: 'Estructura y Gestión', details: [] },
-    { name: 'Seguros', details: [] },
-  ];
-};
 
 export const DEFAULT_COMPRAS_CATEGORIES = createDefaultComprasCategories();
 
@@ -206,7 +203,7 @@ export const flattenComprasConceptosFromCategories = (categories = []) => {
     if (!isComprasConfigCategory(cat.name)) return;
     (cat.details || []).forEach((detail) => {
       const label = detail?.label || detail;
-      if (!label) return;
+      if (!label || isExcludedComprasConceptLabel(label)) return;
       const key = String(label).toLowerCase();
       if (seen.has(key)) return;
       seen.add(key);
@@ -237,7 +234,7 @@ export const normalizeCategoryName = (name) => {
   return trimmed;
 };
 
-export const normalizeComprasCategories = (categories = []) => {
+export const normalizeComprasCategories = (categories = [], { mergeDefaults = false } = {}) => {
   const source = categories.length > 0 ? categories : DEFAULT_COMPRAS_CATEGORIES;
   const mapped = source
     .map((cat) => {
@@ -247,7 +244,16 @@ export const normalizeComprasCategories = (categories = []) => {
       }
       const name = normalizeCategoryName(cat?.name);
       if (!name) return null;
-      return { ...cat, name };
+      const storedDetails = filterComprasDetails(cat.details).map(normalizeConceptDetail);
+      return {
+        ...cat,
+        name,
+        details: isComprasConfigCategory(name)
+          ? (mergeDefaults
+            ? mergeCategoryDetailsWithDefaults(name, cat.details)
+            : storedDetails)
+          : filterComprasDetails(cat.details).map(normalizeConceptDetail),
+      };
     })
     .filter(Boolean);
 
@@ -258,8 +264,19 @@ export const normalizeComprasCategories = (categories = []) => {
 
   DEFAULT_COMPRAS_CATEGORIES.forEach((defaultCat) => {
     if (!byName.has(defaultCat.name)) {
-      byName.set(defaultCat.name, defaultCat);
+      byName.set(defaultCat.name, mergeDefaults ? defaultCat : { ...defaultCat, details: [] });
+      return;
     }
+    if (!mergeDefaults || !isComprasConfigCategory(defaultCat.name)) return;
+    const existing = byName.get(defaultCat.name);
+    byName.set(defaultCat.name, {
+      ...existing,
+      details: mergeCategoryDetailsWithDefaults(defaultCat.name, existing.details),
+    });
+  });
+
+  COMPRAS_PROVIDER_CATEGORY_NAMES.forEach((name) => {
+    if (!byName.has(name)) byName.set(name, { name, details: [] });
   });
 
   return COMPRAS_PROVIDER_CATEGORY_NAMES.map((name) => byName.get(name)).filter(Boolean);
@@ -269,15 +286,6 @@ export const getProviderCategories = (categories = []) =>
   normalizeComprasCategories(categories).filter((cat) =>
     COMPRAS_PROVIDER_CATEGORY_NAMES.includes(cat.name)
   );
-
-const normalizeConceptDetail = (detail) => {
-  if (typeof detail === 'string') return { label: detail, iva: 21 };
-  return {
-    id: detail.id,
-    label: detail.label || detail,
-    iva: detail.iva ?? 21,
-  };
-};
 
 export const conceptosFromPeriodicPayments = (categoryName, periodicPayments = []) => {
   const subgroupId = COMPRAS_CATEGORY_PERIODIC_SUBGROUP[categoryName];
@@ -306,7 +314,9 @@ export const getComprasConceptosForCategory = (
 
   const cat = normalizeComprasCategories(categories).find((c) => c.name === categoryName);
   if (cat?.details?.length > 0) {
-    return cat.details.map(normalizeConceptDetail);
+    return cat.details
+      .map(normalizeConceptDetail)
+      .filter((detail) => !isExcludedComprasConceptLabel(detail.label));
   }
 
   if (isComprasConfigCategory(categoryName)) return [];
@@ -314,7 +324,7 @@ export const getComprasConceptosForCategory = (
 };
 
 export const prepareComprasCategoriasForSave = (categories = []) =>
-  normalizeComprasCategories(categories).map((cat) =>
+  normalizeComprasCategories(categories, { mergeDefaults: false }).map((cat) =>
     isComprasCalendarCategory(cat.name) ? { ...cat, details: [] } : cat
   );
 
