@@ -21,11 +21,13 @@ En este archivo iremos registrando las mejoras, cambios y pendientes de cada mó
 - [ ] 
 
 ## 🔒 Cierre de Caja
-- [ ] No permitir cerrar cajas posteriores al dia de la fecha
+- [x] No permitir cerrar cajas posteriores al dia de la fecha
 - [x] En ULTIMOS CIERRES REGISTRADOS, los valores de Turno ponerlos en burbujas de colores segun el turno/Caja. También cambia el titulo de la columna por Turno/Caja
 - [x] No funcionan los botones para dar adelantos, tanto de dinero como de mercaderia
-- [ ] Formatear los montos ingresados para que sea mas fácil su visualización
-- [ ] Darle distintos colores a las burbujas en ultimas cajas cerradas
+- [x] Formatear los montos ingresados para que sea mas fácil su visualización
+- [x] Darle distintos colores a las burbujas en ultimas cajas cerradas
+- [ ] sacar texto "No se permiten fechas futuras"
+
 ## 💰 Fondos
 
 ## 👥 Empleados
@@ -59,8 +61,9 @@ En este archivo iremos registrando las mejoras, cambios y pendientes de cada mó
 - [ ] 
 
 ## 📈 Resultados
-- [ ] 
-- [ ] 
+- [x] Fase 1 MVP implementada — ver [`PLAN_RESULTADOS.md`](PLAN_RESULTADOS.md)
+- [ ] Fase 1.5: egresos completos (proveedores, adelantos, impuestos, periódicos)
+- [ ] Fase 2: series mensuales, evolución por caja
 
 ## 📋 Tareas (Checklist)
 - [ ] 
@@ -72,3 +75,7 @@ En este archivo iremos registrando las mejoras, cambios y pendientes de cada mó
 - [x] Refactorizar estructura de renderizado para mayor escalabilidad (renderModuleHeader).
 - [x] Consolidar la selección de colores de todos los módulos en una sección unificada e independiente.
 - [x] Implementar sistema interactivo Drag & Drop (arrastrar y soltar) con intercambio inteligente y compatibilidad táctil (clic para seleccionar).
+
+
+## 📋 Boton volver
+- [ ] si estoy en config e hice cambios y presiono volver, que me muestre un modal con Desea guardar los cambios?

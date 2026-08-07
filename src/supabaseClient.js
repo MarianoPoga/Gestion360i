@@ -4954,6 +4954,71 @@ export const db = {
     return JSON.parse(stored).sort((a,b) => new Date(b.fecha) - new Date(a.fecha));
   },
 
+  getCierresCajaByRange: async (desdeIso, hastaIso) => {
+    const businessId = await ensureBusinessContext();
+    if (isSupabaseConfigured() && supabase && businessId) {
+      try {
+        const { data, error } = await supabase
+          .from('gst_cierres_caja')
+          .select('*')
+          .eq('business_id', businessId)
+          .gte('fecha', desdeIso)
+          .lte('fecha', hastaIso)
+          .order('fecha', { ascending: false });
+        if (!error) return data || [];
+      } catch (err) {
+        console.warn('Supabase getCierresCajaByRange failed:', err);
+      }
+    }
+    const stored = localStorage.getItem('mock_cierres') || '[]';
+    return JSON.parse(stored).filter((c) => {
+      const t = new Date(c.fecha).getTime();
+      return t >= new Date(desdeIso).getTime() && t <= new Date(hastaIso).getTime();
+    });
+  },
+
+  getComprasByRange: async (desdeIso, hastaIso) => {
+    const businessId = await ensureBusinessContext();
+    if (isSupabaseConfigured() && supabase && businessId) {
+      try {
+        const { data, error } = await supabase
+          .from('gst_compras')
+          .select('*')
+          .eq('business_id', businessId)
+          .gte('fecha', desdeIso)
+          .lte('fecha', hastaIso)
+          .order('fecha', { ascending: false });
+        if (!error) return data || [];
+      } catch (err) {
+        console.warn('Supabase getComprasByRange failed:', err);
+      }
+    }
+    const stored = localStorage.getItem('mock_compras') || '[]';
+    return JSON.parse(stored).filter((c) => {
+      const t = new Date(c.fecha).getTime();
+      return t >= new Date(desdeIso).getTime() && t <= new Date(hastaIso).getTime();
+    });
+  },
+
+  getClienteMovimientosByRange: async (desdeIso, hastaIso) => {
+    const businessId = await ensureBusinessContext();
+    if (isSupabaseConfigured() && supabase && businessId) {
+      try {
+        const { data, error } = await supabase
+          .from('gst_cliente_movimientos')
+          .select('id, cliente_id, concepto, debe, haber, fecha, created_at')
+          .eq('business_id', businessId)
+          .gte('created_at', desdeIso)
+          .lte('created_at', hastaIso)
+          .order('created_at', { ascending: false });
+        if (!error) return data || [];
+      } catch (err) {
+        console.warn('Supabase getClienteMovimientosByRange failed:', err);
+      }
+    }
+    return [];
+  },
+
   /** Turnos habilitados que aún no tienen cierre registrado hoy. */
   getCajasAbiertasDelDia: async (eligibleTurnos = null, referenceDate = new Date()) => {
     const allTurnos = await db.getCierreTurnoNames();
