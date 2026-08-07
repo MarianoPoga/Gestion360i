@@ -6,10 +6,120 @@ export const OPEN_CAJA_SESSION_KEYS = {
   [PEDIDOS_CAJA_TIPOS.LOCAL]: 'gst_open_local_caja',
 };
 
+export const PEDIDOS_CAJA_SESSIONS_STORAGE_KEY = 'pedidos_caja_sessions';
+
 /** @deprecated use OPEN_CAJA_SESSION_KEYS.delivery */
 export const OPEN_DELIVERY_CAJA_KEY = OPEN_CAJA_SESSION_KEYS[PEDIDOS_CAJA_TIPOS.DELIVERY];
 /** @deprecated use OPEN_CAJA_SESSION_KEYS.local */
 export const OPEN_LOCAL_CAJA_KEY = OPEN_CAJA_SESSION_KEYS[PEDIDOS_CAJA_TIPOS.LOCAL];
+
+const SESSION_TIPOS = [PEDIDOS_CAJA_TIPOS.LOCAL, PEDIDOS_CAJA_TIPOS.DELIVERY];
+
+let sharedSessions = null;
+let persistHandler = null;
+let persistTimer = null;
+
+const normalizeSessionEntry = (entry) => {
+  if (!entry || typeof entry !== 'object') return null;
+  const turnoName = String(entry.turnoName || '').trim();
+  if (!turnoName) return null;
+  return {
+    turnoName,
+    openedAt: entry.openedAt || null,
+  };
+};
+
+export const emptyPedidosCajaSessions = () => ({
+  [PEDIDOS_CAJA_TIPOS.LOCAL]: null,
+  [PEDIDOS_CAJA_TIPOS.DELIVERY]: null,
+});
+
+export const normalizePedidosCajaSessions = (stored) => {
+  const base = emptyPedidosCajaSessions();
+  if (!stored || typeof stored !== 'object') return base;
+
+  SESSION_TIPOS.forEach((tipo) => {
+    base[tipo] = normalizeSessionEntry(stored[tipo]);
+  });
+
+  return base;
+};
+
+export const sessionsHaveOpenCaja = (sessions) =>
+  SESSION_TIPOS.some((tipo) => !!normalizeSessionEntry(sessions?.[tipo]));
+
+const mirrorSessionsToLegacyLocalStorage = (sessions) => {
+  SESSION_TIPOS.forEach((tipo) => {
+    const key = OPEN_CAJA_SESSION_KEYS[tipo];
+    const session = normalizeSessionEntry(sessions?.[tipo]);
+    if (!key) return;
+    if (session) {
+      localStorage.setItem(key, JSON.stringify(session));
+      setActiveCaja(tipo, session.turnoName);
+    } else {
+      localStorage.removeItem(key);
+      setActiveCaja(tipo, null);
+    }
+  });
+  localStorage.setItem(PEDIDOS_CAJA_SESSIONS_STORAGE_KEY, JSON.stringify(sessions));
+};
+
+export const readLegacyPedidosCajaSessionsFromLocalStorage = () => {
+  try {
+    const cached = localStorage.getItem(PEDIDOS_CAJA_SESSIONS_STORAGE_KEY);
+    if (cached) {
+      const parsed = normalizePedidosCajaSessions(JSON.parse(cached));
+      if (sessionsHaveOpenCaja(parsed)) return parsed;
+    }
+  } catch {
+    // ignore invalid cache
+  }
+
+  const legacy = emptyPedidosCajaSessions();
+  SESSION_TIPOS.forEach((tipo) => {
+    const key = OPEN_CAJA_SESSION_KEYS[tipo];
+    if (!key) return;
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return;
+      legacy[tipo] = normalizeSessionEntry(JSON.parse(raw));
+    } catch {
+      // ignore invalid legacy entry
+    }
+  });
+  return legacy;
+};
+
+export const getPedidosCajaSessionsSnapshot = () =>
+  normalizePedidosCajaSessions(sharedSessions || readLegacyPedidosCajaSessionsFromLocalStorage());
+
+export const hydratePedidosCajaSessions = (sessions) => {
+  sharedSessions = normalizePedidosCajaSessions(sessions);
+  mirrorSessionsToLegacyLocalStorage(sharedSessions);
+  return sharedSessions;
+};
+
+export const setPedidosCajaSessionsPersistHandler = (handler) => {
+  persistHandler = typeof handler === 'function' ? handler : null;
+};
+
+const schedulePersist = (sessions) => {
+  if (!persistHandler) return;
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    Promise.resolve(persistHandler(normalizePedidosCajaSessions(sessions))).catch((err) => {
+      console.error('[Gestion360i] persistPedidosCajaSessions:', err);
+    });
+  }, 120);
+};
+
+const applySessions = (sessions, { persist = true } = {}) => {
+  sharedSessions = normalizePedidosCajaSessions(sessions);
+  mirrorSessionsToLegacyLocalStorage(sharedSessions);
+  if (persist) schedulePersist(sharedSessions);
+  return sharedSessions;
+};
 
 const isOrderCancelled = (order) => {
   const est = String(order?.estado || '').toLowerCase().trim();
@@ -53,43 +163,34 @@ const orderMatchesTipo = (order, tipo) => (
   tipo === PEDIDOS_CAJA_TIPOS.DELIVERY ? order?.con_envio === true : !order?.con_envio
 );
 
-export const getOpenCajaSession = (tipo) => {
-  const key = OPEN_CAJA_SESSION_KEYS[tipo];
-  if (!key) return null;
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    const turnoName = String(parsed?.turnoName || '').trim();
-    if (!turnoName) return null;
-    return {
-      turnoName,
-      openedAt: parsed.openedAt || null,
-    };
-  } catch {
-    return null;
-  }
-};
+export const getOpenCajaSession = (tipo) =>
+  normalizeSessionEntry(getPedidosCajaSessionsSnapshot()[tipo]);
 
 export const getOpenCajaName = (tipo) => getOpenCajaSession(tipo)?.turnoName || '';
 
 export const isCajaOpen = (tipo) => !!getOpenCajaName(tipo);
 
-export const openCaja = (tipo, turnoName) => {
-  const key = OPEN_CAJA_SESSION_KEYS[tipo];
+export const openCaja = (tipo, turnoName, options = {}) => {
   const name = String(turnoName || '').trim();
-  if (!key || !name) return null;
+  if (!SESSION_TIPOS.includes(tipo) || !name) return null;
+
   const session = { turnoName: name, openedAt: new Date().toISOString() };
-  localStorage.setItem(key, JSON.stringify(session));
-  setActiveCaja(tipo, name);
+  const next = {
+    ...getPedidosCajaSessionsSnapshot(),
+    [tipo]: session,
+  };
+  applySessions(next, options);
   return session;
 };
 
-export const closeCaja = (tipo) => {
-  const key = OPEN_CAJA_SESSION_KEYS[tipo];
-  if (!key) return;
-  localStorage.removeItem(key);
-  setActiveCaja(tipo, null);
+export const closeCaja = (tipo, options = {}) => {
+  if (!SESSION_TIPOS.includes(tipo)) return;
+
+  const next = {
+    ...getPedidosCajaSessionsSnapshot(),
+    [tipo]: null,
+  };
+  applySessions(next, options);
 };
 
 export const syncOpenCajaWithConfig = (tipo, cajas) => {
@@ -207,6 +308,14 @@ export const resolveCajaForNewPedido = ({
 
   openCaja(tipo, toOpen);
   return { turnoName: toOpen, error: '' };
+};
+
+export const syncOpenCajasFromRemote = (sessions) => {
+  const normalized = hydratePedidosCajaSessions(sessions);
+  return {
+    [PEDIDOS_CAJA_TIPOS.DELIVERY]: normalized[PEDIDOS_CAJA_TIPOS.DELIVERY]?.turnoName || '',
+    [PEDIDOS_CAJA_TIPOS.LOCAL]: normalized[PEDIDOS_CAJA_TIPOS.LOCAL]?.turnoName || '',
+  };
 };
 
 // --- Backward-compatible delivery aliases ---

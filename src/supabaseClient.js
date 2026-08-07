@@ -42,6 +42,13 @@ import {
   normalizePedidosCajasConfig,
 } from './pedidosCajas'
 import {
+  emptyPedidosCajaSessions,
+  hydratePedidosCajaSessions,
+  normalizePedidosCajaSessions,
+  readLegacyPedidosCajaSessionsFromLocalStorage,
+  sessionsHaveOpenCaja,
+} from './pedidosCajaSession'
+import {
   NOTIFICATION_EVENTS,
   normalizeNotificationsConfig,
   buildCierreCajaNotification,
@@ -756,6 +763,7 @@ const BUSINESS_CONFIG = {
   CIERRE_MEDIOS_USED: 'cierre_medios_used',
   REPARTIDORES: 'repartidores',
   PEDIDOS_CAJAS: 'pedidos_cajas',
+  PEDIDOS_CAJA_SESSIONS: 'pedidos_caja_sessions',
 };
 
 const NOTIFICATIONS_CONFIG_KEY = 'notifications';
@@ -817,6 +825,7 @@ const notifyCierreCajaSaved = async (cierre, medioValues, medios) => {
 
 const OPERATIONAL_CONFIG_KEYS = new Set([
   BUSINESS_CONFIG.CIERRE_MEDIOS_USED,
+  BUSINESS_CONFIG.PEDIDOS_CAJA_SESSIONS,
 ]);
 
 const readConfigRow = (row) => row?.value ?? row?.config_value ?? null;
@@ -1545,6 +1554,48 @@ export const db = {
     if (!result.ok) return { success: false, error: result.error };
     localStorage.setItem('pedidos_cajas', JSON.stringify(normalized));
     return { success: true };
+  },
+
+  getPedidosCajaSessions: async () => {
+    let stored = null;
+
+    if (isSupabaseConfigured() && supabase) {
+      try {
+        stored = await getBusinessConfig(BUSINESS_CONFIG.PEDIDOS_CAJA_SESSIONS);
+      } catch (err) {
+        console.warn('Supabase getPedidosCajaSessions failed:', err);
+      }
+    }
+
+    let normalized = normalizePedidosCajaSessions(stored);
+
+    if (!sessionsHaveOpenCaja(normalized)) {
+      const legacy = readLegacyPedidosCajaSessionsFromLocalStorage();
+      if (sessionsHaveOpenCaja(legacy)) {
+        normalized = legacy;
+        if (isSupabaseConfigured() && supabase) {
+          await saveOperationalConfig(BUSINESS_CONFIG.PEDIDOS_CAJA_SESSIONS, normalized);
+        }
+      }
+    }
+
+    hydratePedidosCajaSessions(normalized);
+    localStorage.setItem('pedidos_caja_sessions', JSON.stringify(normalized));
+    return normalized;
+  },
+
+  savePedidosCajaSessions: async (sessions) => {
+    const normalized = normalizePedidosCajaSessions(sessions);
+    hydratePedidosCajaSessions(normalized);
+
+    const result = isSupabaseConfigured() && supabase
+      ? await saveOperationalConfig(BUSINESS_CONFIG.PEDIDOS_CAJA_SESSIONS, normalized)
+      : { ok: true };
+
+    if (!result.ok) return { success: false, error: result.error };
+
+    localStorage.setItem('pedidos_caja_sessions', JSON.stringify(normalized));
+    return { success: true, data: normalized };
   },
 
   getNotificationsConfig: async () => {

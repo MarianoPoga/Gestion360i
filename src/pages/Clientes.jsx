@@ -22,7 +22,6 @@ import {
   resolvePedidoTurnoCaja,
 } from '../pedidosCajas'
 import {
-  autoOpenCajaFromOrders,
   canCloseCaja,
   closeCaja,
   countNonFinalizedOrdersForCaja,
@@ -33,7 +32,9 @@ import {
   openCaja,
   resolveCajaForNewPedido,
   resolveDeliveryCajaForNewPedido,
+  setPedidosCajaSessionsPersistHandler,
   syncOpenCajaWithConfig,
+  syncOpenCajasFromRemote,
 } from '../pedidosCajaSession'
 import { getTodayLocalDateString } from '../dateUtils'
 import {
@@ -951,8 +952,8 @@ function Clientes({ navigate, profile, accentColor }) {
   const [pedidosCajasConfig, setPedidosCajasConfig] = useState({ assignments: {} });
   const [turnoNames, setTurnoNames] = useState([]);
   const [openCajas, setOpenCajas] = useState({
-    [PEDIDOS_CAJA_TIPOS.DELIVERY]: getOpenCajaName(PEDIDOS_CAJA_TIPOS.DELIVERY),
-    [PEDIDOS_CAJA_TIPOS.LOCAL]: getOpenCajaName(PEDIDOS_CAJA_TIPOS.LOCAL),
+    [PEDIDOS_CAJA_TIPOS.DELIVERY]: '',
+    [PEDIDOS_CAJA_TIPOS.LOCAL]: '',
   });
   const [selectedCajaToOpen, setSelectedCajaToOpen] = useState({
     [PEDIDOS_CAJA_TIPOS.DELIVERY]: '',
@@ -1073,24 +1074,48 @@ function Clientes({ navigate, profile, accentColor }) {
   }, [viewMode, products]);
 
   useEffect(() => {
-    const syncTipoCaja = (tipo) => {
-      const cajas = getCajasForPedidosTipo(pedidosCajasConfig, turnoNames, tipo);
-      if (!cajas.length) return '';
-      const synced = syncOpenCajaWithConfig(tipo, cajas);
-      if (synced) return synced;
-      if (tipo === PEDIDOS_CAJA_TIPOS.DELIVERY) {
-        const localCajasList = getCajasForPedidosTipo(
-          pedidosCajasConfig,
-          turnoNames,
-          PEDIDOS_CAJA_TIPOS.LOCAL
-        );
-        if (getDeliveryOpenBlockReason(orders, localCajasList)) return '';
+    setPedidosCajaSessionsPersistHandler((sessions) => db.savePedidosCajaSessions(sessions));
+    return () => setPedidosCajaSessionsPersistHandler(null);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const pullRemoteCajaSessions = async () => {
+      try {
+        const sessions = await db.getPedidosCajaSessions();
+        if (cancelled) return;
+        setOpenCajas(syncOpenCajasFromRemote(sessions));
+      } catch (err) {
+        console.error('Error syncing caja sessions:', err);
       }
-      return autoOpenCajaFromOrders(orders, tipo, cajas) || '';
     };
 
-    const deliveryOpen = syncTipoCaja(PEDIDOS_CAJA_TIPOS.DELIVERY);
-    const localOpen = syncTipoCaja(PEDIDOS_CAJA_TIPOS.LOCAL);
+    pullRemoteCajaSessions();
+    const intervalId = setInterval(pullRemoteCajaSessions, 12000);
+    const onFocus = () => pullRemoteCajaSessions();
+    const onVisibility = () => {
+      if (!document.hidden) pullRemoteCajaSessions();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
+
+  useEffect(() => {
+    [PEDIDOS_CAJA_TIPOS.DELIVERY, PEDIDOS_CAJA_TIPOS.LOCAL].forEach((tipo) => {
+      const cajas = getCajasForPedidosTipo(pedidosCajasConfig, turnoNames, tipo);
+      if (cajas.length) syncOpenCajaWithConfig(tipo, cajas);
+    });
+
+    const deliveryOpen = getOpenCajaName(PEDIDOS_CAJA_TIPOS.DELIVERY);
+    const localOpen = getOpenCajaName(PEDIDOS_CAJA_TIPOS.LOCAL);
 
     setOpenCajas({
       [PEDIDOS_CAJA_TIPOS.DELIVERY]: deliveryOpen,
@@ -1107,7 +1132,7 @@ function Clientes({ navigate, profile, accentColor }) {
           ? prev[PEDIDOS_CAJA_TIPOS.LOCAL]
           : getCajasForPedidosTipo(pedidosCajasConfig, turnoNames, PEDIDOS_CAJA_TIPOS.LOCAL)[0] || ''),
     }));
-  }, [orders, pedidosCajasConfig, turnoNames]);
+  }, [pedidosCajasConfig, turnoNames]);
 
   // Clear selections when changing active order filters
   useEffect(() => {
@@ -1274,12 +1299,14 @@ function Clientes({ navigate, profile, accentColor }) {
       setPriceListItems(itemsMap || {});
       const reps = await db.getRepartidores();
       setRepartidores(reps || []);
-      const [turnos, pedidosCajas] = await Promise.all([
+      const [turnos, pedidosCajas, cajaSessions] = await Promise.all([
         db.getCierreTurnos(),
         db.getPedidosCajasConfig(),
+        db.getPedidosCajaSessions(),
       ]);
       setTurnoNames(turnos || []);
       setPedidosCajasConfig(pedidosCajas || { assignments: {} });
+      setOpenCajas(syncOpenCajasFromRemote(cajaSessions));
       loadOrders();
       const concepts = await db.getCierreConceptos() || [];
       setActivePaymentMethods(concepts);
