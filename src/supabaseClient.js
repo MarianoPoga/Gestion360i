@@ -45,9 +45,6 @@ import {
   emptyPedidosCajaSessions,
   hydratePedidosCajaSessions,
   normalizePedidosCajaSessions,
-  readLegacyPedidosCajaSessionsFromLocalStorage,
-  sessionsHaveOpenCaja,
-  hasStoredPedidosCajaSessions,
 } from './pedidosCajaSession'
 import {
   NOTIFICATION_EVENTS,
@@ -585,28 +582,29 @@ export const supabase = new Proxy({}, {
 const INVALID_BUSINESS_ID = ['', 'null', 'undefined', '00000000-0000-0000-0000-000000000000'];
 
 const ensureBusinessContext = async () => {
-  const current = getBusinessId();
-  if (current && !INVALID_BUSINESS_ID.includes(String(current))) return current;
-  if (!isSupabaseConfigured()) return current;
+  if (!isSupabaseConfigured()) return getBusinessId();
 
   const instance = getSupabaseInstance();
-  if (!instance) return current;
+  if (!instance) return getBusinessId();
 
   const { data: { session } } = await instance.auth.getSession();
-  if (!session?.user) return current;
+  if (session?.user) {
+    const { data: profile } = await instance
+      .from('gst_profiles')
+      .select('business_id')
+      .eq('id', session.user.id)
+      .single();
 
-  const { data: profile } = await instance
-    .from('gst_profiles')
-    .select('business_id')
-    .eq('id', session.user.id)
-    .single();
+    if (profile?.business_id) {
+      setBusinessId(profile.business_id);
+      return profile.business_id;
+    }
 
-  if (profile?.business_id) {
-    setBusinessId(profile.business_id);
-    return profile.business_id;
+    console.warn('[Gestion360i] Usuario sin business_id en gst_profiles:', session.user.id);
   }
 
-  console.warn('[Gestion360i] Usuario sin business_id en gst_profiles:', session.user.id);
+  const current = getBusinessId();
+  if (current && !INVALID_BUSINESS_ID.includes(String(current))) return current;
   return current;
 };
 
@@ -830,6 +828,18 @@ const OPERATIONAL_CONFIG_KEYS = new Set([
 ]);
 
 const readConfigRow = (row) => row?.value ?? row?.config_value ?? null;
+
+const parseConfigValue = (value) => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
+  return value;
+};
 
 const getBusinessConfig = async (key) => {
   const businessId = await ensureBusinessContext();
@@ -1558,30 +1568,41 @@ export const db = {
   },
 
   getPedidosCajaSessions: async () => {
-    let stored = null;
+    let normalized = emptyPedidosCajaSessions();
     let hasRemoteConfig = false;
 
     if (isSupabaseConfigured() && supabase) {
       try {
-        stored = await getBusinessConfig(BUSINESS_CONFIG.PEDIDOS_CAJA_SESSIONS);
-        hasRemoteConfig = hasStoredPedidosCajaSessions(stored);
+        const businessId = await ensureBusinessContext();
+        if (businessId && !INVALID_BUSINESS_ID.includes(String(businessId))) {
+          const sessionsKey = BUSINESS_CONFIG.PEDIDOS_CAJA_SESSIONS;
+
+          const { data: rows, error } = await supabase
+            .from('gst_configs')
+            .select('value, config_value, key, config_key, updated_at')
+            .eq('business_id', businessId)
+            .or(`key.eq.${sessionsKey},config_key.eq.${sessionsKey}`);
+
+          if (!error && Array.isArray(rows) && rows.length > 0) {
+            hasRemoteConfig = true;
+            const [bestRow] = [...rows].sort((a, b) => {
+              const timeA = new Date(a.updated_at || 0).getTime();
+              const timeB = new Date(b.updated_at || 0).getTime();
+              if (timeB !== timeA) return timeB - timeA;
+              const rankA = a.key === sessionsKey ? 1 : 0;
+              const rankB = b.key === sessionsKey ? 1 : 0;
+              return rankB - rankA;
+            });
+            normalized = normalizePedidosCajaSessions(parseConfigValue(readConfigRow(bestRow)));
+          }
+        }
       } catch (err) {
         console.warn('Supabase getPedidosCajaSessions failed:', err);
       }
     }
 
-    let normalized;
-    if (hasRemoteConfig) {
-      // Fuente de verdad: remoto (incluso si todas las cajas están cerradas).
-      normalized = normalizePedidosCajaSessions(stored);
-    } else {
-      const legacy = readLegacyPedidosCajaSessionsFromLocalStorage();
-      normalized = sessionsHaveOpenCaja(legacy)
-        ? legacy
-        : emptyPedidosCajaSessions();
-      if (isSupabaseConfigured() && supabase) {
-        await saveOperationalConfig(BUSINESS_CONFIG.PEDIDOS_CAJA_SESSIONS, normalized);
-      }
+    if (!hasRemoteConfig) {
+      normalized = emptyPedidosCajaSessions();
     }
 
     hydratePedidosCajaSessions(normalized);

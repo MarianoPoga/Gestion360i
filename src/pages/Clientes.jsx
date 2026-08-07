@@ -27,6 +27,7 @@ import {
   countNonFinalizedOrdersForCaja,
   getDeliveryOpenBlockReason,
   getOpenCajaName,
+  getPedidosCajaSessionsSnapshot,
   getPedidosForCierre,
   getTodayOrdersForCaja,
   openCaja,
@@ -1000,6 +1001,7 @@ function Clientes({ navigate, profile, accentColor }) {
   const clientInputRef = useRef(null);
   const productInputRef = useRef(null);
   const qtyInputRef = useRef(null);
+  const remoteCajaSyncedRef = useRef(false);
 
   // Load clients, products on mount
   useEffect(() => {
@@ -1074,7 +1076,12 @@ function Clientes({ navigate, profile, accentColor }) {
   }, [viewMode, products]);
 
   useEffect(() => {
-    setPedidosCajaSessionsPersistHandler((sessions) => db.savePedidosCajaSessions(sessions));
+    setPedidosCajaSessionsPersistHandler((sessions) => {
+      if (!remoteCajaSyncedRef.current) {
+        return Promise.resolve({ success: true, skipped: true });
+      }
+      return db.savePedidosCajaSessions(sessions);
+    });
     return () => setPedidosCajaSessionsPersistHandler(null);
   }, []);
 
@@ -1085,6 +1092,7 @@ function Clientes({ navigate, profile, accentColor }) {
       try {
         const sessions = await db.getPedidosCajaSessions();
         if (cancelled) return;
+        remoteCajaSyncedRef.current = true;
         setOpenCajas(syncOpenCajasFromRemote(sessions));
       } catch (err) {
         console.error('Error syncing caja sessions:', err);
@@ -1109,18 +1117,22 @@ function Clientes({ navigate, profile, accentColor }) {
   }, []);
 
   useEffect(() => {
+    let sessionChanged = false;
+
     [PEDIDOS_CAJA_TIPOS.DELIVERY, PEDIDOS_CAJA_TIPOS.LOCAL].forEach((tipo) => {
       const cajas = getCajasForPedidosTipo(pedidosCajasConfig, turnoNames, tipo);
-      if (cajas.length) syncOpenCajaWithConfig(tipo, cajas);
+      if (!cajas.length) return;
+      const before = getOpenCajaName(tipo);
+      syncOpenCajaWithConfig(tipo, cajas);
+      if (before !== getOpenCajaName(tipo)) sessionChanged = true;
     });
+
+    if (sessionChanged) {
+      setOpenCajas(syncOpenCajasFromRemote(getPedidosCajaSessionsSnapshot()));
+    }
 
     const deliveryOpen = getOpenCajaName(PEDIDOS_CAJA_TIPOS.DELIVERY);
     const localOpen = getOpenCajaName(PEDIDOS_CAJA_TIPOS.LOCAL);
-
-    setOpenCajas({
-      [PEDIDOS_CAJA_TIPOS.DELIVERY]: deliveryOpen,
-      [PEDIDOS_CAJA_TIPOS.LOCAL]: localOpen,
-    });
 
     setSelectedCajaToOpen((prev) => ({
       [PEDIDOS_CAJA_TIPOS.DELIVERY]: deliveryOpen
@@ -1306,6 +1318,7 @@ function Clientes({ navigate, profile, accentColor }) {
       ]);
       setTurnoNames(turnos || []);
       setPedidosCajasConfig(pedidosCajas || { assignments: {} });
+      remoteCajaSyncedRef.current = true;
       setOpenCajas(syncOpenCajasFromRemote(cajaSessions));
       loadOrders();
       const concepts = await db.getCierreConceptos() || [];
@@ -3311,7 +3324,7 @@ function Clientes({ navigate, profile, accentColor }) {
     }, 6000);
   };
 
-  const handleOpenCaja = (tipo, cajasList) => {
+  const handleOpenCaja = async (tipo, cajasList) => {
     setCajaNotices((prev) => ({ ...prev, [tipo]: null }));
     const name = cajasList.length === 1
       ? cajasList[0]
@@ -3331,8 +3344,19 @@ function Clientes({ navigate, profile, accentColor }) {
         return;
       }
     }
-    openCaja(tipo, name);
+    openCaja(tipo, name, { persist: false });
     setOpenCajas((prev) => ({ ...prev, [tipo]: name }));
+    const saveResult = await db.savePedidosCajaSessions(getPedidosCajaSessionsSnapshot());
+    if (!saveResult.success) {
+      closeCaja(tipo, { persist: false });
+      setOpenCajas((prev) => ({ ...prev, [tipo]: '' }));
+      showCajaNotice(
+        tipo,
+        saveResult.error || 'No se pudo sincronizar la apertura de caja entre terminales.',
+        'error'
+      );
+      return;
+    }
     showCajaNotice(tipo, `Caja "${name}" abierta.`, 'success');
   };
 
@@ -3369,9 +3393,21 @@ function Clientes({ navigate, profile, accentColor }) {
       return;
     }
 
-    closeCaja(tipo);
+    closeCaja(tipo, { persist: false });
     setOpenCajas((prev) => ({ ...prev, [tipo]: '' }));
     setCloseCajaModal(null);
+
+    const saveResult = await db.savePedidosCajaSessions(getPedidosCajaSessionsSnapshot());
+    if (!saveResult.success) {
+      openCaja(tipo, turnoName, { persist: false });
+      setOpenCajas((prev) => ({ ...prev, [tipo]: turnoName }));
+      showCajaNotice(
+        tipo,
+        saveResult.error || 'No se pudo sincronizar el cierre de caja entre terminales.',
+        'error'
+      );
+      return;
+    }
 
     const fecha = getTodayLocalDateString();
     let pedidosForCierre = getPedidosForCierre(orders, tipo, turnoName);
