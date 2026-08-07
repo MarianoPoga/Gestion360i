@@ -48,7 +48,6 @@ import {
   readLegacyPedidosCajaSessionsFromLocalStorage,
   sessionsHaveOpenCaja,
   hasStoredPedidosCajaSessions,
-  emptyPedidosCajaSessions,
 } from './pedidosCajaSession'
 import {
   NOTIFICATION_EVENTS,
