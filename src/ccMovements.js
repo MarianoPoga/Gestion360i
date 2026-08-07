@@ -212,6 +212,55 @@ export const findOrderPaymentMovement = (movements, orderRef) =>
     (m) => isCreditoPedidoConcept(m.concepto, orderRef) || isCobroPedidoConcept(m.concepto, orderRef)
   );
 
+/**
+ * Ajusta Crédito/Cobro cuando cambia el total de un pedido Pendiente ya cobrado.
+ * - Total menor a lo cobrado: reduce el haber y devuelve excedente como saldo a favor.
+ * - Total mayor a lo cobrado: mantiene lo pagado; la diferencia queda pendiente al finalizar.
+ */
+export const syncOrderPaymentOnTotalChange = async ({
+  orderRef,
+  oldTotal,
+  newTotal,
+  relatedMovements,
+  updateMovementAmount,
+  adjustClientSaldo,
+}) => {
+  const oldT = roundCcMoney(oldTotal);
+  const newT = roundCcMoney(newTotal);
+  if (oldT === newT) {
+    return { changed: false, pendingAmount: 0, excessCredit: 0 };
+  }
+
+  const paymentMov = findOrderPaymentMovement(relatedMovements, orderRef);
+  if (!paymentMov || isCobroSaldoFavorImputation(paymentMov.concepto)) {
+    return { changed: false, pendingAmount: roundCcMoney(Math.max(0, newT)), excessCredit: 0 };
+  }
+
+  const paidAmount = roundCcMoney(parseFloat(paymentMov.haber || 0));
+  if (paidAmount <= 0) {
+    return { changed: false, pendingAmount: roundCcMoney(Math.max(0, newT)), excessCredit: 0 };
+  }
+
+  const isCredit = isCreditoPedidoConcept(paymentMov.concepto, orderRef);
+  const isCobro = isCobroPedidoConcept(paymentMov.concepto, orderRef);
+  if (!isCredit && !isCobro) {
+    return { changed: false, pendingAmount: 0, excessCredit: 0 };
+  }
+
+  if (newT < paidAmount) {
+    const excess = roundCcMoney(paidAmount - newT);
+    await updateMovementAmount(paymentMov.id, { haber: newT });
+    await adjustClientSaldo(excess);
+    return { changed: true, pendingAmount: 0, excessCredit: excess };
+  }
+
+  return {
+    changed: false,
+    pendingAmount: roundCcMoney(Math.max(0, newT - paidAmount)),
+    excessCredit: 0,
+  };
+};
+
 /** Orden en UI de grupo por pedido: Compra → Cobro/Crédito → resto. */
 export const getOrderMovementDisplayRank = (concepto) => {
   const c = conceptText(concepto);

@@ -65,6 +65,7 @@ import {
   movementConcept,
   planSaldoFavorCobros,
   roundCcMoney,
+  syncOrderPaymentOnTotalChange,
 } from './ccMovements'
 
 const resolveLegacyShippingEstadoUpdate = (order, updates) => {
@@ -2684,6 +2685,96 @@ export const db = {
     return { success: true };
   },
 
+  syncOrderTotalFinancials: async (order, oldTotal, newTotal) => {
+    if (!order?.cliente_id || !hasPaymentMedio(order.medio_pago)) return;
+    if (isMedioPagadoEnCaja(order.medio_pago) || isMedioCtaCte(order.medio_pago)) return;
+
+    const businessId = getBusinessId();
+    const orderRef = getOrderMovementRef(order.id);
+    const parsedOld = roundCcMoney(oldTotal);
+    const parsedNew = roundCcMoney(newTotal);
+    if (parsedOld === parsedNew) return;
+
+    if (isSupabaseConfigured() && supabase) {
+      const { data: clientMovements } = await supabase
+        .from('gst_cliente_movimientos')
+        .select('id, concepto, debe, haber, fecha')
+        .eq('business_id', businessId)
+        .eq('cliente_id', order.cliente_id);
+
+      const relatedMovements = getOrderRelatedMovements(clientMovements, orderRef);
+
+      const adjustClientSaldo = async (delta) => {
+        const { data: client } = await supabase
+          .from('gst_clientes')
+          .select('saldo')
+          .eq('id', order.cliente_id)
+          .eq('business_id', businessId)
+          .maybeSingle();
+        if (!client) return;
+        const newSaldo = parseFloat(client.saldo || 0) + parseFloat(delta);
+        await supabase
+          .from('gst_clientes')
+          .update({ saldo: newSaldo })
+          .eq('id', order.cliente_id)
+          .eq('business_id', businessId);
+      };
+
+      const updateMovementAmount = async (movementId, { haber }) => {
+        await supabase
+          .from('gst_cliente_movimientos')
+          .update({ haber })
+          .eq('id', movementId)
+          .eq('business_id', businessId);
+      };
+
+      await syncOrderPaymentOnTotalChange({
+        orderRef,
+        oldTotal: parsedOld,
+        newTotal: parsedNew,
+        relatedMovements,
+        updateMovementAmount,
+        adjustClientSaldo,
+      });
+      return;
+    }
+
+    const storedMovs = localStorage.getItem('mock_movimientos');
+    const storedClientes = localStorage.getItem('mock_clientes');
+    let movements = storedMovs ? JSON.parse(storedMovs) : [];
+    let clientes = storedClientes ? JSON.parse(storedClientes) : [];
+    const relatedMovements = getOrderRelatedMovements(
+      movements.filter((m) => m.cliente_id === order.cliente_id),
+      orderRef
+    );
+
+    const adjustClientSaldo = async (delta) => {
+      clientes = clientes.map((c) => (
+        c.id === order.cliente_id
+          ? { ...c, saldo: parseFloat(c.saldo || 0) + parseFloat(delta) }
+          : c
+      ));
+    };
+
+    const updateMovementAmount = async (movementId, { haber }) => {
+      movements = movements.map((m) => (
+        m.id === movementId ? { ...m, haber } : m
+      ));
+    };
+
+    await syncOrderPaymentOnTotalChange({
+      orderRef,
+      oldTotal: parsedOld,
+      newTotal: parsedNew,
+      relatedMovements,
+      updateMovementAmount,
+      adjustClientSaldo,
+    });
+
+    localStorage.setItem('mock_movimientos', JSON.stringify(movements));
+    localStorage.setItem('mock_clientes', JSON.stringify(clientes));
+  },
+
   updatePedido: async (pedidoId, { items, total, cliente_id }) => {
     const businessId = getBusinessId();
     const parsedTotal = parseFloat(total);
@@ -2731,6 +2822,7 @@ export const db = {
           throw new Error('Solo se pueden editar pedidos en estado Pendiente.');
         }
 
+        const oldTotal = parseFloat(order.total || 0);
         const oldItems = order.gst_pedido_items || [];
         const { error: updateErr } = await supabase
           .from('gst_pedidos')
@@ -2765,6 +2857,8 @@ export const db = {
           await adjustProductStock(item.producto, -parseFloat(item.cantidad));
         }
 
+        await db.syncOrderTotalFinancials(order, oldTotal, parsedTotal);
+
         return { success: true };
       } catch (err) {
         console.warn('Supabase updatePedido error, falling back to mock:', err);
@@ -2791,6 +2885,7 @@ export const db = {
     }
 
     const oldItems = order.items || [];
+    const oldTotal = parseFloat(order.total || 0);
 
     mockProds = mockProds.map((p) => {
       const oldItem = oldItems.find((it) => it.producto === p.nombre);
@@ -2808,6 +2903,8 @@ export const db = {
       items: normalizedItems,
     };
     localStorage.setItem('mock_pedidos', JSON.stringify(orders));
+
+    await db.syncOrderTotalFinancials(order, oldTotal, parsedTotal);
 
     return { success: true };
   },

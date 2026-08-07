@@ -184,6 +184,11 @@ const isOrderFinalizado = (order) => {
   return est === 'finalizado' || est === 'cobrado';
 };
 
+const canEditPendingOrder = (order) => {
+  if (!order || isOrderCancelled(order) || isOrderFinalizado(order)) return false;
+  return getOrderShippingEstadoLower(order) === 'pendiente';
+};
+
 const getOrderCobroEstado = (order) => {
   if (!order || isOrderCancelled(order)) return null;
   if (!hasPaymentMedio(order.medio_pago)) return 'PENDIENTE';
@@ -5079,7 +5084,7 @@ function Clientes({ navigate, profile, accentColor }) {
                     >
                       Total {orderSortField === 'total' && (orderSortAsc ? '▴' : '▾')}
                     </th>
-                    <th style={{ padding: '12px', textAlign: 'center', width: '210px' }}>Ticket</th>
+                    <th style={{ padding: '12px', textAlign: 'center', width: '260px' }}>Ticket</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -5260,6 +5265,30 @@ function Clientes({ navigate, profile, accentColor }) {
                             >
                               <i className="bi bi-printer"></i> Comanda
                             </button>
+
+                            {canEditPendingOrder(order) && (
+                              <button
+                                type="button"
+                                className="btn-new-task"
+                                style={{
+                                  padding: '4px 8px',
+                                  fontSize: '0.75rem',
+                                  backgroundColor: 'transparent',
+                                  color: '#f59e0b',
+                                  border: '1px solid #f59e0b',
+                                  borderRadius: '6px',
+                                  cursor: 'pointer',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  margin: 0
+                                }}
+                                onClick={() => handleOpenEditOrder(order)}
+                                title="Editar ítems del pedido"
+                              >
+                                <i className="bi bi-pencil"></i> Editar
+                              </button>
+                            )}
 
                             {canCobrarOrder(order) && (
                               <button
@@ -6406,6 +6435,23 @@ function Clientes({ navigate, profile, accentColor }) {
               </button>
             </div>
             <div className="modal-body-scroll">
+              {editingOrder.medio_pago && !isMedioCtaCte(editingOrder.medio_pago) && (
+                <div
+                  style={{
+                    marginBottom: '16px',
+                    padding: '10px 12px',
+                    borderRadius: '8px',
+                    backgroundColor: '#fffbeb',
+                    border: '1px solid #fcd34d',
+                    fontSize: '0.82rem',
+                    color: '#92400e',
+                  }}
+                >
+                  <i className="bi bi-info-circle me-1"></i>
+                  Este pedido ya tiene cobro registrado ({editingOrder.medio_pago}).
+                  Si bajás el total, el excedente queda como saldo a favor; si lo subís, la diferencia queda pendiente al finalizar.
+                </div>
+              )}
               <div style={{ marginBottom: '16px' }}>
                 <label className="form-label" style={{ fontSize: '0.85rem', fontWeight: '700' }}>Ítems del pedido</label>
                 {editOrderItems.length > 0 ? (
