@@ -940,6 +940,10 @@ function Clientes({ navigate, profile, accentColor }) {
   // Bulk Modals
   const [bulkRepartidorModal, setBulkRepartidorModal] = useState(false);
   const [bulkRepartidorName, setBulkRepartidorName] = useState('');
+  const [bulkDeliveryModal, setBulkDeliveryModal] = useState(false);
+  const [bulkDeliveryAddresses, setBulkDeliveryAddresses] = useState({});
+  const [bulkDeliveryAddressOptions, setBulkDeliveryAddressOptions] = useState({});
+  const [bulkDeliveryLoading, setBulkDeliveryLoading] = useState(false);
   const [bulkPaymentModal, setBulkPaymentModal] = useState(false);
   const [bulkOrdersPayments, setBulkOrdersPayments] = useState({}); // orderId -> paymentMethod mapping
   const [bulkOrdersCajas, setBulkOrdersCajas] = useState({});
@@ -3638,6 +3642,93 @@ function Clientes({ navigate, profile, accentColor }) {
     setBulkRepartidorName('');
   };
 
+  const openBulkConvertToDeliveryModal = async () => {
+    const localOrders = selectedOrderIds
+      .map((id) => orders.find((o) => o.id === id))
+      .filter((order) => order && !order.con_envio);
+
+    if (localOrders.length === 0) {
+      alert('Seleccioná pedidos locales para cambiar a reparto.');
+      return;
+    }
+
+    setBulkDeliveryLoading(true);
+    try {
+      const optionsMap = {};
+      const initialAddresses = {};
+
+      const clientIds = [...new Set(localOrders.map((order) => order.cliente_id))];
+      await Promise.all(clientIds.map(async (clientId) => {
+        const addrs = await db.getDirecciones(clientId);
+        optionsMap[clientId] = addrs || [];
+      }));
+
+      localOrders.forEach((order) => {
+        const client = clientes.find((c) => c.id === order.cliente_id);
+        const clientAddrs = optionsMap[order.cliente_id] || [];
+        const defaultAddr = order.direccion_envio
+          || client?.direccion_predeterminada
+          || clientAddrs[0]?.direccion
+          || '';
+        initialAddresses[order.id] = defaultAddr;
+      });
+
+      setBulkDeliveryAddressOptions(optionsMap);
+      setBulkDeliveryAddresses(initialAddresses);
+      setBulkDeliveryModal(true);
+    } catch (err) {
+      console.error(err);
+      alert('No se pudieron cargar las direcciones del cliente.');
+    } finally {
+      setBulkDeliveryLoading(false);
+    }
+  };
+
+  const handleBulkConvertToDeliveryConfirm = async (e) => {
+    e.preventDefault();
+
+    const localOrderIds = selectedOrderIds.filter((id) => {
+      const order = orders.find((o) => o.id === id);
+      return order && !order.con_envio;
+    });
+
+    for (const id of localOrderIds) {
+      const address = (bulkDeliveryAddresses[id] || '').trim();
+      if (!address) {
+        alert('Completá la dirección de envío para todos los pedidos.');
+        return;
+      }
+    }
+
+    setBulkDeliveryModal(false);
+    setLoadingSubmit(true);
+
+    try {
+      for (const id of localOrderIds) {
+        const res = await db.updatePedidosStatus([id], {
+          con_envio: true,
+          estado: 'Pendiente',
+          direccion_envio: bulkDeliveryAddresses[id].trim(),
+        });
+        if (!res.success) {
+          alert(res.error || 'No se pudo cambiar el pedido a reparto.');
+          return;
+        }
+      }
+
+      setSelectedOrderIds([]);
+      setBulkDeliveryAddresses({});
+      await loadOrders();
+      const cl = await db.getClientes();
+      setClientes(cl);
+    } catch (err) {
+      console.error(err);
+      alert('Error al cambiar pedidos a reparto.');
+    } finally {
+      setLoadingSubmit(false);
+    }
+  };
+
   const handleBulkPaymentConfirm = async (e) => {
     e.preventDefault();
     setBulkPaymentModal(false);
@@ -4981,7 +5072,8 @@ function Clientes({ navigate, profile, accentColor }) {
                       type="button" 
                       className="btn-new-task" 
                       style={{ backgroundColor: '#3b82f6' }}
-                      onClick={() => applyBulkStatus({ con_envio: true, estado: 'Pendiente' })}
+                      disabled={bulkDeliveryLoading}
+                      onClick={openBulkConvertToDeliveryModal}
                     >
                       <i className="bi bi-truck me-1"></i> Cambiar a Reparto
                     </button>
@@ -5792,6 +5884,117 @@ function Clientes({ navigate, profile, accentColor }) {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: LOCAL → REPARTO (dirección) */}
+      {bulkDeliveryModal && (
+        <div className="modal-overlay">
+          <div className="modal-content-card" style={{ maxWidth: '640px' }}>
+            <div className="modal-header" style={{ backgroundColor: '#3b82f6' }}>
+              <h5 className="modal-title">
+                <i className="bi bi-truck me-2"></i>Dirección de reparto
+              </h5>
+              <button
+                className="modal-close-btn"
+                onClick={() => {
+                  setBulkDeliveryModal(false);
+                  setBulkDeliveryAddresses({});
+                }}
+              >
+                <i className="bi bi-x-lg"></i>
+              </button>
+            </div>
+            <div className="modal-body">
+              <form onSubmit={handleBulkConvertToDeliveryConfirm}>
+                <div className="alert-box" style={{ backgroundColor: '#eff6ff', borderColor: '#bfdbfe', color: '#1e40af', fontSize: '0.82rem', marginBottom: '15px' }}>
+                  <i className="bi bi-info-circle-fill"></i>
+                  <div>Indicá la dirección de entrega para cada pedido que pasa de local a reparto.</div>
+                </div>
+
+                <div style={{ maxHeight: '320px', overflowY: 'auto', marginBottom: '15px', paddingRight: '5px' }}>
+                  {selectedOrderIds.map((id) => {
+                    const order = orders.find((o) => o.id === id);
+                    if (!order || order.con_envio) return null;
+                    const addressOptions = bulkDeliveryAddressOptions[order.cliente_id] || [];
+
+                    return (
+                      <div key={id} style={{ padding: '12px 0', borderBottom: '1px solid var(--border-color)' }}>
+                        <div style={{ fontWeight: '600', fontSize: '0.9rem', color: 'var(--text-dark)' }}>
+                          {order.cliente_nombre}
+                        </div>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                          Total: <strong>$ {new Intl.NumberFormat('es-AR', { minimumFractionDigits: 2 }).format(order.total)}</strong>
+                        </div>
+                        {addressOptions.length > 0 && (
+                          <div className="form-group" style={{ marginBottom: '8px' }}>
+                            <label className="small text-muted mb-1">Direcciones del cliente</label>
+                            <select
+                              className="form-select"
+                              style={{ padding: '6px 10px', fontSize: '0.85rem' }}
+                              value={
+                                addressOptions.some((addr) => addr.direccion === bulkDeliveryAddresses[id])
+                                  ? bulkDeliveryAddresses[id]
+                                  : ''
+                              }
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                if (!val) return;
+                                setBulkDeliveryAddresses((prev) => ({ ...prev, [id]: val }));
+                              }}
+                            >
+                              <option value="">Seleccionar del listado...</option>
+                              {addressOptions.map((addr) => (
+                                <option key={addr.id} value={addr.direccion}>
+                                  {cleanAddressText(addr.direccion)}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+                        <div className="form-group" style={{ marginBottom: 0 }}>
+                          <label className="small text-muted mb-1">
+                            {addressOptions.length > 0 ? 'O escribir dirección' : 'Dirección de envío'}
+                          </label>
+                          <input
+                            type="text"
+                            className="form-input"
+                            style={{ margin: 0, fontSize: '0.85rem' }}
+                            placeholder="Calle, número, localidad..."
+                            value={bulkDeliveryAddresses[id] || ''}
+                            onChange={(e) => setBulkDeliveryAddresses((prev) => ({ ...prev, [id]: e.target.value }))}
+                            required
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button
+                    type="button"
+                    className="btn-submit"
+                    style={{ backgroundColor: '#6b7280', margin: 0 }}
+                    onClick={() => {
+                      setBulkDeliveryModal(false);
+                      setBulkDeliveryAddresses({});
+                    }}
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn-submit"
+                    style={{ backgroundColor: '#3b82f6', margin: 0, flex: 1 }}
+                    disabled={loadingSubmit}
+                  >
+                    {loadingSubmit ? 'Guardando...' : 'Confirmar reparto'}
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
         </div>
       )}

@@ -3111,11 +3111,25 @@ export const db = {
         if (effectiveUpdates.turno_caja !== undefined) fieldsToUpdate.turno_caja = effectiveUpdates.turno_caja;
         if (effectiveUpdates.motivo_cancelacion !== undefined) fieldsToUpdate.motivo_cancelacion = effectiveUpdates.motivo_cancelacion;
         if (effectiveUpdates.con_envio !== undefined) {
-          fieldsToUpdate.con_envio = effectiveUpdates.con_envio;
-          if (effectiveUpdates.con_envio === false) {
+          if (effectiveUpdates.con_envio === true) {
+            const deliveryAddress = String(
+              effectiveUpdates.direccion_envio ?? order.direccion_envio ?? ''
+            ).trim();
+            if (!deliveryAddress) {
+              updateErrors.push(
+                `Pedido ${order.cliente_nombre || String(id).substring(0, 8)}: indicá la dirección de envío.`
+              );
+              continue;
+            }
+            fieldsToUpdate.con_envio = true;
+            fieldsToUpdate.direccion_envio = deliveryAddress;
+          } else {
+            fieldsToUpdate.con_envio = false;
             fieldsToUpdate.direccion_envio = null;
             fieldsToUpdate.repartidor = null;
           }
+        } else if (effectiveUpdates.direccion_envio !== undefined) {
+          fieldsToUpdate.direccion_envio = effectiveUpdates.direccion_envio;
         }
         if (effectiveUpdates.cae !== undefined) fieldsToUpdate.cae = effectiveUpdates.cae;
         if (effectiveUpdates.cae_vencimiento !== undefined) fieldsToUpdate.cae_vencimiento = effectiveUpdates.cae_vencimiento;
@@ -3188,6 +3202,22 @@ export const db = {
           success: false,
           error: 'No podés finalizar pedidos sin medio de pago asignado.',
         };
+      }
+    }
+
+    if (updates.con_envio === true) {
+      for (const id of ids) {
+        const order = orders.find((o) => o.id === id);
+        if (!order || order.con_envio) continue;
+        const deliveryAddress = String(
+          updates.direccion_envio ?? order.direccion_envio ?? ''
+        ).trim();
+        if (!deliveryAddress) {
+          return {
+            success: false,
+            error: `Pedido ${order.cliente_nombre || String(id).substring(0, 8)}: indicá la dirección de envío.`,
+          };
+        }
       }
     }
 
@@ -3358,11 +3388,19 @@ export const db = {
         if (effectiveUpdates.turno_caja !== undefined) updatedOrder.turno_caja = effectiveUpdates.turno_caja;
         if (effectiveUpdates.motivo_cancelacion !== undefined) updatedOrder.motivo_cancelacion = effectiveUpdates.motivo_cancelacion;
         if (effectiveUpdates.con_envio !== undefined) {
-          updatedOrder.con_envio = effectiveUpdates.con_envio;
-          if (effectiveUpdates.con_envio === false) {
+          if (effectiveUpdates.con_envio === true) {
+            const deliveryAddress = String(
+              effectiveUpdates.direccion_envio ?? order.direccion_envio ?? ''
+            ).trim();
+            updatedOrder.con_envio = true;
+            updatedOrder.direccion_envio = deliveryAddress;
+          } else {
+            updatedOrder.con_envio = false;
             updatedOrder.direccion_envio = null;
             updatedOrder.repartidor = null;
           }
+        } else if (effectiveUpdates.direccion_envio !== undefined) {
+          updatedOrder.direccion_envio = effectiveUpdates.direccion_envio;
         }
         if (effectiveUpdates.cae !== undefined) updatedOrder.cae = effectiveUpdates.cae;
         if (effectiveUpdates.cae_vencimiento !== undefined) updatedOrder.cae_vencimiento = effectiveUpdates.cae_vencimiento;
