@@ -2376,13 +2376,7 @@ function Clientes({ navigate, profile, accentColor }) {
   };
 
   const handleRemoveItem = (itemId) => {
-    setOrderItems((prev) => {
-      const target = prev.find((item) => item.id === itemId);
-      if (target && isDeliveryItem(target)) {
-        setConEnvio(false);
-      }
-      return prev.filter((item) => item.id !== itemId);
-    });
+    setOrderItems((prev) => prev.filter((item) => item.id !== itemId));
   };
 
   const handleConEnvioChange = (checked) => {
