@@ -47,6 +47,8 @@ import {
   normalizePedidosCajaSessions,
   readLegacyPedidosCajaSessionsFromLocalStorage,
   sessionsHaveOpenCaja,
+  hasStoredPedidosCajaSessions,
+  emptyPedidosCajaSessions,
 } from './pedidosCajaSession'
 import {
   NOTIFICATION_EVENTS,
@@ -1558,24 +1560,28 @@ export const db = {
 
   getPedidosCajaSessions: async () => {
     let stored = null;
+    let hasRemoteConfig = false;
 
     if (isSupabaseConfigured() && supabase) {
       try {
         stored = await getBusinessConfig(BUSINESS_CONFIG.PEDIDOS_CAJA_SESSIONS);
+        hasRemoteConfig = hasStoredPedidosCajaSessions(stored);
       } catch (err) {
         console.warn('Supabase getPedidosCajaSessions failed:', err);
       }
     }
 
-    let normalized = normalizePedidosCajaSessions(stored);
-
-    if (!sessionsHaveOpenCaja(normalized)) {
+    let normalized;
+    if (hasRemoteConfig) {
+      // Fuente de verdad: remoto (incluso si todas las cajas están cerradas).
+      normalized = normalizePedidosCajaSessions(stored);
+    } else {
       const legacy = readLegacyPedidosCajaSessionsFromLocalStorage();
-      if (sessionsHaveOpenCaja(legacy)) {
-        normalized = legacy;
-        if (isSupabaseConfigured() && supabase) {
-          await saveOperationalConfig(BUSINESS_CONFIG.PEDIDOS_CAJA_SESSIONS, normalized);
-        }
+      normalized = sessionsHaveOpenCaja(legacy)
+        ? legacy
+        : emptyPedidosCajaSessions();
+      if (isSupabaseConfigured() && supabase) {
+        await saveOperationalConfig(BUSINESS_CONFIG.PEDIDOS_CAJA_SESSIONS, normalized);
       }
     }
 

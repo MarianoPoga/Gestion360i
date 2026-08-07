@@ -8,6 +8,9 @@ export const OPEN_CAJA_SESSION_KEYS = {
 
 export const PEDIDOS_CAJA_SESSIONS_STORAGE_KEY = 'pedidos_caja_sessions';
 
+export const hasStoredPedidosCajaSessions = (stored) =>
+  stored !== null && stored !== undefined && typeof stored === 'object';
+
 /** @deprecated use OPEN_CAJA_SESSION_KEYS.delivery */
 export const OPEN_DELIVERY_CAJA_KEY = OPEN_CAJA_SESSION_KEYS[PEDIDOS_CAJA_TIPOS.DELIVERY];
 /** @deprecated use OPEN_CAJA_SESSION_KEYS.local */
@@ -68,8 +71,7 @@ export const readLegacyPedidosCajaSessionsFromLocalStorage = () => {
   try {
     const cached = localStorage.getItem(PEDIDOS_CAJA_SESSIONS_STORAGE_KEY);
     if (cached) {
-      const parsed = normalizePedidosCajaSessions(JSON.parse(cached));
-      if (sessionsHaveOpenCaja(parsed)) return parsed;
+      return normalizePedidosCajaSessions(JSON.parse(cached));
     }
   } catch {
     // ignore invalid cache
