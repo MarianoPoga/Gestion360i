@@ -36,6 +36,7 @@ import {
   aggregatePedidosMediosForCierre,
   isFinalizedPedidoEstado,
   orderMatchesCajaTurno,
+  getUnclosedTurnosForDate,
 } from './cierreTurnos'
 import {
   normalizePedidosCajasConfig,
@@ -1070,6 +1071,23 @@ const resolveEmpleadoMovimientoIdentity = async (mov) => {
   return { empleadoId, empleadoNombre };
 };
 
+const LEGACY_DEMO_ADELANTO_IDS = new Set(['ad1', 'ad2']);
+
+const purgeLegacyDemoAdelantosLocal = () => {
+  try {
+    const raw = localStorage.getItem('mock_empleado_movimientos');
+    if (!raw) return;
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list)) return;
+    const filtered = list.filter((row) => !LEGACY_DEMO_ADELANTO_IDS.has(row.id));
+    if (filtered.length !== list.length) {
+      localStorage.setItem('mock_empleado_movimientos', JSON.stringify(filtered));
+    }
+  } catch {
+    // ignore invalid mock storage
+  }
+};
+
 const fetchAdelantosMovimientos = async (limitDays = 90) => {
   const businessId = getBusinessId();
   const limitDate = new Date();
@@ -1099,6 +1117,7 @@ const fetchAdelantosMovimientos = async (limitDays = 90) => {
     }
   }
 
+  purgeLegacyDemoAdelantosLocal();
   const stored = localStorage.getItem('mock_empleado_movimientos');
   if (!stored) return [];
   const list = JSON.parse(stored);
@@ -3981,15 +4000,9 @@ export const db = {
       }
     }
     // Mock
+    purgeLegacyDemoAdelantosLocal();
     const stored = localStorage.getItem('mock_empleado_movimientos');
-    if (!stored) {
-      const initial = [
-        { id: "ad1", fecha: new Date().toISOString(), empleado: "Juan", concepto: "Adelanto Efectivo", monto: 5000, caja_cierre: null },
-        { id: "ad2", fecha: new Date().toISOString(), empleado: "María", concepto: "Adelanto Mercaderia", monto: 3500, caja_cierre: null }
-      ];
-      localStorage.setItem('mock_empleado_movimientos', JSON.stringify(initial));
-      return initial;
-    }
+    if (!stored) return [];
     return JSON.parse(stored).filter(ad => !ad.caja_cierre);
   },
 
@@ -4716,6 +4729,16 @@ export const db = {
     }
     const stored = localStorage.getItem('mock_cierres') || '[]';
     return JSON.parse(stored).sort((a,b) => new Date(b.fecha) - new Date(a.fecha));
+  },
+
+  /** Turnos habilitados que aún no tienen cierre registrado hoy. */
+  getCajasAbiertasDelDia: async (eligibleTurnos = null, referenceDate = new Date()) => {
+    const allTurnos = await db.getCierreTurnoNames();
+    const turnos = Array.isArray(eligibleTurnos) && eligibleTurnos.length > 0
+      ? eligibleTurnos
+      : allTurnos;
+    const cierres = await db.getUltimosCierres();
+    return getUnclosedTurnosForDate(turnos, cierres, referenceDate);
   },
 
   // --- PRICE LISTS ---
@@ -5934,21 +5957,6 @@ export const db = {
       }
     }
     return { success: false, error: "Not configured" };
-  },
-
-  seedFictionalEmployees: async () => {
-    const fictional = [
-      { nombre: "Carlos Rodriguez", apodo: "Carlitos", cuit: "20-30444555-1", cbu: "0000003100012345678901", telefono: "11 4455-6677", direccion: "Av. Corrientes 1234" },
-      { nombre: "Maria Luz Garcia", apodo: "Mari", cuit: "27-32555666-2", cbu: "0000003100012345678902", telefono: "11 5566-7788", direccion: "Calle Falsa 123" },
-      { nombre: "Juan Pablo Perez", apodo: "Juampi", cuit: "20-28666777-3", cbu: "0000003100012345678903", telefono: "11 2233-4455", direccion: "Belgrano 456" },
-      { nombre: "Ana Laura Torres", apodo: "Ana", cuit: "23-35777888-4", cbu: "0000003100012345678904", telefono: "11 9988-7766", direccion: "Rivadavia 789" },
-      { nombre: "Diego Armando Gomez", apodo: "Dieguito", cuit: "20-10111222-5", cbu: "0000003100012345678905", telefono: "11 1122-3344", direccion: "Pueyrredon 321" }
-    ];
-
-    for (const emp of fictional) {
-      await db.saveEmpleado(emp);
-    }
-    return { success: true };
   },
 
   saveEmpleadoMovimiento: async (mov) => {

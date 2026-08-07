@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { db } from '../supabaseClient';
+import { hasModulePermission } from '../rolePermissions';
 import { MODULE_LABELS, DEFAULT_CAJA_FUERTE_NAME } from '../moduleLabels';
 import {
   ADELANTO_EFECTIVO,
@@ -10,7 +11,7 @@ import {
   resolveAdelantoConceptSelection,
 } from '../adelantoConcepts';
 
-function Adelantos({ navigate, modules, accentColor }) {
+function Adelantos({ navigate, modules, accentColor, profile }) {
   const isSameLocalDate = (isoString, localDateString) => {
     if (!isoString) return false;
     const d = new Date(isoString);
@@ -50,6 +51,12 @@ function Adelantos({ navigate, modules, accentColor }) {
   const [saveStatus, setSaveStatus] = useState(''); // 'saving' | 'success' | 'error'
   const [saveError, setSaveError] = useState('');
   const [shiftsAvailableState, setShiftsAvailableState] = useState([]);
+  const [rolePermissions, setRolePermissions] = useState(null);
+
+  const canViewEmployees = useMemo(
+    () => hasModulePermission(rolePermissions, profile, 'empleados', modules),
+    [rolePermissions, profile, modules]
+  );
 
   // Sorting state
   const [advancesSort, setAdvancesSort] = useState({ column: 'fecha', direction: 'desc' });
@@ -90,34 +97,48 @@ function Adelantos({ navigate, modules, accentColor }) {
       setConcepto(ADELANTO_EFECTIVO);
     }
 
-    const setupShifts = async () => {
-      const shifts = loadedConfig.cajas_posibles.length > 0 ? loadedConfig.cajas_posibles : await db.getCierreTurnoNames();
-      setShiftsAvailableState(shifts || []);
-      const loadedRendConfig = JSON.parse(localStorage.getItem('rendiciones_config') || `{"caja_nombre":"${DEFAULT_CAJA_FUERTE_NAME}","allow_adelantos":true,"allow_compras":true,"allow_pagos":true}`);
-      setRendConfig(loadedRendConfig);
-
-      if (shifts && shifts.length > 0) {
-        setPagoOrigenEmp(shifts[0]);
-      } else {
-        setPagoOrigenEmp(loadedRendConfig.allow_adelantos ? 'Rendición' : '');
-      }
-    };
-
-    setupShifts();
-    loadData();
+    loadData(loadedConfig);
+    db.getRolePermissions().then((perms) => {
+      if (perms) setRolePermissions(perms);
+    });
   }, []);
+
+  const setupOrigenFondos = async (adelantosConfig = config) => {
+    const allTurnos = await db.getCierreTurnoNames();
+    const eligibleTurnos = adelantosConfig.cajas_posibles?.length > 0
+      ? adelantosConfig.cajas_posibles
+      : allTurnos;
+    const openShifts = await db.getCajasAbiertasDelDia(eligibleTurnos);
+    setShiftsAvailableState(openShifts || []);
+
+    const loadedRendConfig = JSON.parse(
+      localStorage.getItem('rendiciones_config')
+      || `{"caja_nombre":"${DEFAULT_CAJA_FUERTE_NAME}","allow_adelantos":true,"allow_compras":true,"allow_pagos":true}`
+    );
+    setRendConfig(loadedRendConfig);
+
+    setPagoOrigenEmp((current) => {
+      if (current && openShifts.includes(current)) return current;
+      if (current === 'Rendición' && loadedRendConfig.allow_adelantos !== false) return current;
+      if (openShifts.length > 0) return openShifts[0];
+      if (loadedRendConfig.allow_adelantos !== false) return 'Rendición';
+      return '';
+    });
+  };
 
   useEffect(() => {
     setConcepto((current) => resolveAdelantoConceptSelection(current, config));
   }, [config.allow_dinero, config.allow_mercaderia]);
 
-  const loadData = async () => {
+  const loadData = async (adelantosConfig = config) => {
     setLoading(true);
     try {
       const [employeesData, allAdvances] = await Promise.all([
         db.getEmployees ? db.getEmployees() : db.getEmpleados(),
         db.getEmpleadoMovimientos(50)
       ]);
+
+      await setupOrigenFondos(adelantosConfig);
 
       const activeList = (employeesData || []).filter(
         (emp) => emp.is_active !== false && emp.activo !== false
@@ -271,7 +292,15 @@ function Adelantos({ navigate, modules, accentColor }) {
             <p className="text-muted small mb-0">Registro de {ADELANTO_EFECTIVO.toLowerCase()} o {ADELANTO_MERCADERIA.toLowerCase()}</p>
           </div>
           <div className="d-flex gap-2">
-            <button className="btn btn-outline-secondary btn-sm" onClick={() => navigate('employees')}>
+            <button
+              type="button"
+              className="btn btn-outline-secondary btn-sm"
+              disabled={!canViewEmployees}
+              title={canViewEmployees ? 'Abrir listado de empleados' : 'Tu rol no tiene permiso para ver Empleados'}
+              onClick={() => {
+                if (canViewEmployees) navigate('employees');
+              }}
+            >
               <i className="bi bi-people me-1"></i> Ver Empleados
             </button>
           </div>
@@ -325,7 +354,11 @@ function Adelantos({ navigate, modules, accentColor }) {
                   >
                     <option value="">Seleccionar...</option>
                     {shiftsAvailableState.map((s, i) => <option key={i} value={s}>{s}</option>)}
-                    {rendConfig.allow_adelantos && <option value="Rendición">Rendición (Caja Fuerte)</option>}
+                    {rendConfig.allow_adelantos !== false && (
+                      <option value="Rendición">
+                        {rendConfig.caja_nombre || DEFAULT_CAJA_FUERTE_NAME} (Rendición)
+                      </option>
+                    )}
                   </select>
                 </div>
               </div>

@@ -142,7 +142,7 @@ function App() {
           <Dashboard navigate={navigate} modules={modules} moduleColors={moduleColors} refreshModules={refreshModules} profile={profile} />
         );
       case 'employees':
-        return <Employees navigate={navigate} accentColor={getActiveModuleColor('employees')} />;
+        return <Employees navigate={navigate} accentColor={getActiveModuleColor('employees')} profile={profile} modules={modules} />;
       case 'providers':
         return <Providers navigate={navigate} accentColor={getActiveModuleColor('providers')} />;
       case 'results':
@@ -152,7 +152,7 @@ function App() {
       case 'compras':
         return <Compras navigate={navigate} refreshModules={refreshModules} modules={modules} navState={navState} accentColor={getActiveModuleColor('compras')} />;
       case 'adelantos':
-        return <Adelantos navigate={navigate} modules={modules} navState={navState} accentColor={getActiveModuleColor('adelantos')} />;
+        return <Adelantos navigate={navigate} modules={modules} navState={navState} accentColor={getActiveModuleColor('adelantos')} profile={profile} />;
       case 'pago-proveedores':
         return <Pagos navigate={navigate} modules={modules} navState={navState} accentColor={getActiveModuleColor('pago-proveedores')} />;
       case 'pago-impuestos':

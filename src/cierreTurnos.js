@@ -53,6 +53,36 @@ export const normalizeCierreTurnos = (raw) => {
 export const getCierreTurnoNames = (turnos) =>
   normalizeCierreTurnos(turnos).map((t) => t.name);
 
+export const toLocalDateString = (date = new Date()) => {
+  const d = date instanceof Date ? date : new Date(date);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+export const isSameLocalDate = (isoString, localDateString) => {
+  if (!isoString || !localDateString) return false;
+  const d = new Date(isoString);
+  return toLocalDateString(d) === localDateString;
+};
+
+export const getClosedTurnosForDate = (cierres, referenceDate = new Date()) => {
+  const targetDate = toLocalDateString(referenceDate);
+  return [...new Set(
+    (cierres || [])
+      .filter((cierre) => isSameLocalDate(cierre.fecha, targetDate))
+      .map((cierre) => String(cierre.turno || '').trim())
+      .filter(Boolean)
+  )];
+};
+
+export const getUnclosedTurnosForDate = (turnos, cierres, referenceDate = new Date()) => {
+  const eligible = (turnos || []).map((t) => String(t || '').trim()).filter(Boolean);
+  const closed = getClosedTurnosForDate(cierres, referenceDate);
+  return eligible.filter((turno) => !closed.includes(turno));
+};
+
 export const getTurnosForPedidoTipo = (turnos, pedidoTipo) =>
   normalizeCierreTurnos(turnos).filter((t) => (
     pedidoTipo === 'delivery' ? t.pedidosDelivery : t.pedidosLocal

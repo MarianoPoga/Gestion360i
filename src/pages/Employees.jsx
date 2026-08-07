@@ -1,16 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../supabaseClient';
 import {
   normalizeRolePermissions,
-  toggleMatrixPermission,
   updateRoleLabel,
-  getEnabledPermissionModules,
   ROLE_KEYS,
   DEFAULT_ROLE_LABELS,
+  hasModulePermission,
 } from '../rolePermissions';
 import { MODULE_LABELS } from '../moduleLabels';
 
-function Employees() {
+function Employees({ navigate, accentColor, profile, modules = {} }) {
   const [view, setView] = useState('list'); // 'list', 'detalle', 'edit'
   const [employees, setEmployees] = useState([]);
   const [profiles, setProfiles] = useState([]);
@@ -32,10 +31,32 @@ function Employees() {
   const [accessForm, setAccessForm] = useState({ email: '', password: '', role: 'cajero', assigned_cajas: [] });
   const [roleOptions, setRoleOptions] = useState([]);
   const [roleLabels, setRoleLabels] = useState({ ...DEFAULT_ROLE_LABELS });
+  const [rolePermissions, setRolePermissions] = useState(null);
+  const [accessChecked, setAccessChecked] = useState(false);
+
+  const canAccessEmployees = useMemo(
+    () => hasModulePermission(rolePermissions, profile, 'empleados', modules),
+    [rolePermissions, profile, modules]
+  );
 
   useEffect(() => {
-    loadAllData();
+    db.getRolePermissions().then((perms) => {
+      if (perms) setRolePermissions(perms);
+      setAccessChecked(true);
+    });
   }, []);
+
+  useEffect(() => {
+    if (!accessChecked) return;
+    if (!canAccessEmployees) {
+      navigate('adelantos');
+    }
+  }, [accessChecked, canAccessEmployees, navigate]);
+
+  useEffect(() => {
+    if (!canAccessEmployees) return;
+    loadAllData();
+  }, [canAccessEmployees]);
 
   const loadAllData = async () => {
     setListLoading(true);
@@ -187,28 +208,6 @@ function Employees() {
     setDetailLoading(false);
   };
 
-  const handleSeed = async () => {
-    if (window.confirm("¿Importar los 5 empleados de Empresa360i?")) {
-      setDetailLoading(true);
-      const fictional = [
-        { nombre: "Carlos Rodriguez", apodo: "Carlitos", cuit: "20-30444555-1", cbu: "0000003100012345678901", telefono: "11 4455-6677", direccion: "Av. Corrientes 1234" },
-        { nombre: "Maria Luz Garcia", apodo: "Mari", cuit: "27-32555666-2", cbu: "0000003100012345678902", telefono: "11 5566-7788", direccion: "Calle Falsa 123" },
-        { nombre: "Juan Pablo Perez", apodo: "Juampi", cuit: "20-28666777-3", cbu: "0000003100012345678903", telefono: "11 2233-4455", direccion: "Belgrano 456" },
-        { nombre: "Ana Laura Torres", apodo: "Ana", cuit: "23-35777888-4", cbu: "0000003100012345678904", telefono: "11 9988-7766", direccion: "Rivadavia 789" },
-        { nombre: "Diego Armando Gomez", apodo: "Dieguito", cuit: "20-10111222-5", cbu: "0000003100012345678905", telefono: "11 1122-3344", direccion: "Pueyrredon 321" }
-      ];
-
-      for (const emp of fictional) {
-        // Only add if not already there by name
-        if (!employees.some(e => e.nombre === emp.nombre)) {
-          await db.saveEmpleado(emp);
-        }
-      }
-      await loadAllData();
-      setDetailLoading(false);
-    }
-  };
-
   const formatCurrency = (amount) => {
     return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(amount);
   };
@@ -216,6 +215,10 @@ function Employees() {
   const calculateBalance = (movs) => {
     return movs.reduce((acc, curr) => acc + (parseFloat(curr.haber || 0) - parseFloat(curr.debe || 0)), 0);
   };
+
+  if (!accessChecked || !canAccessEmployees) {
+    return <div className="p-5 text-center"><div className="spinner-border text-primary"></div></div>;
+  }
 
   if (listLoading && view === 'list') {
     return <div className="p-5 text-center"><div className="spinner-border text-primary"></div></div>;
@@ -240,21 +243,16 @@ function Employees() {
             </button>
           )}
           {view === 'list' && (
-            <>
-              <button className="btn-new-task" style={{ backgroundColor: 'transparent', color: '#6610f2', border: '1px solid #6610f2' }} onClick={handleSeed}>
-                <i className="bi bi-magic me-1"></i> Demo
-              </button>
-              <button 
-                className="btn-new-task" 
-                style={{ backgroundColor: '#6610f2', color: 'white' }}
-                onClick={() => { 
-                  setEmployeeForm({ nombre: '', apodo: '', cuit: '', cbu: '', telefono: '', direccion: '', is_active: true }); 
-                  setView('edit'); 
-                }}
-              >
-                <i className="bi bi-plus-lg me-1"></i> Nuevo Empleado
-              </button>
-            </>
+            <button 
+              className="btn-new-task" 
+              style={{ backgroundColor: '#6610f2', color: 'white' }}
+              onClick={() => { 
+                setEmployeeForm({ nombre: '', apodo: '', cuit: '', cbu: '', telefono: '', direccion: '', is_active: true }); 
+                setView('edit'); 
+              }}
+            >
+              <i className="bi bi-plus-lg me-1"></i> Nuevo Empleado
+            </button>
           )}
         </div>
       </div>
